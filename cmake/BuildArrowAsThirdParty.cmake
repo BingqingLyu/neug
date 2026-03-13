@@ -52,6 +52,9 @@ function(build_arrow_as_third_party)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=uninitialized")
     endif()
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    # Thrift (Arrow-parquet dependency) emits these warnings
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=unused-function")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=stringop-truncation")
 
     set(ARROW_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(ARROW_BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -72,13 +75,23 @@ function(build_arrow_as_third_party)
     if(NOT DEFINED ARROW_JSON)
         set(ARROW_JSON OFF CACHE BOOL "" FORCE)
     endif()
-    set(ARROW_PARQUET OFF CACHE BOOL "" FORCE)
+    # ARROW_PARQUET is set by the main CMakeLists.txt if parquet extension is enabled
+    if(NOT DEFINED ARROW_PARQUET)
+        set(ARROW_PARQUET OFF CACHE BOOL "" FORCE)
+    endif()
+    # Enable Snappy and Zlib for Parquet if needed, otherwise disable them
+    if(ARROW_PARQUET)
+        set(ARROW_WITH_SNAPPY ON CACHE BOOL "" FORCE)
+        set(ARROW_WITH_ZLIB ON CACHE BOOL "" FORCE)
+    else()
+        set(ARROW_WITH_SNAPPY OFF CACHE BOOL "" FORCE)
+        set(ARROW_WITH_ZLIB OFF CACHE BOOL "" FORCE)
+    endif()
     set(ARROW_PLASMA OFF CACHE BOOL "" FORCE)
     set(ARROW_PYTHON OFF CACHE BOOL "" FORCE)
     set(ARROW_S3 OFF CACHE BOOL "" FORCE)
     set(ARROW_WITH_BZ2 OFF CACHE BOOL "" FORCE)
     set(ARROW_WITH_LZ4 OFF CACHE BOOL "" FORCE)
-    set(ARROW_WITH_SNAPPY OFF CACHE BOOL "" FORCE)
     set(ARROW_WITH_ZSTD OFF CACHE BOOL "" FORCE)
     set(ARROW_WITH_BROTLI OFF CACHE BOOL "" FORCE)
     set(ARROW_IPC ON CACHE BOOL "" FORCE)
@@ -104,7 +117,6 @@ function(build_arrow_as_third_party)
         # Point Arrow to use the project's RapidJSON
         set(RapidJSON_ROOT "${CMAKE_SOURCE_DIR}/third_party/rapidjson" CACHE PATH "" FORCE)
     endif()
-    set(ARROW_WITH_ZLIB OFF CACHE BOOL "" FORCE)
     set(ARROW_ENABLE_THREADING ON CACHE BOOL "" FORCE)
 
     # Save original flags and set flags to suppress warnings for Arrow build
@@ -214,6 +226,33 @@ function(build_arrow_as_third_party)
         include_directories(${arrow_SOURCE_DIR}/cpp/src
             ${arrow_BINARY_DIR}/src)
 
+        # Try different possible Arrow Parquet target names
+        if(TARGET Arrow::parquet_static)
+            message(STATUS "Found Arrow::parquet_static target")
+            set(ARROW_PARQUET_LIB Arrow::parquet_static)
+        elseif(TARGET arrow_parquet_static)
+            message(STATUS "Found arrow_parquet_static target")
+            set(ARROW_PARQUET_LIB arrow_parquet_static)
+        elseif(TARGET parquet_static)
+            message(STATUS "Found parquet_static target")
+            set(ARROW_PARQUET_LIB parquet_static)
+        elseif(TARGET Arrow::parquet)
+            message(STATUS "Found Arrow::parquet target (using as fallback)")
+            set(ARROW_PARQUET_LIB Arrow::parquet)
+        elseif(TARGET parquet)
+            message(STATUS "Found parquet target (using as fallback)")
+            set(ARROW_PARQUET_LIB parquet)
+        else()
+            message(WARNING "Arrow parquet target not found. Parquet symbols may be unresolved.")
+            set(ARROW_PARQUET_LIB "")
+        endif()
+
+        if(ARROW_PARQUET_LIB)
+            list(APPEND ARROW_LIB ${ARROW_PARQUET_LIB})
+            set(ARROW_LIB ${ARROW_LIB} PARENT_SCOPE)
+            set(ARROW_PARQUET_LIB ${ARROW_PARQUET_LIB} PARENT_SCOPE)
+        endif()
+
         # Set additional Arrow variables for compatibility
         set(ARROW_FOUND TRUE PARENT_SCOPE)
         set(ARROW_LIBRARIES ${ARROW_LIB} PARENT_SCOPE)
@@ -251,6 +290,21 @@ function(build_arrow_as_third_party)
             FILES_MATCHING PATTERN "*.h"
             PATTERN "test" EXCLUDE
             PATTERN "testing" EXCLUDE)
+
+        # Install Parquet headers if Parquet is enabled
+        if(ARROW_PARQUET)
+            install(DIRECTORY ${arrow_SOURCE_DIR}/cpp/src/parquet
+                DESTINATION include
+                FILES_MATCHING PATTERN "*.h"
+                PATTERN "test" EXCLUDE
+                PATTERN "testing" EXCLUDE)
+
+            install(DIRECTORY ${arrow_BINARY_DIR}/src/parquet
+                DESTINATION include
+                FILES_MATCHING PATTERN "*.h"
+                PATTERN "test" EXCLUDE
+                PATTERN "testing" EXCLUDE)
+        endif()
         
     else()
         # list(APPEND ICEBERG_SYSTEM_DEPENDENCIES Arrow)

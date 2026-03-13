@@ -72,6 +72,9 @@ JSON_ARRAY_FILE = os.path.join(
 JSONL_FILE = os.path.join(
     REPO_ROOT, "example_dataset", "tinysnb", "json", "vPerson.jsonl"
 )
+PARQUET_FILE = os.path.join(
+    REPO_ROOT, "example_dataset", "tinysnb", "parquet", "vPerson.parquet"
+)
 
 
 def run_statement(conn, desc, statement):
@@ -186,6 +189,68 @@ def run_jsonl_tests(conn_json):
         f'LOAD FROM "{JSONL_FILE}" (newline_delimited=true) RETURN fName, age;',
         _projection,
     )
+
+
+def run_parquet_extension_suite(db_parquet, conn_parquet, db_path_parquet):
+    statements = [
+        ("INSTALL PARQUET succeeded", "INSTALL PARQUET;"),
+        ("LOAD PARQUET succeeded", "LOAD PARQUET;"),
+    ]
+
+    for desc, stmt in statements:
+        run_statement(conn_parquet, desc, stmt)
+
+    if not os.path.isfile(PARQUET_FILE):
+        fail(f"Parquet file not found: {PARQUET_FILE}")
+    else:
+
+        def _load_all(rows):
+            print(f"       Parquet: loaded {len(rows)} rows from vPerson.parquet")
+            if rows:
+                print(f"       First row sample: {rows[0]}")
+            assert len(rows) > 0, "Expected at least 1 row"
+            return f"LOAD FROM Parquet file returned {len(rows)} rows"
+
+        run_query_with_handler(
+            conn_parquet,
+            "LOAD FROM Parquet file",
+            f'LOAD FROM "{PARQUET_FILE}" RETURN *;',
+            _load_all,
+            print_traceback=True,
+        )
+
+        def _projection(rows):
+            print(f"       Column projection (fName, age): {len(rows)} rows")
+            if rows:
+                print(f"       Sample: {rows[0]}")
+            assert len(rows) > 0, "Expected at least 1 row"
+            assert len(rows[0]) == 2, "Should return only 2 columns"
+            return "Parquet column projection"
+
+        run_query_with_handler(
+            conn_parquet,
+            "Parquet column projection",
+            f'LOAD FROM "{PARQUET_FILE}" RETURN fName, age;',
+            _projection,
+        )
+
+        def _filter(rows):
+            print(f"       WHERE age > 30: {len(rows)} rows")
+            for row in rows:
+                assert row[1] > 30, f"age {row[1]} should be > 30"
+            return f"Parquet WHERE filter returned {len(rows)} rows"
+
+        run_query_with_handler(
+            conn_parquet,
+            "Parquet WHERE filter (age > 30)",
+            f'LOAD FROM "{PARQUET_FILE}" WHERE age > 30 RETURN fName, age;',
+            _filter,
+        )
+
+    conn_parquet.close()
+    db_parquet.close()
+    ok("Closed Parquet extension test database")
+    shutil.rmtree(db_path_parquet, ignore_errors=True)
 
 
 def run_json_extension_suite(db_json, conn_json, db_path_json):
@@ -544,6 +609,24 @@ except Exception as e:
 
 if db_json is not None and conn_json is not None:
     run_json_extension_suite(db_json, conn_json, db_path_json)
+
+# ================================================================
+#  6. Extensions — Parquet Extension
+# ================================================================
+section("6. Extensions — Parquet Extension (Install / Load / Query)")
+
+conn_parquet = None
+db_path_parquet = tempfile.mkdtemp(prefix="neug_parquet_ext_")
+try:
+    db_parquet = neug.Database(db_path_parquet)
+    conn_parquet = db_parquet.connect()
+    ok(f"Created persistent database for Parquet extension test at {db_path_parquet}")
+except Exception as e:
+    fail("Create database for Parquet extension", e)
+    db_parquet = None
+
+if db_parquet is not None and conn_parquet is not None:
+    run_parquet_extension_suite(db_parquet, conn_parquet, db_path_parquet)
 
 # ================================================================
 #  Summary
