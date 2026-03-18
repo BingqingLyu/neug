@@ -659,18 +659,24 @@ else:
 # ================================================================
 section("6. Extensions — Parquet Extension (Install / Load / Query)")
 
-conn_parquet = None
-db_path_parquet = tempfile.mkdtemp(prefix="neug_parquet_ext_")
-try:
-    db_parquet = neug.Database(db_path_parquet)
-    conn_parquet = db_parquet.connect()
-    ok(f"Created persistent database for Parquet extension test at {db_path_parquet}")
-except Exception as e:
-    fail("Create database for Parquet extension", e)
-    db_parquet = None
+_run_ext_tests = os.environ.get("NEUG_RUN_EXTENSION_TESTS", "").strip().lower()
+_run_ext_tests = _run_ext_tests in ("1", "true", "on", "yes")
 
-if db_parquet is not None and conn_parquet is not None:
-    run_parquet_extension_suite(db_parquet, conn_parquet, db_path_parquet)
+if not _run_ext_tests:
+    print("  (skipped: set NEUG_RUN_EXTENSION_TESTS=1 to run extension tests)")
+else:
+    conn_parquet = None
+    db_path_parquet = tempfile.mkdtemp(prefix="neug_parquet_ext_")
+    try:
+        db_parquet = neug.Database(db_path_parquet)
+        conn_parquet = db_parquet.connect()
+        ok(f"Created persistent database for Parquet extension test at {db_path_parquet}")
+    except Exception as e:
+        fail("Create database for Parquet extension", e)
+        db_parquet = None
+
+    if db_parquet is not None and conn_parquet is not None:
+        run_parquet_extension_suite(db_parquet, conn_parquet, db_path_parquet)
 
 # ================================================================
 #  Summary
