@@ -36,17 +36,6 @@ extension_test = pytest.mark.skipif(
     not EXTENSION_TESTS_ENABLED,
     reason="Extension tests disabled by default; set NEUG_RUN_EXTENSION_TESTS=1 to enable.",
 )
-PARQUET_TESTS_ENABLED = os.environ.get("NEUG_RUN_PARQUET_TESTS", "").lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-parquet_test = pytest.mark.skipif(
-    not PARQUET_TESTS_ENABLED,
-    reason="Parquet tests disabled by default; set NEUG_RUN_PARQUET_TESTS=1 to enable.",
-)
-
 
 def get_tinysnb_dataset_path():
     """Get the path to tinysnb dataset CSV files."""
@@ -984,7 +973,7 @@ class TestLoadFrom:
             assert height > 1.0, f"height {height} should be > 1.0"
             assert isinstance(fname, str), "fName should be string"
 
-    @parquet_test
+    @extension_test
     def test_load_from_parquet_basic_return_all(self):
         """Test basic LOAD FROM Parquet with RETURN *."""
         # load vertex data
@@ -1031,7 +1020,7 @@ class TestLoadFrom:
         first_record = records[0]
         assert len(first_record) == 5, f"Expected 5 columns, got {len(first_record)}"
 
-    @parquet_test
+    @extension_test
     def test_load_from_parquet_return_specific_columns(self):
         """Test LOAD FROM Parquet with column projection."""
         parquet_path = os.path.join(self.tinysnb_path, "parquet", "vPerson.parquet")
@@ -1055,7 +1044,7 @@ class TestLoadFrom:
         assert isinstance(first_record[0], str), "fName should be string"
         assert isinstance(first_record[1], int), "age should be integer"
 
-    @parquet_test
+    @extension_test
     def test_load_from_parquet_with_where(self):
         """Test LOAD FROM Parquet with WHERE clause filtering (predicate pushdown)."""
         parquet_path = os.path.join(self.tinysnb_path, "parquet", "vPerson.parquet")
@@ -1081,7 +1070,7 @@ class TestLoadFrom:
             assert age > 30, f"Age {age} should be greater than 30"
             assert isinstance(fname, str), "fName should be string"
 
-    @parquet_test
+    @extension_test
     def test_load_from_parquet_with_multiple_where_conditions(self):
         """Test LOAD FROM Parquet with multiple WHERE conditions."""
         parquet_path = os.path.join(self.tinysnb_path, "parquet", "vPerson.parquet")
@@ -1109,7 +1098,7 @@ class TestLoadFrom:
             assert isinstance(fname, str), "fName should be string"
             assert isinstance(eye_sight, (int, float)), "eyeSight should be numeric"
 
-    @parquet_test
+    @extension_test
     def test_load_from_parquet_with_order_by(self):
         """Test LOAD FROM Parquet with ORDER BY clause."""
         parquet_path = os.path.join(self.tinysnb_path, "parquet", "vPerson.parquet")
@@ -1133,7 +1122,7 @@ class TestLoadFrom:
         ages = [record[1] for record in records]
         assert ages == sorted(ages), f"Ages should be sorted ascending: {ages}"
 
-    @parquet_test
+    @extension_test
     def test_load_from_parquet_with_complex_where_conditions(self):
         """Test LOAD FROM Parquet with complex WHERE conditions (age, eyeSight, height)."""
         parquet_path = os.path.join(self.tinysnb_path, "parquet", "vPerson.parquet")
@@ -1221,7 +1210,7 @@ class TestLoadFrom:
         assert rows[0][4] == -1234567890123456789  # i64_weight: INT64
         assert str(rows[0][5]) == "2023-05-17"  # datetime_weight: DATE
 
-    @parquet_test
+    @extension_test
     def test_load_from_comprehensive_graph_parquet(self):
         """Test LOAD FROM Parquet covers all NeuG-supported data types
         using example_dataset/comprehensive_graph/parquet/.
@@ -1627,7 +1616,7 @@ class TestCopyFrom:
         assert records[1][0] == 2 and records[1][2] == "Bob" and records[1][1] == 30
         assert records[2][0] == 3 and records[2][2] == "Carol" and records[2][1] == 45
 
-    @parquet_test
+    @extension_test
     def test_copy_from_node_parquet_with_column_remapping(self):
         parquet_path = os.path.join(self.tinysnb_path, "parquet", "vPerson.parquet")
         if not os.path.exists(parquet_path):
@@ -1670,7 +1659,7 @@ class TestCopyFrom:
         assert records[0][3] == 1, "Alice's gender should be 1"
         assert records[0][4] == 5.0, "Alice's eyeSight should be 5.0"
 
-    @parquet_test
+    @extension_test
     def test_copy_from_edge_parquet_with_column_remapping(self):
         """Test COPY FROM for edge table with column remapping using Parquet files."""
         person_parquet = os.path.join(self.tinysnb_path, "parquet", "vPerson.parquet")
@@ -1850,7 +1839,7 @@ class TestCopyFrom:
             "2023-05-17 00:00:00"
         )  # datetime_weight: TIMESTAMP
 
-    @parquet_test
+    @extension_test
     def test_copy_from_comprehensive_graph_parquet(self):
         """Test COPY FROM Parquet using comprehensive_graph node_a.parquet (node)
         and rel_a.parquet (edge).
