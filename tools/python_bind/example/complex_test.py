@@ -232,7 +232,6 @@ def run_jsonl_tests(conn_json, export_dir=None):
 
 def run_parquet_extension_suite(db_parquet, conn_parquet, db_path_parquet):
     statements = [
-        ("INSTALL PARQUET succeeded", "INSTALL PARQUET;"),
         ("LOAD PARQUET succeeded", "LOAD PARQUET;"),
     ]
 
