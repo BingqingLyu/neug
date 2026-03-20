@@ -595,7 +595,7 @@ endif()
 
 # Configure Arrow Parquet support if parquet extension is enabled
 if(BUILD_EXTENSIONS AND "parquet" IN_LIST BUILD_EXTENSIONS)
-    set(ARROW_PARQUET ON CACHE BOOL "" FORCE)
+    set(ARROW_ENABLE_PARQUET ON CACHE BOOL "" FORCE)
     message(STATUS "Arrow Parquet support enabled for parquet extension")
 endif()
 

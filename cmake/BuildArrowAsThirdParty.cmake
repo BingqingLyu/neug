@@ -75,8 +75,11 @@ function(build_arrow_as_third_party)
     if(NOT DEFINED ARROW_JSON)
         set(ARROW_JSON OFF CACHE BOOL "" FORCE)
     endif()
-    # ARROW_PARQUET is set by the main CMakeLists.txt if parquet extension is enabled
-    if(NOT DEFINED ARROW_PARQUET)
+    # Translate ARROW_ENABLE_PARQUET (our flag set in CMakeLists.txt) to Arrow's
+    # own ARROW_PARQUET variable so Arrow actually builds Parquet support.
+    if(ARROW_ENABLE_PARQUET)
+        set(ARROW_PARQUET ON CACHE BOOL "" FORCE)
+    else()
         set(ARROW_PARQUET OFF CACHE BOOL "" FORCE)
     endif()
     # Enable Snappy and Zlib
@@ -311,7 +314,7 @@ function(build_arrow_as_third_party)
             PATTERN "testing" EXCLUDE)
 
         # Install Parquet headers if Parquet is enabled
-        if(ARROW_PARQUET)
+        if(ARROW_ENABLE_PARQUET)
             install(DIRECTORY ${arrow_SOURCE_DIR}/cpp/src/parquet
                 DESTINATION include
                 FILES_MATCHING PATTERN "*.h"
