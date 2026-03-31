@@ -105,7 +105,7 @@ class Option {
   }
 
   static Option<double> DoubleOption(const std::string& key,
-                                      double default_val) {
+                                     double default_val) {
     return Option<double>(
         key, std::to_string(default_val), [](const std::string& s) -> double {
           try {

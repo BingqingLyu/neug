@@ -97,9 +97,9 @@ void Init() {
     LOG(INFO) << "[s3 extension] initialization completed successfully";
     LOG(INFO) << "[s3 extension] S3, OSS, HTTP, and HTTPS filesystem support is now available";
     LOG(INFO) << "[s3 extension] Usage:";
-    LOG(INFO) << "[s3 extension]   - S3: JSON_SCAN('s3://bucket/file.json')";
-    LOG(INFO) << "[s3 extension]   - OSS: PARQUET_SCAN('oss://bucket/file.parquet')";
-    LOG(INFO) << "[s3 extension]   - HTTP: CSV_SCAN('https://example.com/data.csv')";
+    LOG(INFO) << "[s3 extension]   - S3: LOAD FROM 's3://bucket/file.json' (CREDENTIALS_KIND='Default', AWS_ENDPOINT_URL='{aws_endpoint}')";
+    LOG(INFO) << "[s3 extension]   - OSS: LOAD FROM 'oss://bucket/file.parquet' (CREDENTIALS_KIND='Anonymous', OSS_ENDPOINT='{oss_endpoint}')";
+    LOG(INFO) << "[s3 extension]   - HTTP: LOAD FROM 'https://example.com/data.csv'";
   } catch (const std::exception& e) {
     THROW_EXCEPTION_WITH_FILE_LINE(
         "[s3 extension] initialization failed: " + std::string(e.what()));
