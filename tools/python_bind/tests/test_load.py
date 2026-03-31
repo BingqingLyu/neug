@@ -1283,7 +1283,7 @@ class TestLoadFrom:
         assert str(rows[0][5]).startswith(
             "2023-05-17 00:00:00"
         )  # datetime_weight: TIMESTAMP
-        
+
     @extension_test
     def test_load_vertices_and_edges_from_parquet_on_oss(self):
         """Test LOAD FROM Parquet file on OSS (oss://graphscope/neug/vPerson.parquet)."""
@@ -1296,13 +1296,13 @@ class TestLoadFrom:
 
         # Execute LOAD FROM query with inline S3 options
         # This is the CORRECT way: pass options inline, not via environment variables
-        vertex_query = f'''
+        vertex_query = f"""
         LOAD FROM "{vertex_oss_path}" (
             CREDENTIALS_KIND='Anonymous',
             ENDPOINT_OVERRIDE='{self.oss_endpoint}'
         )
         RETURN *
-        '''
+        """
         result = self.conn.execute(vertex_query)
 
         records = list(result)
@@ -1315,13 +1315,13 @@ class TestLoadFrom:
 
         edge_oss_path = "oss://graphscope/neug/eMeets.parquet"
 
-        edge_query = f'''
+        edge_query = f"""
         LOAD FROM "{edge_oss_path}" (
             CREDENTIALS_KIND='Anonymous',
             ENDPOINT_OVERRIDE='{self.oss_endpoint}'
         )
         RETURN *
-        '''
+        """
         result = self.conn.execute(edge_query)
 
         records = list(result)
@@ -1331,18 +1331,22 @@ class TestLoadFrom:
         # Check first record structure (should have all columns)
         first_record = records[0]
         assert len(first_record) == 5, f"Expected 5 columns, got {len(first_record)}"
-        
+
     @extension_test
     def test_load_vertices_and_edges_from_parquet_via_http(self):
         """Test LOAD FROM Parquet file via HTTP."""
-        vertex_http_path = "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/vPerson.parquet"
-        edge_http_path = "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/eMeets.parquet"
+        vertex_http_path = (
+            "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/vPerson.parquet"
+        )
+        edge_http_path = (
+            "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/eMeets.parquet"
+        )
         self.conn.execute("load s3")
         self.conn.execute("load parquet")
-        vertex_query = f'''
+        vertex_query = f"""
         LOAD FROM "{vertex_http_path}" 
         RETURN *
-        '''
+        """
         result = self.conn.execute(vertex_query)
 
         records = list(result)
@@ -1353,10 +1357,10 @@ class TestLoadFrom:
         first_record = records[0]
         assert len(first_record) == 16, f"Expected 16 columns, got {len(first_record)}"
 
-        edge_query = f'''
+        edge_query = f"""
         LOAD FROM "{edge_http_path}"
         RETURN *
-        '''
+        """
         result = self.conn.execute(edge_query)
 
         records = list(result)
