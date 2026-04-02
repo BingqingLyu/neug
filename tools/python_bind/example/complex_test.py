@@ -294,8 +294,17 @@ def run_parquet_extension_suite(db_parquet, conn_parquet, db_path_parquet):
 OSS_ENDPOINT = "oss-cn-beijing.aliyuncs.com"
 OSS_VERTEX_PATH = "oss://graphscope/neug/vPerson.parquet"
 OSS_EDGE_PATH = "oss://graphscope/neug/eMeets.parquet"
-HTTP_VERTEX_PATH = "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/vPerson.parquet"
-HTTP_EDGE_PATH = "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/eMeets.parquet"
+HTTPS_VERTEX_PATH = (
+    "https://graphscope.oss-cn-beijing.aliyuncs.com/neug/vPerson.parquet"
+)
+HTTPS_EDGE_PATH = "https://graphscope.oss-cn-beijing.aliyuncs.com/neug/eMeets.parquet"
+# Public AWS S3 dataset: Ookla Open Data (us-west-2, anonymous access)
+# Schema (2019 Q1): avg_d_kbps, avg_u_kbps, avg_lat_ms, tests, devices, quadkey, tile
+S3_OOKLA_PATH = (
+    "s3://ookla-open-data/parquet/performance/type=fixed/year=2019/quarter=1/"
+    "2019-01-01_performance_fixed_tiles.parquet"
+)
+S3_OOKLA_REGION = "us-west-2"
 
 
 def run_s3_extension_suite(db_s3, conn_s3, db_path_s3):
@@ -352,7 +361,7 @@ def run_s3_extension_suite(db_s3, conn_s3, db_path_s3):
     run_query_with_handler(
         conn_s3,
         "LOAD FROM HTTP vPerson.parquet",
-        f'LOAD FROM "{HTTP_VERTEX_PATH}" RETURN *;',
+        f'LOAD FROM "{HTTPS_VERTEX_PATH}" RETURN *;',
         _http_vertex,
         print_traceback=True,
     )
@@ -369,8 +378,37 @@ def run_s3_extension_suite(db_s3, conn_s3, db_path_s3):
     run_query_with_handler(
         conn_s3,
         "LOAD FROM HTTP eMeets.parquet",
-        f'LOAD FROM "{HTTP_EDGE_PATH}" RETURN *;',
+        f'LOAD FROM "{HTTPS_EDGE_PATH}" RETURN *;',
         _http_edge,
+        print_traceback=True,
+    )
+
+    # AWS S3: load Ookla Open Data (public bucket, anonymous, us-west-2)
+    # Schema (2019 Q1 fixed tiles): avg_d_kbps, avg_u_kbps, avg_lat_ms, tests, devices, quadkey, tile
+    def _s3_ookla(rows):
+        print(f"       S3 Ookla fixed tiles (LIMIT 5): {len(rows)} rows")
+        if rows:
+            print(f"       First row sample: {rows[0]}")
+        assert len(rows) == 5, f"Expected 5 rows (LIMIT 5), got {len(rows)}"
+        for row in rows:
+            assert (
+                isinstance(row[0], int) and row[0] > 0
+            ), f"avg_d_kbps should be positive int, got {row[0]}"
+            assert (
+                isinstance(row[1], int) and row[1] > 0
+            ), f"avg_u_kbps should be positive int, got {row[1]}"
+            assert (
+                isinstance(row[2], int) and row[2] > 0
+            ), f"tests should be positive int, got {row[2]}"
+        return "LOAD FROM AWS S3 (Ookla open data) returned 5 rows"
+
+    run_query_with_handler(
+        conn_s3,
+        "LOAD FROM AWS S3 (Ookla open data, anonymous)",
+        f'LOAD FROM "{S3_OOKLA_PATH}" ('
+        f"CREDENTIALS_KIND='Anonymous', AWS_DEFAULT_REGION='{S3_OOKLA_REGION}'"
+        f") RETURN avg_d_kbps, avg_u_kbps, tests LIMIT 5;",
+        _s3_ookla,
         print_traceback=True,
     )
 

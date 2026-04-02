@@ -16,7 +16,6 @@
 
 #include <glog/logging.h>
 #include <arrow/filesystem/s3fs.h>
-#include <cstdlib>
 #include "neug/compiler/main/metadata_registry.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/file_sys/file_system.h"
@@ -50,25 +49,6 @@ static void RegisterHTTPProvider() {
       << "[s3 extension] HTTPFileSystem registered for schemes: http, https";
 }
 
-// Cleanup function to finalize Arrow S3 (called automatically)
-static void CleanupS3() {
-  LOG(INFO) << "[s3 extension] automatic cleanup triggered";
-  
-  try {
-    auto status = arrow::fs::FinalizeS3();
-    if (!status.ok()) {
-      LOG(WARNING) << "[s3 extension] Failed to finalize Arrow S3: " 
-                   << status.ToString();
-    } else {
-      LOG(INFO) << "[s3 extension] Arrow S3 finalized successfully";
-    }
-  } catch (const std::exception& e) {
-    LOG(ERROR) << "[s3 extension] cleanup failed: " << e.what();
-  } catch (...) {
-    LOG(ERROR) << "[s3 extension] cleanup failed: unknown exception";
-  }
-}
-
 }  // namespace s3
 }  // namespace extension
 }  // namespace neug
@@ -89,11 +69,7 @@ void Init() {
     
     // Register HTTP/HTTPS filesystem provider
     neug::extension::s3::RegisterHTTPProvider();
-    
-    // Register cleanup function to be called at program exit
-    // This ensures Arrow S3 is properly finalized to prevent core dumps
-    std::atexit(neug::extension::s3::CleanupS3);
-    
+
     LOG(INFO) << "[s3 extension] initialization completed successfully";
     LOG(INFO) << "[s3 extension] S3, OSS, HTTP, and HTTPS filesystem support is now available";
     LOG(INFO) << "[s3 extension] Usage:";
