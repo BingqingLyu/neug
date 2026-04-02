@@ -96,7 +96,6 @@ class TestLoadFrom:
         self.conn = self.db.connect()
         self.tinysnb_path = get_tinysnb_dataset_path()
         # OSS endpoint for testing
-        self.oss_endpoint = "oss-cn-beijing.aliyuncs.com"
         yield
         self.conn.close()
         self.db.close()
@@ -1299,7 +1298,7 @@ class TestLoadFrom:
         vertex_query = f"""
         LOAD FROM "{vertex_oss_path}" (
             CREDENTIALS_KIND='Anonymous',
-            ENDPOINT_OVERRIDE='{self.oss_endpoint}'
+            ENDPOINT_OVERRIDE='oss-cn-beijing.aliyuncs.com'
         )
         RETURN *
         """
@@ -1318,7 +1317,7 @@ class TestLoadFrom:
         edge_query = f"""
         LOAD FROM "{edge_oss_path}" (
             CREDENTIALS_KIND='Anonymous',
-            ENDPOINT_OVERRIDE='{self.oss_endpoint}'
+            ENDPOINT_OVERRIDE='oss-cn-beijing.aliyuncs.com'
         )
         RETURN *
         """
@@ -1371,6 +1370,85 @@ class TestLoadFrom:
         first_record = records[0]
         assert len(first_record) == 5, f"Expected 5 columns, got {len(first_record)}"
 
+    @extension_test
+    def test_load_vertices_and_edges_from_parquet_via_https(self):
+        """Test LOAD FROM Parquet file via HTTPS."""
+        vertex_https_path = (
+            "https://graphscope.oss-cn-beijing.aliyuncs.com/neug/vPerson.parquet"
+        )
+        edge_https_path = (
+            "https://graphscope.oss-cn-beijing.aliyuncs.com/neug/eMeets.parquet"
+        )
+        self.conn.execute("load s3")
+        self.conn.execute("load parquet")
+        vertex_query = f"""
+        LOAD FROM "{vertex_https_path}"
+        RETURN *
+        """
+        result = self.conn.execute(vertex_query)
+
+        records = list(result)
+        # vPerson.parquet should have 8 data rows (same as local version)
+        assert len(records) == 8, f"Expected 8 records, got {len(records)}"
+
+        # Check first record structure (should have all columns)
+        first_record = records[0]
+        assert len(first_record) == 16, f"Expected 16 columns, got {len(first_record)}"
+
+        edge_query = f"""
+        LOAD FROM "{edge_https_path}"
+        RETURN *
+        """
+        result = self.conn.execute(edge_query)
+
+        records = list(result)
+        # eMeets.parquet should have 7 data rows (same as local version)
+        assert len(records) == 7, f"Expected 7 records, got {len(records)}"
+
+        # Check first record structure (should have all columns)
+        first_record = records[0]
+        assert len(first_record) == 5, f"Expected 5 columns, got {len(first_record)}"
+
+    @extension_test
+    def test_load_from_parquet_on_public_s3(self):
+        """Test LOAD FROM Parquet on public AWS S3 (Ookla Open Data, anonymous, us-west-2).
+
+        Dataset: s3://ookla-open-data (Speedtest by Ookla, fixed tiles, Q1 2019)
+        Schema (2019 Q1): avg_d_kbps, avg_u_kbps, avg_lat_ms, tests, devices, quadkey, tile
+        Access: anonymous (--no-sign-request equivalent)
+        """
+        self.conn.execute("load s3")
+        self.conn.execute("load parquet")
+
+        s3_path = (
+            "s3://ookla-open-data/parquet/performance/type=fixed/year=2019/quarter=1/"
+            "2019-01-01_performance_fixed_tiles.parquet"
+        )
+
+        query = f"""
+        LOAD FROM "{s3_path}" (
+            CREDENTIALS_KIND='Anonymous',
+            AWS_DEFAULT_REGION='us-west-2'
+        )
+        RETURN avg_d_kbps, avg_u_kbps, tests
+        LIMIT 5
+        """
+        result = self.conn.execute(query)
+        records = list(result)
+
+        assert len(records) == 5, f"Expected 5 records (LIMIT 5), got {len(records)}"
+        for record in records:
+            avg_d, avg_u, tests = record
+            assert (
+                isinstance(avg_d, int) and avg_d > 0
+            ), f"avg_d_kbps should be positive int, got {avg_d}"
+            assert (
+                isinstance(avg_u, int) and avg_u > 0
+            ), f"avg_u_kbps should be positive int, got {avg_u}"
+            assert (
+                isinstance(tests, int) and tests > 0
+            ), f"tests should be positive int, got {tests}"
+
 
 class TestCopyFrom:
     """Test cases for COPY FROM functionality with schema creation and data verification."""
@@ -1383,7 +1461,6 @@ class TestCopyFrom:
         self.db = Database(db_path=self.db_dir, mode="w")
         self.conn = self.db.connect()
         self.tinysnb_path = get_tinysnb_dataset_path()
-        self.oss_endpoint = "oss-cn-beijing.aliyuncs.com"
         yield
         self.conn.close()
         self.db.close()
