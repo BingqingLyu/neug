@@ -1342,7 +1342,7 @@ class TestLoadFrom:
         self.conn.execute("load s3")
         self.conn.execute("load parquet")
         vertex_query = f"""
-        LOAD FROM "{vertex_http_path}" 
+        LOAD FROM "{vertex_http_path}"
         RETURN *
         """
         result = self.conn.execute(vertex_query)
