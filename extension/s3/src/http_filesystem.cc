@@ -295,14 +295,26 @@ void HTTPRandomAccessFile::SetupCURLHandle(CURL* curl) {
   auto connect_timeout_it = options_.find(HTTPConfigOptionKeys::kConnectTimeout);
   int connect_timeout = HTTPConfigDefaults::kConnectTimeoutDefault;
   if (connect_timeout_it != options_.end()) {
-    connect_timeout = std::stoi(connect_timeout_it->second);
+    try {
+      connect_timeout = std::stoi(connect_timeout_it->second);
+    } catch (const std::exception& e) {
+      THROW_INVALID_ARGUMENT_EXCEPTION(
+          "Invalid CONNECT_TIMEOUT value: '" + connect_timeout_it->second + 
+          "'. Must be an integer. Error: " + e.what());
+    }
   }
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout);
   
   auto request_timeout_it = options_.find(HTTPConfigOptionKeys::kRequestTimeout);
   int request_timeout = HTTPConfigDefaults::kRequestTimeoutDefault;
   if (request_timeout_it != options_.end()) {
-    request_timeout = std::stoi(request_timeout_it->second);
+    try {
+      request_timeout = std::stoi(request_timeout_it->second);
+    } catch (const std::exception& e) {
+      THROW_INVALID_ARGUMENT_EXCEPTION(
+          "Invalid REQUEST_TIMEOUT value: '" + request_timeout_it->second + 
+          "'. Must be an integer. Error: " + e.what());
+    }
   }
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, request_timeout);
   
@@ -336,9 +348,14 @@ void HTTPRandomAccessFile::SetupCURLHandle(CURL* curl) {
   }
 }
 
-arrow::Status HTTPRandomAccessFile::ReadRange(int64_t offset, int64_t length, void* buffer) {
+arrow::Result<int64_t> HTTPRandomAccessFile::ReadRange(int64_t offset, int64_t length, void* buffer) {
   if (closed_) {
     return arrow::Status::Invalid("File is closed");
+  }
+  
+  // Handle zero-length read
+  if (length == 0) {
+    return 0;
   }
   
   // Setup GET request with HTTP Range header (RFC 7233)
@@ -369,19 +386,25 @@ arrow::Status HTTPRandomAccessFile::ReadRange(int64_t offset, int64_t length, vo
   // Verify response code
   // 200 = OK (server doesn't support Range, sent full file)
   // 206 = Partial Content (server supports Range, sent requested range)
+  // 416 = Range Not Satisfiable (offset beyond end of file)
   long response_code = 0;
   curl_easy_getinfo(curl_handle_, CURLINFO_RESPONSE_CODE, &response_code);
   
-  if (response_code == 206) {
+  // Calculate actual bytes received
+  int64_t bytes_received = length - static_cast<int64_t>(write_info.second);
+  
+  if (response_code == 416) {
+    // Range Not Satisfiable - offset is beyond end of file
+    return 0;
+  } else if (response_code == 206) {
     // Success: server sent the requested range
-    // Check how much data was actually written
-    if (write_info.second > 0) {
-      // Buffer wasn't completely filled - server sent less data than requested
-      LOG(WARNING) << "HTTP Range request returned less data than expected. "
-                   << "Requested: " << length << " bytes, "
-                   << "Received: " << (length - write_info.second) << " bytes";
+    // Return actual bytes received (may be less than requested if near EOF)
+    if (bytes_received < length) {
+      LOG(INFO) << "HTTP Range request returned partial data. "
+                << "Requested: " << length << " bytes, "
+                << "Received: " << bytes_received << " bytes";
     }
-    return arrow::Status::OK();
+    return bytes_received;
   } else if (response_code == 200) {
     // Server doesn't support Range requests and sent the full file
     // This is a critical error because we can't fit the full file in our buffer
@@ -424,12 +447,12 @@ arrow::Result<int64_t> HTTPRandomAccessFile::ReadAt(int64_t position, int64_t nb
     return arrow::Status::Invalid("File is closed");
   }
   
-  auto status = ReadRange(position, nbytes, out);
-  if (!status.ok()) {
-    return status;
+  auto bytes_read_result = ReadRange(position, nbytes, out);
+  if (!bytes_read_result.ok()) {
+    return bytes_read_result.status();
   }
   
-  return nbytes;
+  return *bytes_read_result;
 }
 
 arrow::Result<std::shared_ptr<arrow::Buffer>> HTTPRandomAccessFile::ReadAt(
@@ -438,18 +461,26 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> HTTPRandomAccessFile::ReadAt(
     return arrow::Status::Invalid("File is closed");
   }
   
+  // Handle zero-length read
+  if (nbytes == 0) {
+    return std::make_shared<arrow::Buffer>(nullptr, 0);
+  }
+  
   auto buffer_result = arrow::AllocateBuffer(nbytes);
   if (!buffer_result.ok()) {
     return buffer_result.status();
   }
   
   auto buffer = std::move(buffer_result).ValueOrDie();
-  auto status = ReadRange(position, nbytes, buffer->mutable_data());
-  if (!status.ok()) {
-    return status;
+  auto bytes_read_result = ReadRange(position, nbytes, buffer->mutable_data());
+  if (!bytes_read_result.ok()) {
+    return bytes_read_result.status();
   }
   
-  return buffer;
+  int64_t bytes_read = *bytes_read_result;
+  // Convert unique_ptr to shared_ptr and slice to actual bytes read
+  std::shared_ptr<arrow::Buffer> shared_buffer = std::move(buffer);
+  return arrow::SliceBuffer(shared_buffer, 0, bytes_read);
 }
 
 arrow::Result<int64_t> HTTPRandomAccessFile::Read(int64_t nbytes, void* out) {
@@ -463,7 +494,7 @@ arrow::Result<int64_t> HTTPRandomAccessFile::Read(int64_t nbytes, void* out) {
 arrow::Result<std::shared_ptr<arrow::Buffer>> HTTPRandomAccessFile::Read(int64_t nbytes) {
   auto result = ReadAt(position_, nbytes);
   if (result.ok()) {
-    position_ += nbytes;
+    position_ += (*result)->size();
   }
   return result;
 }
@@ -618,6 +649,9 @@ HTTPFileSystem::OpenInputFile(const std::string& path) {
     return file;
   } catch (const exception::Exception& e) {
     return arrow::Status::IOError("Failed to open HTTP file: " + 
+                                   std::string(e.what()));
+  } catch (const std::exception& e) {
+    return arrow::Status::IOError("Failed to open HTTP file (unexpected error): " + 
                                    std::string(e.what()));
   }
 }
