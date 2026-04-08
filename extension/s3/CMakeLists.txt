@@ -35,6 +35,7 @@ if(BUILD_TEST)
     add_extension_test(NAME s3
         TEST_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/tests/s3_test.cpp
                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/http_test.cpp
-        EXTRA_LINK_LIBS arrow_dataset_objlib ${ARROW_PARQUET_LIB}
+        EXTRA_LINK_LIBS arrow_dataset_objlib ${ARROW_PARQUET_LIB} ${CURL_LIBRARIES}
+        EXTRA_INCLUDE_DIRS ${CURL_INCLUDE_DIRS}
     )
 endif()

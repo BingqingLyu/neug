@@ -41,18 +41,28 @@ T getOptionWithEnv(const reader::options_t& options,
                    const reader::Option<T>& opt,
                    std::initializer_list<const char*> option_keys,
                    std::initializer_list<const char*> env_keys) {
-  // Priority 1: schema.options - check all key aliases
+  // Priority 1: schema.options - check if any key is present (even if value is empty)
+  // An explicitly set empty value should override environment variables
+  bool option_key_present = false;
+  std::string option_value;
+  
   for (const char* key : option_keys) {
     auto it = options.find(key);
-    if (it != options.end() && !it->second.empty()) {
-      // Use the Option's parser to handle type conversion
-      reader::options_t temp;
-      temp.emplace(opt.getKey(), it->second);
-      return opt.get(temp);
+    if (it != options.end()) {
+      option_key_present = true;
+      option_value = it->second;
+      break;
     }
   }
+  
+  // If any option key is present in schema.options, use it (even if empty)
+  if (option_key_present) {
+    reader::options_t temp;
+    temp.emplace(opt.getKey(), option_value);
+    return opt.get(temp);
+  }
 
-  // Priority 2: environment variables
+  // Priority 2: environment variables (only if no option keys were present)
   for (const char* env_key : env_keys) {
     const char* env_val = std::getenv(env_key);
     if (env_val && std::strlen(env_val) > 0) {

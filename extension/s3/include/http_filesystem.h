@@ -94,8 +94,9 @@ class HTTPRandomAccessFile : public arrow::io::RandomAccessFile {
  private:
   /**
    * Perform HTTP Range request
+   * @return Result<int64_t> Number of bytes actually read, or error status
    */
-  arrow::Status ReadRange(int64_t offset, int64_t length, void* buffer);
+  arrow::Result<int64_t> ReadRange(int64_t offset, int64_t length, void* buffer);
   
   /**
    * Initialize file size via HEAD request
