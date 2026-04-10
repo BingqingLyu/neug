@@ -1419,6 +1419,213 @@ TEST_F(ParquetTest, TestParquetExportWithDateAndTimestamp) {
   EXPECT_EQ(ctx.row_num(), num_rows);
 }
 
+TEST_F(ParquetTest, TestParquetExportWithListType) {
+  // Test export with list/array type
+  neug::QueryResponse response;
+  const int num_rows = 10;
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("tags");
+  
+  // int64 array
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < num_rows; ++i) {
+    int64_arr->add_values(i);
+  }
+  int64_arr->set_validity(std::string((num_rows + 7) / 8, 0xFF));
+  
+  // list array: each row has a list of strings
+  auto* col1 = response.add_arrays();
+  auto* list_arr = col1->mutable_list_array();
+  
+  // Add offsets: each list has 3 elements
+  // For 10 rows with 3 elements each, offsets should be [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30]
+  // That's 11 offset values for 10 lists
+  std::vector<int32_t> offsets = {0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30};
+  for (int offset : offsets) {
+    list_arr->add_offsets(offset);
+  }
+  
+  // Add string elements (30 strings total, 3 per row)
+  auto* elements = list_arr->mutable_elements();
+  auto* str_arr = elements->mutable_string_array();
+  const char* tags[] = {"tag_A", "tag_B", "tag_C", "tag_D", "tag_E"};
+  for (int i = 0; i < 30; ++i) {
+    str_arr->add_values(tags[i % 5]);
+  }
+  str_arr->set_validity(std::string(4, 0xFF));  // All valid (30 elements need 4 bytes)
+  
+  // Set list validity (all valid, 10 elements need 2 bytes)
+  list_arr->set_validity(std::string(2, 0xFF));
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_list.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "tags"};
+  entry_schema->columnTypes = {createInt64Type(), createStringType()};  // List<String>
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with list type: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is readable
+  // Note: List type requires special handling in reader, so we just verify file exists
+  // and is non-empty for now
+  auto file_size = std::filesystem::file_size(export_path);
+  EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
+}
+
+TEST_F(ParquetTest, TestParquetExportWithListOfStrings) {
+  // Test export with list<string> type
+  neug::QueryResponse response;
+  const int num_rows = 5;
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("tags");
+  
+  // string array for id
+  auto* col0 = response.add_arrays();
+  auto* str_arr0 = col0->mutable_string_array();
+  str_arr0->add_values("user_1");
+  str_arr0->add_values("user_2");
+  str_arr0->add_values("user_3");
+  str_arr0->add_values("user_4");
+  str_arr0->add_values("user_5");
+  str_arr0->set_validity(std::string(1, 0xFF));
+  
+  // list array: each row has a list of strings with varying lengths
+  auto* col1 = response.add_arrays();
+  auto* list_arr = col1->mutable_list_array();
+  
+  // Add offsets: varying list sizes [2, 3, 1, 4, 2]
+  std::vector<int32_t> offsets = {0, 2, 5, 6, 10, 12};
+  for (int offset : offsets) {
+    list_arr->add_offsets(offset);
+  }
+  
+  // Add string elements (12 strings total)
+  auto* elements = list_arr->mutable_elements();
+  auto* str_arr = elements->mutable_string_array();
+  str_arr->add_values("python");
+  str_arr->add_values("java");
+  str_arr->add_values("cpp");
+  str_arr->add_values("go");
+  str_arr->add_values("rust");
+  str_arr->add_values("javascript");
+  str_arr->add_values("typescript");
+  str_arr->add_values("ruby");
+  str_arr->add_values("php");
+  str_arr->add_values("swift");
+  str_arr->add_values("kotlin");
+  str_arr->add_values("scala");
+  str_arr->set_validity(std::string(2, 0xFF));  // All valid (12 elements)
+  
+  // Set list validity (all valid, 5 elements)
+  list_arr->set_validity(std::string(1, 0xFF));
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_list_strings.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "tags"};
+  // Note: For List<String>, the schema should indicate it's a list type
+  // For now, we use String type as fallback since type inference will detect
+  // it's actually a list from the proto data
+  entry_schema->columnTypes = {createStringType(), createStringType()};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with list<string>: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is non-empty
+  auto file_size = std::filesystem::file_size(export_path);
+  EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
+
+}
+
+TEST_F(ParquetTest, TestParquetExportWithStructType) {
+  // Test export with struct type
+  neug::QueryResponse response;
+  const int num_rows = 5;
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("location");
+  
+  // int64 array for id
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < num_rows; ++i) {
+    int64_arr->add_values(i);
+  }
+  int64_arr->set_validity(std::string((num_rows + 7) / 8, 0xFF));
+  
+  // struct array: each row has a struct with {latitude: double, longitude: double}
+  auto* col1 = response.add_arrays();
+  auto* struct_arr = col1->mutable_struct_array();
+  
+  // Field 0: latitude (double)
+  auto* field0 = struct_arr->add_fields();
+  auto* lat_arr = field0->mutable_double_array();
+  for (int i = 0; i < num_rows; ++i) {
+    lat_arr->add_values(40.0 + i * 0.1);
+  }
+  lat_arr->set_validity(std::string(1, 0xFF));
+  
+  // Field 1: longitude (double)
+  auto* field1 = struct_arr->add_fields();
+  auto* lon_arr = field1->mutable_double_array();
+  for (int i = 0; i < num_rows; ++i) {
+    lon_arr->add_values(-74.0 + i * 0.1);
+  }
+  lon_arr->set_validity(std::string(1, 0xFF));
+  
+  // Struct validity (all valid)
+  struct_arr->set_validity(std::string(1, 0xFF));
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_struct.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "location"};
+  // Note: Schema uses string type, but type inference will detect struct from proto
+  entry_schema->columnTypes = {createInt64Type(), createStringType()};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with struct type: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is non-empty
+  auto file_size = std::filesystem::file_size(export_path);
+  EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
+  
+}
+
 // End of Test Suites
 
 }  // namespace test

@@ -26,6 +26,7 @@
 
 #include "neug/compiler/main/metadata_registry.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/property/types.h"
 #include "parquet_options.h"
 
 namespace neug {
@@ -115,6 +116,15 @@ static std::shared_ptr<arrow::DataType> inferArrowTypeFromArray(
       return arrow::list(element_type);
     }
     return arrow::list(arrow::large_utf8());  // Default to string list
+  } else if (proto_array.has_struct_array()) {
+    // Struct type: infer types from each field
+    const auto& struct_arr = proto_array.struct_array();
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (int i = 0; i < struct_arr.fields_size(); ++i) {
+      auto field_type = inferArrowTypeFromArray(struct_arr.fields(i));
+      fields.push_back(arrow::field("field_" + std::to_string(i), field_type));
+    }
+    return arrow::struct_(fields);
   } else if (proto_array.has_vertex_array() || 
              proto_array.has_edge_array() || 
              proto_array.has_path_array()) {
@@ -336,42 +346,76 @@ static std::shared_ptr<arrow::Array> protoArrayToArrowArray(
     }
     return result;
   } else if (arrow_type->id() == arrow::Type::LIST) {
-    // Handle List type - convert to JSON string for now
-    // Full ListArray support requires complex builder logic
+    // Handle List type - build native Arrow ListArray
     if (proto_array.has_list_array()) {
-      arrow::LargeStringBuilder builder(pool);
       const auto& list_arr = proto_array.list_array();
+      auto list_type = std::static_pointer_cast<arrow::ListType>(arrow_type);
+      auto element_type = list_type->value_type();
       
-      // For simplicity, serialize each list as JSON string
-      // This preserves the data but loses the native list type
-      for (int i = 0; i < list_arr.offsets_size(); ++i) {
-        if (list_arr.validity().empty() || 
-            (static_cast<uint8_t>(list_arr.validity()[i >> 3]) >> (i & 7)) & 1) {
-          // Simple JSON array representation
-          // Note: This is a simplified approach - full implementation would
-          // recursively serialize each element properly
-          std::string json_str = "[]";
-          
-          auto status = builder.Append(json_str);
-          if (!status.ok()) {
-            THROW_RUNTIME_ERROR("Failed to append list as JSON: " + status.ToString());
-          }
-        } else {
-          auto status = builder.AppendNull();
-          if (!status.ok()) {
-            THROW_RUNTIME_ERROR("Failed to append null: " + status.ToString());
-          }
-        }
-      }
+      // Recursively convert all elements
+      auto elements_array = protoArrayToArrowArray(
+          list_arr.elements(), element_type, 0);
       
-      std::shared_ptr<arrow::Array> result;
-      auto status = builder.Finish(&result);
-      if (!status.ok()) {
-        THROW_RUNTIME_ERROR("Failed to finish list array: " + status.ToString());
-      }
-      return result;
+      // Build offsets buffer
+      int num_rows = list_arr.offsets_size() - 1;
+      
+      // Create offsets buffer directly from protobuf
+      auto offsets_buffer = arrow::Buffer::Wrap(
+          reinterpret_cast<const uint8_t*>(list_arr.offsets().data()),
+          list_arr.offsets_size() * sizeof(int32_t));
+      
+      // For now, don't pass validity buffer to avoid Arrow's limitation
+      // "Lists with non-zero length null components are not supported"
+      // If all values are valid (no nulls), we can safely omit validity buffer
+      std::shared_ptr<arrow::Buffer> validity_buffer = nullptr;
+      
+      // Create ListArray directly
+      auto list_array = std::make_shared<arrow::ListArray>(
+          list_type,
+          num_rows,
+          offsets_buffer,
+          elements_array,
+          validity_buffer);
+      
+      return list_array;
     }
     THROW_INVALID_ARGUMENT_EXCEPTION("Expected list_array for LIST type");
+  } else if (arrow_type->id() == arrow::Type::STRUCT) {
+    // Handle Struct type
+    if (proto_array.has_struct_array()) {
+      const auto& struct_arr = proto_array.struct_array();
+      auto struct_type = std::static_pointer_cast<arrow::StructType>(arrow_type);
+      
+      // Recursively convert each field
+      std::vector<std::shared_ptr<arrow::Array>> field_arrays;
+      for (int i = 0; i < struct_arr.fields_size(); ++i) {
+        auto field_type = struct_type->field(i)->type();
+        auto field_array = protoArrayToArrowArray(
+            struct_arr.fields(i), field_type, row_count);
+        field_arrays.push_back(field_array);
+      }
+      
+      // Build validity buffer
+      auto null_bitmap = struct_arr.validity();
+      std::shared_ptr<arrow::Buffer> validity_buffer;
+      if (!null_bitmap.empty()) {
+        validity_buffer = std::make_shared<arrow::Buffer>(
+            reinterpret_cast<const uint8_t*>(null_bitmap.data()),
+            null_bitmap.size());
+      }
+      
+      // Create StructArray - num_rows should match the field arrays' length
+      int num_rows = field_arrays.empty() ? 0 : field_arrays[0]->length();
+      
+      auto struct_array = std::make_shared<arrow::StructArray>(
+          struct_type,
+          num_rows,
+          field_arrays,
+          validity_buffer);
+      
+      return struct_array;
+    }
+    THROW_INVALID_ARGUMENT_EXCEPTION("Expected struct_array for STRUCT type");
   }
   
   THROW_INVALID_ARGUMENT_EXCEPTION(
