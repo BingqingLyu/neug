@@ -137,6 +137,22 @@ class ParquetTest : public ::testing::Test {
     return type;
   }
 
+  std::shared_ptr<::common::DataType> createDateType() {
+    auto type = std::make_shared<::common::DataType>();
+    auto temporal = std::make_unique<::common::Temporal>();
+    temporal->mutable_date();  // Date type
+    type->set_allocated_temporal(temporal.release());
+    return type;
+  }
+
+  std::shared_ptr<::common::DataType> createTimestampType() {
+    auto type = std::make_shared<::common::DataType>();
+    auto temporal = std::make_unique<::common::Temporal>();
+    temporal->mutable_timestamp();  // Timestamp type
+    type->set_allocated_temporal(temporal.release());
+    return type;
+  }
+
   std::shared_ptr<::common::DataType> createFloatType() {
     auto type = std::make_shared<::common::DataType>();
     type->set_primitive_type(::common::PrimitiveType::DT_FLOAT);
@@ -1331,6 +1347,76 @@ TEST_F(ParquetTest, TestParquetExportWithDictionaryEncoding) {
   execution::Context ctx_nodict;
   reader_nodict->read(localState_nodict, ctx_nodict);
   EXPECT_EQ(ctx_nodict.row_num(), num_rows);
+}
+
+TEST_F(ParquetTest, TestParquetExportWithDateAndTimestamp) {
+  // Test export with date and timestamp types
+  neug::QueryResponse response;
+  const int num_rows = 100;
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("created_date");
+  schema->add_name("updated_timestamp");
+  
+  // int64 array
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < num_rows; ++i) {
+    int64_arr->add_values(i);
+  }
+  int64_arr->set_validity(std::string((num_rows + 7) / 8, 0xFF));
+  
+  // date array (milliseconds since epoch)
+  auto* col1 = response.add_arrays();
+  auto* date_arr = col1->mutable_date_array();
+  for (int i = 0; i < num_rows; ++i) {
+    // 2024-01-01 + i days in milliseconds
+    int64_t timestamp_ms = 1704067200000LL + (i * 86400000LL);
+    date_arr->add_values(timestamp_ms);
+  }
+  date_arr->set_validity(std::string((num_rows + 7) / 8, 0xFF));
+  
+  // timestamp array (microseconds since epoch)
+  auto* col2 = response.add_arrays();
+  auto* ts_arr = col2->mutable_timestamp_array();
+  for (int i = 0; i < num_rows; ++i) {
+    // 2024-01-01 00:00:00 + i seconds in microseconds
+    int64_t timestamp_us = 1704067200000000LL + (i * 1000000LL);
+    ts_arr->add_values(timestamp_us);
+  }
+  ts_arr->set_validity(std::string((num_rows + 7) / 8, 0xFF));
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_datetime.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "created_date", "updated_timestamp"};
+  entry_schema->columnTypes = {createInt64Type(), createDateType(), createTimestampType()};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with date/timestamp: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is readable
+  auto sharedState = createSharedState(
+      "export_datetime.parquet",
+      {"id", "created_date", "updated_timestamp"},
+      {createInt64Type(), createDateType(), createTimestampType()},
+      {{"batch_read", "false"}});
+  
+  auto reader = createParquetReader(sharedState);
+  auto localState = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx;
+  reader->read(localState, ctx);
+  EXPECT_EQ(ctx.row_num(), num_rows);
 }
 
 // End of Test Suites
