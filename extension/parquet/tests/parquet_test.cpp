@@ -1097,6 +1097,242 @@ TEST_F(ParquetTest, TestParquetExportLargeDataset) {
   EXPECT_LT(file_size, 1000000);  // Should be less than 1MB for 10K rows
 }
 
+TEST_F(ParquetTest, TestParquetExportWithCompressionOptions) {
+  // Test export with different compression settings
+  neug::QueryResponse response;
+  response.set_row_count(100);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("name");
+  
+  // int64 array
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < 100; ++i) {
+    int64_arr->add_values(i);
+  }
+  int64_arr->set_validity(std::string(13, 0xFF));  // All valid
+  
+  // string array
+  auto* col1 = response.add_arrays();
+  auto* str_arr = col1->mutable_string_array();
+  for (int i = 0; i < 100; ++i) {
+    str_arr->add_values("test_string_" + std::to_string(i));
+  }
+  str_arr->set_validity(std::string(13, 0xFF));
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "name"};
+  entry_schema->columnTypes = {createInt64Type(), createStringType()};
+  
+  // Test with ZSTD compression
+  std::string export_path_zstd = std::string(PARQUET_TEST_DIR) + "/export_zstd.parquet";
+  reader::FileSchema file_schema_zstd;
+  file_schema_zstd.paths = {export_path_zstd};
+  file_schema_zstd.format = "parquet";
+  file_schema_zstd.options = {{"compression", "zstd"}};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer_zstd(
+      file_schema_zstd, file_system, entry_schema);
+  
+  auto status = writer_zstd.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write ZSTD Parquet: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path_zstd));
+  
+  // Test with no compression
+  std::string export_path_none = std::string(PARQUET_TEST_DIR) + "/export_none.parquet";
+  reader::FileSchema file_schema_none;
+  file_schema_none.paths = {export_path_none};
+  file_schema_none.format = "parquet";
+  file_schema_none.options = {{"compression", "none"}};
+  
+  neug::writer::ArrowParquetExportWriter writer_none(
+      file_schema_none, file_system, entry_schema);
+  
+  status = writer_none.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write uncompressed Parquet: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path_none));
+  
+  // Verify ZSTD file is smaller than uncompressed
+  auto size_zstd = std::filesystem::file_size(export_path_zstd);
+  auto size_none = std::filesystem::file_size(export_path_none);
+  EXPECT_LT(size_zstd, size_none) << "ZSTD compressed file should be smaller than uncompressed";
+  
+  // Verify both files are readable
+  auto sharedState_zstd = createSharedState(
+      "export_zstd.parquet",
+      {"id", "name"},
+      {createInt64Type(), createStringType()},
+      {{"batch_read", "false"}});
+  
+  auto reader_zstd = createParquetReader(sharedState_zstd);
+  auto localState_zstd = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx_zstd;
+  reader_zstd->read(localState_zstd, ctx_zstd);
+  EXPECT_EQ(ctx_zstd.row_num(), 100);
+  
+  auto sharedState_none = createSharedState(
+      "export_none.parquet",
+      {"id", "name"},
+      {createInt64Type(), createStringType()},
+      {{"batch_read", "false"}});
+  
+  auto reader_none = createParquetReader(sharedState_none);
+  auto localState_none = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx_none;
+  reader_none->read(localState_none, ctx_none);
+  EXPECT_EQ(ctx_none.row_num(), 100);
+}
+
+TEST_F(ParquetTest, TestParquetExportWithRowGroupSize) {
+  // Test export with custom row group size
+  neug::QueryResponse response;
+  response.set_row_count(100);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < 100; ++i) {
+    int64_arr->add_values(i);
+  }
+  int64_arr->set_validity(std::string(13, 0xFF));
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id"};
+  entry_schema->columnTypes = {createInt64Type()};
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_rowgroup.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  file_schema.options = {{"row_group_size", "5000"}};  // Use valid value >= 1024
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with row_group_size: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is readable
+  auto sharedState = createSharedState(
+      "export_rowgroup.parquet",
+      {"id"},
+      {createInt64Type()},
+      {{"batch_read", "false"}});
+  
+  auto reader = createParquetReader(sharedState);
+  auto localState = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx;
+  reader->read(localState, ctx);
+  EXPECT_EQ(ctx.row_num(), 100);
+}
+
+TEST_F(ParquetTest, TestParquetExportWithDictionaryEncoding) {
+  // Test export with dictionary encoding disabled
+  neug::QueryResponse response;
+  const int num_rows = 10000;  // Larger dataset to show dictionary encoding benefits
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("category");
+  
+  // int64 array
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < num_rows; ++i) {
+    int64_arr->add_values(i);
+  }
+  int64_arr->set_validity(std::string((num_rows + 7) / 8, 0xFF));
+  
+  // string array with repeated long values (good for dictionary encoding)
+  // Only 5 unique values, each 100 characters long, repeated 2000 times each
+  auto* col1 = response.add_arrays();
+  auto* str_arr = col1->mutable_string_array();
+  // Create long strings (100 chars each)
+  const std::string categories[] = {
+      std::string(100, 'A'),  // "AAA...A" (100 times)
+      std::string(100, 'B'),  // "BBB...B" (100 times)
+      std::string(100, 'C'),  // "CCC...C" (100 times)
+      std::string(100, 'D'),  // "DDD...D" (100 times)
+      std::string(100, 'E')   // "EEE...E" (100 times)
+  };
+  for (int i = 0; i < num_rows; ++i) {
+    str_arr->add_values(categories[i % 5]);
+  }
+  str_arr->set_validity(std::string((num_rows + 7) / 8, 0xFF));
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "category"};
+  entry_schema->columnTypes = {createInt64Type(), createStringType()};
+  
+  // Test with dictionary encoding enabled (default)
+  std::string export_path_dict = std::string(PARQUET_TEST_DIR) + "/export_dict_enabled.parquet";
+  reader::FileSchema file_schema_dict;
+  file_schema_dict.paths = {export_path_dict};
+  file_schema_dict.format = "parquet";
+  file_schema_dict.options = {{"dictionary_encoding", "true"}, {"compression", "none"}};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer_dict(
+      file_schema_dict, file_system, entry_schema);
+  
+  auto status = writer_dict.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with dictionary encoding: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path_dict));
+  
+  // Test with dictionary encoding disabled
+  std::string export_path_nodict = std::string(PARQUET_TEST_DIR) + "/export_dict_disabled.parquet";
+  reader::FileSchema file_schema_nodict;
+  file_schema_nodict.paths = {export_path_nodict};
+  file_schema_nodict.format = "parquet";
+  file_schema_nodict.options = {{"dictionary_encoding", "false"}, {"compression", "none"}};
+  
+  neug::writer::ArrowParquetExportWriter writer_nodict(
+      file_schema_nodict, file_system, entry_schema);
+  
+  status = writer_nodict.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet without dictionary encoding: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path_nodict));
+  
+  // With 10K rows and only 5 unique categories, dictionary encoding should be smaller
+  auto size_dict = std::filesystem::file_size(export_path_dict);
+  auto size_nodict = std::filesystem::file_size(export_path_nodict);
+  LOG(INFO) << "Dictionary encoded size: " << size_dict << ", Non-dictionary size: " << size_nodict;
+  EXPECT_LT(size_dict, size_nodict) << "Dictionary encoded file should be smaller for low-cardinality strings";
+  
+  // Verify both files are readable
+  auto sharedState_dict = createSharedState(
+      "export_dict_enabled.parquet",
+      {"id", "category"},
+      {createInt64Type(), createStringType()},
+      {{"batch_read", "false"}});
+  
+  auto reader_dict = createParquetReader(sharedState_dict);
+  auto localState_dict = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx_dict;
+  reader_dict->read(localState_dict, ctx_dict);
+  EXPECT_EQ(ctx_dict.row_num(), num_rows);
+  
+  auto sharedState_nodict = createSharedState(
+      "export_dict_disabled.parquet",
+      {"id", "category"},
+      {createInt64Type(), createStringType()},
+      {{"batch_read", "false"}});
+  
+  auto reader_nodict = createParquetReader(sharedState_nodict);
+  auto localState_nodict = std::make_shared<reader::ReadLocalState>();
+  execution::Context ctx_nodict;
+  reader_nodict->read(localState_nodict, ctx_nodict);
+  EXPECT_EQ(ctx_nodict.row_num(), num_rows);
+}
+
 // End of Test Suites
 
 }  // namespace test

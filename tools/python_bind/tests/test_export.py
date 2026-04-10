@@ -30,6 +30,7 @@ from neug.database import Database
 
 try:
     import pyarrow.parquet as pq
+
     HAS_PYARROW = True
 except ImportError:
     HAS_PYARROW = False
@@ -698,17 +699,17 @@ class TestParquetExport:
     def setup(self, tmp_path):
         if not HAS_PYARROW:
             pytest.skip("PyArrow is required for Parquet export tests")
-        
+
         self.db_dir = "/tmp/tinysnb"
         if not os.path.exists(self.db_dir):
             pytest.fail(f"Database not found at {self.db_dir}")
         self.db = Database(db_path=self.db_dir, mode="w")
         self.conn = self.db.connect()
         self.tmp_path = tmp_path
-        
+
         # Load parquet extension
         self.conn.execute("load parquet")
-        
+
         yield
         self.conn.close()
         self.db.close()
@@ -719,22 +720,24 @@ class TestParquetExport:
         out_path = self.tmp_path / "person.parquet"
         if out_path.exists():
             out_path.unlink()
-        
-        expected = _count_query(self.conn, "MATCH (v:person) RETURN v.ID, v.fName, v.gender, v.age")
-        
+
+        expected = _count_query(
+            self.conn, "MATCH (v:person) RETURN v.ID, v.fName, v.gender, v.age"
+        )
+
         self.conn.execute(
             f"COPY (MATCH (v:person) RETURN v.ID, v.fName, v.gender, v.age) TO '{out_path}'"
         )
-        
+
         assert out_path.exists()
-        
+
         # Read back with PyArrow and verify
         table = pq.read_table(str(out_path))
         assert table.num_rows == expected
         assert table.num_columns == 4
-        
+
         # Verify column names
-        expected_columns = ['v.ID', 'v.fName', 'v.gender', 'v.age']
+        expected_columns = ["v.ID", "v.fName", "v.gender", "v.age"]
         assert table.column_names == expected_columns
 
     def test_export_edge_to_parquet(self):
@@ -742,17 +745,17 @@ class TestParquetExport:
         out_path = self.tmp_path / "knows.parquet"
         if out_path.exists():
             out_path.unlink()
-        
+
         expected = _count_query(
             self.conn, "MATCH (v:person)-[e:knows]->(v2:person) RETURN e"
         )
-        
+
         self.conn.execute(
             f"COPY (MATCH (v:person)-[e:knows]->(v2:person) RETURN e) TO '{out_path}'"
         )
-        
+
         assert out_path.exists()
-        
+
         # Read back with PyArrow
         table = pq.read_table(str(out_path))
         assert table.num_rows == expected
@@ -762,18 +765,18 @@ class TestParquetExport:
         out_path = self.tmp_path / "scalar_types.parquet"
         if out_path.exists():
             out_path.unlink()
-        
+
         # Export specific columns with different types
         self.conn.execute(
             f"COPY (MATCH (v:person) RETURN v.ID, v.fName) TO '{out_path}'"
         )
-        
+
         assert out_path.exists()
-        
+
         # Verify with PyArrow
         table = pq.read_table(str(out_path))
         assert table.num_columns == 2
-        
+
         # Check types: ID should be int32, fName should be string
         assert table.schema.field(0).type in [pq.int64(), pq.int32()]
         assert table.schema.field(1).type in [pq.string(), pq.large_string()]
@@ -783,14 +786,14 @@ class TestParquetExport:
         out_path = self.tmp_path / "empty.parquet"
         if out_path.exists():
             out_path.unlink()
-        
+
         # Query that returns no results
         self.conn.execute(
             f"COPY (MATCH (v:person) WHERE v.ID = -1 RETURN v.ID, v.fName) TO '{out_path}'"
         )
-        
+
         assert out_path.exists()
-        
+
         # Should create file with schema but 0 rows
         table = pq.read_table(str(out_path))
         assert table.num_rows == 0
@@ -801,12 +804,31 @@ class TestParquetExport:
         out_path = self.tmp_path / "nested" / "dir" / "export.parquet"
         if out_path.exists():
             out_path.unlink()
-        
+
         self.conn.execute(
             f"COPY (MATCH (v:person) RETURN v.ID, v.fName) TO '{out_path}'"
         )
-        
+
         assert out_path.exists()
-        
+
         table = pq.read_table(str(out_path))
         assert table.num_rows > 0
+
+    def test_export_with_combined_options(self):
+        """Test Parquet export with multiple options combined."""
+        out_path = self.tmp_path / "combined_options.parquet"
+        self.conn.execute(
+            f"COPY (MATCH (v:person) RETURN v.ID, v.fName) TO '{out_path}' "
+            "(COMPRESSION='zstd', ROW_GROUP_SIZE=5000, DICTIONARY_ENCODING=true)"
+        )
+        assert out_path.exists()
+
+        table = pq.read_table(str(out_path))
+        assert table.num_rows > 0
+        assert table.num_columns == 2
+
+        # Verify row group size
+        parquet_file = pq.ParquetFile(str(out_path))
+        for i in range(parquet_file.metadata.num_row_groups):
+            rg = parquet_file.metadata.row_group(i)
+            assert rg.num_rows <= 5000

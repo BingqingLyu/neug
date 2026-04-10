@@ -16,16 +16,73 @@
 
 #include "parquet_export_function.h"
 
+#include <algorithm>
 #include <arrow/array.h>
 #include <arrow/builder.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
+#include <glog/logging.h>
+#include <parquet/properties.h>
 
 #include "neug/compiler/main/metadata_registry.h"
 #include "neug/utils/exception/exception.h"
+#include "parquet_options.h"
 
 namespace neug {
 namespace writer {
+
+namespace {
+
+// Parse compression option from schema options
+static arrow::Compression::type parseCompressionOption(
+    const common::case_insensitive_map_t<std::string>& options) {
+  auto compression_opt = reader::ParquetExportOptions{}.compression;
+  std::string codec = compression_opt.get(options);
+  
+  // Convert to lowercase
+  std::transform(codec.begin(), codec.end(), codec.begin(), ::tolower);
+  
+  if (codec == "none" || codec == "uncompressed") {
+    return arrow::Compression::UNCOMPRESSED;
+  } else if (codec == "snappy") {
+    return arrow::Compression::SNAPPY;
+  } else if (codec == "zlib" || codec == "gzip") {
+    return arrow::Compression::GZIP;
+  } else if (codec == "zstd" || codec == "zstandard") {
+    return arrow::Compression::ZSTD;
+  } else {
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "Unsupported compression codec: " + codec + 
+        ". Supported: none, snappy, zlib, zstd");
+  }
+}
+
+// Parse row group size option
+static int64_t parseRowGroupSizeOption(
+    const common::case_insensitive_map_t<std::string>& options) {
+  auto row_group_opt = reader::ParquetExportOptions{}.row_group_size;
+  int64_t row_group_size = row_group_opt.get(options);
+  
+  // Warnings for extreme values, but allow them
+  if (row_group_size < 1024) {
+    LOG(WARNING) << "Very small row_group_size (" << row_group_size 
+                 << ") may result in many small row groups and poor compression.";
+  } else if (row_group_size > 10000000) {
+    LOG(WARNING) << "Very large row_group_size (" << row_group_size 
+                 << ") may increase memory usage significantly.";
+  }
+  
+  return row_group_size;
+}
+
+// Parse dictionary encoding option
+static bool parseDictionaryEncodingOption(
+    const common::case_insensitive_map_t<std::string>& options) {
+  auto dict_opt = reader::ParquetExportOptions{}.dictionary_encoding;
+  return dict_opt.get(options);
+}
+
+}  // anonymous namespace
 
 // Infer Arrow type from protobuf Array structure
 static std::shared_ptr<arrow::DataType> inferArrowTypeFromArray(
@@ -258,10 +315,25 @@ neug::Status ArrowParquetExportWriter::writeTable(const QueryResponse* table) {
     }
     auto outfile = result.ValueOrDie();
     
-    // 3. Create Parquet writer
+    // 3. Create Parquet writer with options
+    auto compression = parseCompressionOption(schema_.options);
+    auto row_group_size = parseRowGroupSizeOption(schema_.options);
+    auto dict_encoding = parseDictionaryEncodingOption(schema_.options);
+    
+    LOG(INFO) << "Parquet export options: compression=" << compression 
+              << ", row_group_size=" << row_group_size 
+              << ", dictionary_encoding=" << dict_encoding;
+    
     parquet::WriterProperties::Builder builder;
-    builder.compression(arrow::Compression::SNAPPY);
-    builder.enable_dictionary();
+    builder.compression(compression);
+    builder.max_row_group_length(row_group_size);
+    
+    if (dict_encoding) {
+      builder.enable_dictionary();
+    } else {
+      builder.disable_dictionary();
+    }
+    
     auto properties = builder.build();
     
     auto writer_result = parquet::arrow::FileWriter::Open(
@@ -339,7 +411,7 @@ static execution::Context parquetExecFunc(
   return ctx;
 }
 
-// Bind function (reuse pattern from JSON export)
+// Bind function
 static std::unique_ptr<ExportFuncBindData> bindFunc(
     ExportFuncBindInput& bindInput) {
   return std::make_unique<ExportFuncBindData>(
