@@ -1626,6 +1626,163 @@ TEST_F(ParquetTest, TestParquetExportWithStructType) {
   
 }
 
+TEST_F(ParquetTest, TestParquetExportWithVertexType) {
+  // Test export with vertex type (JSON string parsed to struct)
+  neug::QueryResponse response;
+  const int num_rows = 3;
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("vertex");
+  
+  // int64 array for id
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < num_rows; ++i) {
+    int64_arr->add_values(i + 1);
+  }
+  int64_arr->set_validity(std::string(1, 0xFF));
+  
+  // vertex array: each vertex is a JSON string
+  auto* col1 = response.add_arrays();
+  auto* vertex_arr = col1->mutable_vertex_array();
+  
+  // Add vertex JSON strings
+  vertex_arr->add_values(R"({"_ID": 1, "_LABEL": "person", "fName": "Alice", "age": 30})");
+  vertex_arr->add_values(R"({"_ID": 2, "_LABEL": "person", "fName": "Bob", "age": 25})");
+  vertex_arr->add_values(R"({"_ID": 3, "_LABEL": "person", "fName": "Charlie", "age": 35})");
+  vertex_arr->set_validity(std::string(1, 0xFF));
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_vertex.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "vertex"};
+  entry_schema->columnTypes = {createInt64Type(), createStringType()};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with vertex type: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is non-empty
+  auto file_size = std::filesystem::file_size(export_path);
+  EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
+  
+  // Note: Reading back complex types is not yet supported by the reader,
+  // so we only verify the file was written successfully
+}
+
+TEST_F(ParquetTest, TestParquetExportWithEdgeType) {
+  // Test export with edge type (JSON string parsed to struct)
+  neug::QueryResponse response;
+  const int num_rows = 3;
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("edge");
+  
+  // int64 array for id
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  for (int i = 0; i < num_rows; ++i) {
+    int64_arr->add_values(i + 1);
+  }
+  int64_arr->set_validity(std::string(1, 0xFF));
+  
+  // edge array: each edge is a JSON string
+  auto* col1 = response.add_arrays();
+  auto* edge_arr = col1->mutable_edge_array();
+  
+  // Add edge JSON strings
+  edge_arr->add_values(R"({"_ID": 100, "_LABEL": "knows", "_SRC_ID": 1, "_DST_ID": 2, "creationDate": "2020-01-01"})");
+  edge_arr->add_values(R"({"_ID": 101, "_LABEL": "knows", "_SRC_ID": 2, "_DST_ID": 3, "creationDate": "2020-02-01"})");
+  edge_arr->add_values(R"({"_ID": 102, "_LABEL": "knows", "_SRC_ID": 1, "_DST_ID": 3, "creationDate": "2020-03-01"})");
+  edge_arr->set_validity(std::string(1, 0xFF));
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_edge.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "edge"};
+  entry_schema->columnTypes = {createInt64Type(), createStringType()};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with edge type: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is non-empty
+  auto file_size = std::filesystem::file_size(export_path);
+  EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
+  
+  // Note: Reading back complex types is not yet supported by the reader,
+  // so we only verify the file was written successfully
+}
+
+TEST_F(ParquetTest, TestParquetExportWithPathType) {
+  // Test export with path type (JSON string parsed to struct)
+  neug::QueryResponse response;
+  const int num_rows = 2;
+  response.set_row_count(num_rows);
+  
+  auto* schema = response.mutable_schema();
+  schema->add_name("id");
+  schema->add_name("path");
+  
+  // int64 array for id
+  auto* col0 = response.add_arrays();
+  auto* int64_arr = col0->mutable_int64_array();
+  int64_arr->add_values(1);
+  int64_arr->add_values(2);
+  int64_arr->set_validity(std::string(1, 0xFF));
+  
+  // path array: each path is a JSON string
+  auto* col1 = response.add_arrays();
+  auto* path_arr = col1->mutable_path_array();
+  
+  // Add path JSON strings
+  path_arr->add_values(R"({"nodes": [{"_ID": 1, "_LABEL": "person", "fName": "Alice"}, {"_ID": 2, "_LABEL": "person", "fName": "Bob"}], "rels": [{"_ID": 100, "_LABEL": "knows", "_SRC_ID": 1, "_DST_ID": 2}], "length": 1})");
+  path_arr->add_values(R"({"nodes": [{"_ID": 2, "_LABEL": "person", "fName": "Bob"}, {"_ID": 3, "_LABEL": "person", "fName": "Charlie"}], "rels": [{"_ID": 101, "_LABEL": "knows", "_SRC_ID": 2, "_DST_ID": 3}], "length": 1})");
+  path_arr->set_validity(std::string(1, 0xFF));
+  
+  std::string export_path = std::string(PARQUET_TEST_DIR) + "/export_path.parquet";
+  reader::FileSchema file_schema;
+  file_schema.paths = {export_path};
+  file_schema.format = "parquet";
+  
+  auto entry_schema = std::make_shared<reader::TableEntrySchema>();
+  entry_schema->columnNames = {"id", "path"};
+  entry_schema->columnTypes = {createInt64Type(), createStringType()};
+  
+  auto file_system = std::make_shared<arrow::fs::LocalFileSystem>();
+  neug::writer::ArrowParquetExportWriter writer(
+      file_schema, file_system, entry_schema);
+  
+  auto status = writer.writeTable(&response);
+  ASSERT_TRUE(status.ok()) << "Failed to write Parquet with path type: " << status.ToString();
+  ASSERT_TRUE(std::filesystem::exists(export_path));
+  
+  // Verify file is non-empty
+  auto file_size = std::filesystem::file_size(export_path);
+  EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
+  
+  // Note: Reading back complex types is not yet supported by the reader,
+  // so we only verify the file was written successfully
+}
+
 // End of Test Suites
 
 }  // namespace test
