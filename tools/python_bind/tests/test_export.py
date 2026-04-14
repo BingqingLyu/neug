@@ -693,50 +693,68 @@ class TestExportComprehensiveGraph:
         self.conn.execute("LOAD PARQUET")
         self.conn.execute(f"COPY (MATCH (v:node_a) RETURN v.*) TO '{out_path}';")
         assert out_path.exists(), f"Output file not created: {out_path}"
-        
+
         # Verify by loading back with NeuG's LOAD FROM
         load_query = f'LOAD FROM "{out_path}" RETURN *'
         load_result = self.conn.execute(load_query)
         records = list(load_result)
-        assert len(records) == expected, f"Expected {expected} rows from LOAD, got {len(records)}"
-        
+        assert (
+            len(records) == expected
+        ), f"Expected {expected} rows from LOAD, got {len(records)}"
+
         # Verify content of first row (comprehensive_graph node_a row 0)
         if len(records) > 0:
             first_row = records[0]
-            # node_a has 11 columns: id, i32_property, i64_property, u32_property, 
-            # u64_property, f32_property, f64_property, str_property, 
+            # node_a has 11 columns: id, i32_property, i64_property, u32_property,
+            # u64_property, f32_property, f64_property, str_property,
             # date_property, datetime_property, interval_property
             assert len(first_row) == 11, f"Expected 11 columns, got {len(first_row)}"
-            
+
             # Verify specific values from comprehensive_graph/node_a.csv row 0
             assert first_row[0] == 0, f"id should be 0, got {first_row[0]}"  # id: INT64
-            assert first_row[1] == -123456789, f"i32_property mismatch"  # i32_property: INT32
-            assert first_row[2] == 9223372036854775807, f"i64_property mismatch"  # i64_property: INT64_MAX
-            assert first_row[3] == 4294967295, f"u32_property mismatch"  # u32_property: UINT32_MAX
-            assert first_row[4] == 18446744073709551615, f"u64_property mismatch"  # u64_property: UINT64_MAX
-            assert abs(first_row[5] - 3.1415927) < 1e-6, f"f32_property mismatch"  # f32_property: FLOAT32
-            assert abs(first_row[6] - 2.718281828459045) < 1e-9, f"f64_property mismatch"  # f64_property: DOUBLE
-            assert str(first_row[7]) == "test_string_0", f"str_property mismatch"  # str_property: STRING
-            assert str(first_row[8]) == "2023-01-15", f"date_property mismatch"  # date_property: DATE
+            assert (
+                first_row[1] == -123456789
+            ), f"i32_property mismatch, got {first_row[1]}"  # i32_property: INT32
+            assert (
+                first_row[2] == 9223372036854775807
+            ), f"i64_property mismatch, got {first_row[2]}"  # i64_property: INT64_MAX
+            assert (
+                first_row[3] == 4294967295
+            ), f"u32_property mismatch, got {first_row[3]}"  # u32_property: UINT32_MAX
+            assert (
+                first_row[4] == 18446744073709551615
+            ), f"u64_property mismatch, got {first_row[4]}"  # u64_property: UINT64_MAX
+            assert (
+                abs(first_row[5] - 3.1415927) < 1e-6
+            ), f"f32_property mismatch, got {first_row[5]}"  # f32_property: FLOAT32
+            assert (
+                abs(first_row[6] - 2.718281828459045) < 1e-9
+            ), f"f64_property mismatch, got {first_row[6]}"  # f64_property: DOUBLE
+            assert (
+                str(first_row[7]) == "test_string_0"
+            ), f"str_property mismatch, got {first_row[7]}"  # str_property: STRING
+            assert (
+                str(first_row[8]) == "2023-01-15"
+            ), f"date_property mismatch, got {first_row[8]}"  # date_property: DATE
             # Note: datetime_property TIMESTAMP may have timezone/epoch conversion issues
             # Just verify it's a valid datetime string for now
-            assert "2023-01-15" in str(first_row[9]) or str(first_row[9]).startswith("1970-"), \
-                f"datetime_property should contain date, got {first_row[9]}"
+            assert "2023-01-15" in str(first_row[9]) or str(first_row[9]).startswith(
+                "1970-"
+            ), f"datetime_property should contain date, got {first_row[9]}"
             # INTERVAL format includes spaces between units
-            assert "1 year" in str(first_row[10]) and "2 months" in str(first_row[10]), \
-                f"interval_property should contain '1 year 2 months', got {first_row[10]}"
-        
+            assert "1 year" in str(first_row[10]) and "2 months" in str(
+                first_row[10]
+            ), f"interval_property should contain '1 year 2 months', got {first_row[10]}"
 
     @extension_test
     def test_export_comprehensive_graph_vertex_to_parquet(self):
         """Export node_a vertex objects to Parquet; verify file creation."""
         out_path = self.tmp_path / "node_a_vertex.parquet"
         out_path.unlink(missing_ok=True)
-        expected = _count_query(self.conn, "MATCH (v:node_a) RETURN v")
         self.conn.execute("LOAD PARQUET")
         self.conn.execute(f"COPY (MATCH (v:node_a) RETURN v) TO '{out_path}';")
         assert out_path.exists(), f"Output file not created: {out_path}"
-        
+
         # Note: LOAD FROM does not yet support reading Struct types (Vertex/Edge),
         # so we only verify the file was created successfully
         # TODO: Enable LOAD FROM verification when Struct type reading is supported
@@ -748,15 +766,12 @@ class TestExportComprehensiveGraph:
         """Export rel_a edge objects to Parquet; verify file creation."""
         out_path = self.tmp_path / "rel_a_edge.parquet"
         out_path.unlink(missing_ok=True)
-        expected = _count_query(
-            self.conn, "MATCH (v:node_a)-[e:rel_a]->(v2:node_a) RETURN e"
-        )
         self.conn.execute("LOAD PARQUET")
         self.conn.execute(
             f"COPY (MATCH (v:node_a)-[e:rel_a]->(v2:node_a) RETURN e) TO '{out_path}';"
         )
         assert out_path.exists(), f"Output file not created: {out_path}"
-        
+
         # Note: LOAD FROM does not yet support reading Struct types (Vertex/Edge),
         # so we only verify the file was created successfully
         # TODO: Enable LOAD FROM verification when Struct type reading is supported
@@ -772,7 +787,7 @@ class TestParquetExport:
         self.db_dir = "/tmp/tinysnb"
         if not os.path.exists(self.db_dir):
             pytest.fail(f"Database not found at {self.db_dir}")
-        self.db = Database(db_path=self.db_dir, mode="rw")  
+        self.db = Database(db_path=self.db_dir, mode="rw")
         self.conn = self.db.connect()
         self.tmp_path = tmp_path
 
@@ -811,10 +826,6 @@ class TestParquetExport:
         if out_path.exists():
             out_path.unlink()
 
-        expected = _count_query(
-            self.conn, "MATCH (v:person)-[e:knows]->(v2:person) RETURN e"
-        )
-
         self.conn.execute(
             f"COPY (MATCH (v:person)-[e:knows]->(v2:person) RETURN e) TO '{out_path}'"
         )
@@ -830,7 +841,7 @@ class TestParquetExport:
         out_path = self.tmp_path / "scalar_types.parquet"
         if out_path.exists():
             out_path.unlink()
-            
+
         expected = _count_query(self.conn, "MATCH (v:person) RETURN v.ID, v.fName")
 
         # Export specific columns with different types
@@ -844,7 +855,7 @@ class TestParquetExport:
         load_result = self.conn.execute(f'LOAD FROM "{out_path}" RETURN *')
         records = list(load_result)
         assert len(records) == expected, f"Expected {expected} rows, got {len(records)}"
-        
+
         # TODO: check types
 
     def test_export_with_combined_options(self):
@@ -855,5 +866,3 @@ class TestParquetExport:
             "(COMPRESSION='zstd', ROW_GROUP_SIZE=5000, DICTIONARY_ENCODING=true)"
         )
         assert out_path.exists()
-        
-
