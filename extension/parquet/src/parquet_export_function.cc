@@ -99,10 +99,15 @@ static std::shared_ptr<arrow::DataType> inferArrowTypeFromJsonValue(
     return arrow::null();
   } else if (json_val.IsBool()) {
     return arrow::boolean();
-  } else if (json_val.IsInt() || json_val.IsInt64()) {
+  } else if (json_val.IsInt64()) {
     return arrow::int64();
-  } else if (json_val.IsUint() || json_val.IsUint64()) {
+  } else if (json_val.IsUint64()) {
+    // Uint64 values should be uint64, not int64
+    return arrow::uint64();
+  } else if (json_val.IsInt()) {
     return arrow::int64();
+  } else if (json_val.IsUint()) {
+    return arrow::uint64();
   } else if (json_val.IsDouble()) {
     return arrow::float64();
   } else if (json_val.IsString()) {
@@ -128,70 +133,67 @@ static std::shared_ptr<arrow::DataType> inferArrowTypeFromJsonValue(
 }
 
 // Helper function to convert JSON value to Arrow array element
-// This is used for building StructArray from JSON
+// Dispatches on JSON value type (not expected Arrow type) for simplicity and correctness
 static arrow::Status AppendJsonValueToBuilder(
     const rapidjson::Value& json_val,
-    const std::shared_ptr<arrow::DataType>& expected_type,
     arrow::ArrayBuilder* builder) {
   
   if (json_val.IsNull()) {
     return builder->AppendNull();
-  }
-  
-  switch (expected_type->id()) {
-    case arrow::Type::BOOL: {
-      auto* bool_builder = static_cast<arrow::BooleanBuilder*>(builder);
-      return bool_builder->Append(json_val.GetBool());
-    }
-    case arrow::Type::INT64: {
-      auto* int_builder = static_cast<arrow::Int64Builder*>(builder);
-      return int_builder->Append(json_val.GetInt64());
-    }
-    case arrow::Type::UINT64: {
-      auto* uint_builder = static_cast<arrow::UInt64Builder*>(builder);
-      return uint_builder->Append(json_val.GetUint64());
-    }
-    case arrow::Type::DOUBLE: {
-      auto* double_builder = static_cast<arrow::DoubleBuilder*>(builder);
-      return double_builder->Append(json_val.GetDouble());
-    }
-    case arrow::Type::STRING: {
-      auto* string_builder = static_cast<arrow::StringBuilder*>(builder);
-      return string_builder->Append(json_val.GetString());
-    }
-    case arrow::Type::STRUCT: {
-      auto* struct_builder = static_cast<arrow::StructBuilder*>(builder);
-      auto struct_type = std::static_pointer_cast<arrow::StructType>(expected_type);
-      
+  } else if (json_val.IsBool()) {
+    auto* bool_builder = static_cast<arrow::BooleanBuilder*>(builder);
+    return bool_builder->Append(json_val.GetBool());
+  } else if (json_val.IsInt64()) {
+    auto* int_builder = static_cast<arrow::Int64Builder*>(builder);
+    return int_builder->Append(json_val.GetInt64());
+  } else if (json_val.IsUint64()) {
+    auto* uint_builder = static_cast<arrow::UInt64Builder*>(builder);
+    return uint_builder->Append(json_val.GetUint64());
+  } else if (json_val.IsInt()) {
+    auto* int_builder = static_cast<arrow::Int64Builder*>(builder);
+    return int_builder->Append(static_cast<int64_t>(json_val.GetInt()));
+  } else if (json_val.IsUint()) {
+    auto* uint_builder = static_cast<arrow::UInt64Builder*>(builder);
+    return uint_builder->Append(static_cast<uint64_t>(json_val.GetUint()));
+  } else if (json_val.IsDouble()) {
+    auto* double_builder = static_cast<arrow::DoubleBuilder*>(builder);
+    return double_builder->Append(json_val.GetDouble());
+  } else if (json_val.IsString()) {
+    auto* string_builder = static_cast<arrow::StringBuilder*>(builder);
+    return string_builder->Append(json_val.GetString());
+  } else if (json_val.IsObject()) {
+    // Handle as struct
+    auto* struct_builder = static_cast<arrow::StructBuilder*>(builder);
+    
+    for (auto it = json_val.MemberBegin(); it != json_val.MemberEnd(); ++it) {
+      // Find field index by name
+      std::string field_name = it->name.GetString();
+      int field_idx = -1;
+      auto struct_type = std::static_pointer_cast<arrow::StructType>(builder->type());
       for (int i = 0; i < struct_type->num_fields(); ++i) {
-        std::string field_name = struct_type->field(i)->name();
-        if (json_val.HasMember(field_name.c_str())) {
-          const auto& field_val = json_val[field_name.c_str()];
-          auto field_type = struct_type->field(i)->type();
-          auto field_builder = struct_builder->field_builder(i);
-          ARROW_RETURN_NOT_OK(
-              AppendJsonValueToBuilder(field_val, field_type, field_builder));
-        } else {
-          ARROW_RETURN_NOT_OK(struct_builder->field_builder(i)->AppendNull());
+        if (struct_type->field(i)->name() == field_name) {
+          field_idx = i;
+          break;
         }
       }
-      return struct_builder->Append();
-    }
-    case arrow::Type::LIST: {
-      auto* list_builder = static_cast<arrow::ListBuilder*>(builder);
-      auto list_type = std::static_pointer_cast<arrow::ListType>(expected_type);
-      auto elem_type = list_type->value_type();
-      auto elem_builder = list_builder->value_builder();
       
-      for (size_t i = 0; i < json_val.Size(); ++i) {
-        ARROW_RETURN_NOT_OK(
-            AppendJsonValueToBuilder(json_val[i], elem_type, elem_builder));
+      if (field_idx >= 0) {
+        auto field_builder = struct_builder->field_builder(field_idx);
+        ARROW_RETURN_NOT_OK(AppendJsonValueToBuilder(it->value, field_builder));
       }
-      return list_builder->Append();
     }
-    default:
-      return arrow::Status::NotImplemented(
-          "Unsupported JSON value type: " + expected_type->ToString());
+    return struct_builder->Append();
+  } else if (json_val.IsArray()) {
+    auto* list_builder = static_cast<arrow::ListBuilder*>(builder);
+    auto elem_builder = list_builder->value_builder();
+    
+    for (size_t i = 0; i < json_val.Size(); ++i) {
+      ARROW_RETURN_NOT_OK(AppendJsonValueToBuilder(json_val[i], elem_builder));
+    }
+    return list_builder->Append();
+  } else {
+    return arrow::Status::NotImplemented(
+        "Unsupported JSON value type");
   }
 }
 
@@ -244,7 +246,7 @@ static std::shared_ptr<arrow::Array> convertGraphJsonToArray(
     if (writer::StringFormatBuffer::validateProtoValue(*validity, i)) {
       rapidjson::Document doc;
       doc.Parse(get_json(i).c_str());
-      auto status = AppendJsonValueToBuilder(doc, struct_type, builder.get());
+      auto status = AppendJsonValueToBuilder(doc, builder.get());
       if (!status.ok()) {
         THROW_RUNTIME_ERROR("Failed to append JSON: " + status.ToString());
       }
