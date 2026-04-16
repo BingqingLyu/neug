@@ -133,7 +133,6 @@ static std::shared_ptr<arrow::DataType> inferArrowTypeFromJsonValue(
 }
 
 // Helper function to convert JSON value to Arrow array element
-// Dispatches on JSON value type (not expected Arrow type) for simplicity and correctness
 static arrow::Status AppendJsonValueToBuilder(
     const rapidjson::Value& json_val,
     arrow::ArrayBuilder* builder) {
@@ -442,8 +441,6 @@ static std::shared_ptr<arrow::Array> protoArrayToArrowArray(
         reinterpret_cast<const uint8_t*>(list_arr.offsets().data()),
         list_arr.offsets_size() * sizeof(int32_t));
     
-    // For now, don't pass validity buffer to avoid Arrow's limitation
-    // "Lists with non-zero length null components are not supported"
     // If all values are valid (no nulls), we can safely omit validity buffer
     std::shared_ptr<arrow::Buffer> validity_buffer = nullptr;
     

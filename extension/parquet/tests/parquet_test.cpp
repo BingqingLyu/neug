@@ -1478,9 +1478,6 @@ TEST_F(ParquetTest, TestParquetExportWithListType) {
   ASSERT_TRUE(status.ok()) << "Failed to write Parquet with list type: " << status.ToString();
   ASSERT_TRUE(std::filesystem::exists(export_path));
   
-  // Verify file is readable
-  // Note: List type requires special handling in reader, so we just verify file exists
-  // and is non-empty for now
   auto file_size = std::filesystem::file_size(export_path);
   EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
 }
@@ -1674,9 +1671,6 @@ TEST_F(ParquetTest, TestParquetExportWithVertexType) {
   // Verify file is non-empty
   auto file_size = std::filesystem::file_size(export_path);
   EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
-  
-  // Note: Reading back complex types is not yet supported by the reader,
-  // so we only verify the file was written successfully
 }
 
 TEST_F(ParquetTest, TestParquetExportWithEdgeType) {
@@ -1727,9 +1721,6 @@ TEST_F(ParquetTest, TestParquetExportWithEdgeType) {
   // Verify file is non-empty
   auto file_size = std::filesystem::file_size(export_path);
   EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
-  
-  // Note: Reading back complex types is not yet supported by the reader,
-  // so we only verify the file was written successfully
 }
 
 TEST_F(ParquetTest, TestParquetExportWithPathType) {
@@ -1779,8 +1770,6 @@ TEST_F(ParquetTest, TestParquetExportWithPathType) {
   auto file_size = std::filesystem::file_size(export_path);
   EXPECT_GT(file_size, 0) << "Parquet file should not be empty";
   
-  // Note: Reading back complex types is not yet supported by the reader,
-  // so we only verify the file was written successfully
 }
 
 // End of Test Suites

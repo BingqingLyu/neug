@@ -856,13 +856,19 @@ class TestParquetExport:
         records = list(load_result)
         assert len(records) == expected, f"Expected {expected} rows, got {len(records)}"
 
-        # TODO: check types
-
     def test_export_with_combined_options(self):
         """Test Parquet export with multiple options combined."""
         out_path = self.tmp_path / "combined_options.parquet"
+
+        expected = _count_query(self.conn, "MATCH (v:person) RETURN v.ID, v.fName")
+
         self.conn.execute(
             f"COPY (MATCH (v:person) RETURN v.ID, v.fName) TO '{out_path}' "
             "(COMPRESSION='zstd', ROW_GROUP_SIZE=5000, DICTIONARY_ENCODING=true)"
         )
         assert out_path.exists()
+
+        # Verify by loading back with NeuG's LOAD FROM
+        load_result = self.conn.execute(f'LOAD FROM "{out_path}" RETURN *')
+        records = list(load_result)
+        assert len(records) == expected, f"Expected {expected} rows, got {len(records)}"
