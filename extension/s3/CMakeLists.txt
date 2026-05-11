@@ -11,7 +11,7 @@ file(GLOB S3_EXTENSION_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 set(S3_EXTENSION_OBJECT_FILES ${S3_EXTENSION_SOURCES})
 
-# Use the extension build system 
+# Use the extension build system
 build_extension_lib("s3")
 
 # Set include directories
@@ -25,17 +25,20 @@ if(ARROW_INCLUDE_DIRS)
     target_include_directories(neug_s3_extension PRIVATE SYSTEM ${ARROW_INCLUDE_DIRS})
 endif()
 
-# Link libraries
+# The S3 filesystem support (arrow/filesystem/s3fs.h) is compiled into
+# ARROW_BASE_LIB when ARROW_S3=ON, so no additional Arrow component is needed.
+# cURL is required for HTTP/HTTPS filesystem support.
 target_link_libraries(neug_s3_extension PRIVATE
-    ${CURL_LIBRARIES}
     neug
+    ${ARROW_BASE_LIB}
+    ${CURL_LIBRARIES}
 )
 
 if(BUILD_TEST)
     add_extension_test(NAME s3
         TEST_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/tests/s3_test.cpp
                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/http_test.cpp
-        EXTRA_LINK_LIBS arrow_dataset_objlib ${ARROW_PARQUET_LIB} ${CURL_LIBRARIES}
+        EXTRA_LINK_LIBS ${ARROW_BASE_LIB} ${CURL_LIBRARIES}
         EXTRA_INCLUDE_DIRS ${CURL_INCLUDE_DIRS}
     )
 endif()

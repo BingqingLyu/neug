@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <cstdlib>
 #include <glog/logging.h>
 #include <arrow/filesystem/s3fs.h>
 #include "neug/compiler/main/metadata_registry.h"
@@ -49,6 +50,21 @@ static void RegisterHTTPProvider() {
       << "[s3 extension] HTTPFileSystem registered for schemes: http, https";
 }
 
+// Finalize Arrow S3 to prevent exit crash (called at process exit)
+static void FinalizeS3OnExit() {
+  try {
+    auto status = arrow::fs::FinalizeS3();
+    if (!status.ok()) {
+      LOG(WARNING) << "[s3 extension] Failed to finalize Arrow S3: "
+                   << status.ToString();
+    } else {
+      LOG(INFO) << "[s3 extension] Arrow S3 finalized successfully";
+    }
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "[s3 extension] cleanup failed: " << e.what();
+  }
+}
+
 }  // namespace s3
 }  // namespace extension
 }  // namespace neug
@@ -67,6 +83,9 @@ void Init() {
 
     // Register HTTP/HTTPS filesystem provider
     neug::extension::s3::RegisterHTTPProvider();
+
+    // Register atexit handler to finalize S3 on process exit
+    std::atexit(neug::extension::s3::FinalizeS3OnExit);
 
     LOG(INFO) << "[s3 extension] initialized (s3, oss, http, https)";
   } catch (const std::exception& e) {

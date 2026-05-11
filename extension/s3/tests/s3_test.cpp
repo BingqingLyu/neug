@@ -43,6 +43,15 @@ class S3ExtensionTest : public ::testing::Test {
     }
   }
 
+  // Called once after all tests in this test suite
+  static void TearDownTestSuite() {
+    // Finalize Arrow S3 subsystem to prevent exit crash
+    auto status = arrow::fs::FinalizeS3();
+    if (!status.ok()) {
+      LOG(WARNING) << "Failed to finalize Arrow S3: " << status.ToString();
+    }
+  }
+
   // Called before each test case
   void SetUp() override {
     oss_endpoint_ = getEnvOrDefault("OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com");
