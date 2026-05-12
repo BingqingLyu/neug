@@ -291,11 +291,21 @@ def run_parquet_extension_suite(db_parquet, conn_parquet, db_path_parquet):
     shutil.rmtree(db_path_parquet, ignore_errors=True)
 
 
-OSS_ENDPOINT = "oss-cn-beijing.aliyuncs.com"
-OSS_VERTEX_PATH = "oss://graphscope/neug/vPerson.parquet"
-OSS_EDGE_PATH = "oss://graphscope/neug/eMeets.parquet"
-HTTP_VERTEX_PATH = "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/vPerson.parquet"
-HTTP_EDGE_PATH = "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/eMeets.parquet"
+OSS_ENDPOINT = os.environ.get("NEUG_TEST_OSS_ENDPOINT", "oss-cn-beijing.aliyuncs.com")
+OSS_VERTEX_PATH = os.environ.get(
+    "NEUG_TEST_OSS_VERTEX", "oss://graphscope/neug/vPerson.parquet"
+)
+OSS_EDGE_PATH = os.environ.get(
+    "NEUG_TEST_OSS_EDGE", "oss://graphscope/neug/eMeets.parquet"
+)
+HTTP_VERTEX_PATH = os.environ.get(
+    "NEUG_TEST_HTTP_VERTEX",
+    "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/vPerson.parquet",
+)
+HTTP_EDGE_PATH = os.environ.get(
+    "NEUG_TEST_HTTP_EDGE",
+    "http://graphscope.oss-cn-beijing.aliyuncs.com/neug/eMeets.parquet",
+)
 # Public AWS S3 dataset: Ookla Open Data (us-west-2, anonymous access)
 # Schema (2019 Q1): avg_d_kbps, avg_u_kbps, avg_lat_ms, tests, devices, quadkey, tile
 S3_OOKLA_PATH = (

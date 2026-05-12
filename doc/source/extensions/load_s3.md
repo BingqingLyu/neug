@@ -110,7 +110,7 @@ RETURN *;
 ```
 ### Glob Pattern
 
-Load multiple files matching a pattern:
+Load multiple files matching a pattern. Supported wildcards: `*` (matches any sequence of characters), `?` (matches a single character), `[abc]` (matches any character in the set). Patterns like `**` and `{a,b}` are **not** supported.
 
 ```cypher
 LOAD FROM "s3://my-bucket/data/*.parquet"

@@ -57,8 +57,6 @@ static void FinalizeS3OnExit() {
     if (!status.ok()) {
       LOG(WARNING) << "[s3 extension] Failed to finalize Arrow S3: "
                    << status.ToString();
-    } else {
-      LOG(INFO) << "[s3 extension] Arrow S3 finalized successfully";
     }
   } catch (const std::exception& e) {
     LOG(ERROR) << "[s3 extension] cleanup failed: " << e.what();

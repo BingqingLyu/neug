@@ -31,6 +31,14 @@ namespace s3 {
 
 namespace {
 
+// Mask a credential string for safe logging: show first 4 chars + "***".
+// Returns "(not set)" if the string is empty.
+std::string maskCredential(const std::string& value) {
+  if (value.empty()) return "(not set)";
+  if (value.size() <= 4) return "***";
+  return value.substr(0, 4) + "***";
+}
+
 // Generic helper: resolve an option with multiple key aliases and environment variable fallback.
 // Priority:
 //   1. schema.options[any key in option_keys]
@@ -134,7 +142,7 @@ arrow::fs::S3Options S3OptionsBuilder::build() const {
   LOG(INFO) << "  Scheme: " << s3_options.scheme;
   LOG(INFO) << "  Connect timeout: " << s3_options.connect_timeout << "s";
   LOG(INFO) << "  Request timeout: " << s3_options.request_timeout << "s";
-  LOG(INFO) << "  Access key: " << (s3_options.GetAccessKey().empty() ? "(not set)" : s3_options.GetAccessKey().substr(0, 8) + "...");
+  LOG(INFO) << "  Access key: " << maskCredential(s3_options.GetAccessKey());
   LOG(INFO) << "  Credentials kind: " << static_cast<int>(s3_options.credentials_kind);
   LOG(INFO) << "===============================";
   
@@ -283,7 +291,7 @@ void S3OptionsBuilder::configureCredentials(arrow::fs::S3Options& s3_options, bo
       
       s3_options.ConfigureAccessKey(access_key, secret_key);
       LOG(INFO) << "Configured explicit credentials (access_key: " 
-                << access_key.substr(0, 8) << "...)";
+                << maskCredential(access_key) << ")";
       break;
     }
     

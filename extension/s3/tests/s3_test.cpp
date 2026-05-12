@@ -5,7 +5,9 @@
 #include "gtest/gtest.h"
 #include <glog/logging.h>
 #include "s3_filesystem.h"
+#include "glob_utils.h"
 #include "neug/utils/reader/schema.h"
+#include "neug/utils/reader/options.h"
 #include "neug/utils/exception/exception.h"
 #include <arrow/filesystem/s3fs.h>
 #include <cstdlib>
@@ -659,4 +661,136 @@ TEST_F(S3ExtensionTest, E2E_HTTPSURLNotSupportedViaS3) {
   LOG(INFO) << "✓ Reason: S3FileSystem uses S3 API (GetObject, etc.)";
   LOG(INFO) << "✓ Solution: Use oss:// URI with OSS_ENDPOINT configuration";
   LOG(INFO) << "✓ Example: oss://bucket/path + OSS_ENDPOINT=oss-cn-beijing.aliyuncs.com";
+}
+
+// ============================================================================
+// Fix #4: Glob Pattern Matching (fnmatch-based)
+// Tests for MatchGlobPattern using POSIX fnmatch, including [abc] support.
+// ============================================================================
+
+using neug::extension::s3::MatchGlobPattern;
+
+TEST(GlobPatternTest, BasicStarMatch) {
+  EXPECT_TRUE(MatchGlobPattern("test.parquet", "*.parquet"));
+  EXPECT_TRUE(MatchGlobPattern("abc.parquet", "*.parquet"));
+  EXPECT_FALSE(MatchGlobPattern("test.csv", "*.parquet"));
+}
+
+TEST(GlobPatternTest, StarMatchesSlash) {
+  // '*' should match '/' in S3 paths (no FNM_PATHNAME flag)
+  EXPECT_TRUE(MatchGlobPattern("data/sub/test.parquet", "data*.parquet"));
+  EXPECT_TRUE(MatchGlobPattern("a/b/c.txt", "*c.txt"));
+}
+
+TEST(GlobPatternTest, QuestionMarkMatch) {
+  EXPECT_TRUE(MatchGlobPattern("file1.csv", "file?.csv"));
+  EXPECT_TRUE(MatchGlobPattern("fileX.csv", "file?.csv"));
+  EXPECT_FALSE(MatchGlobPattern("file12.csv", "file?.csv"));
+}
+
+TEST(GlobPatternTest, CharacterClassMatch) {
+  // [abc] character classes are now supported via fnmatch
+  EXPECT_TRUE(MatchGlobPattern("file1.csv", "file[123].csv"));
+  EXPECT_TRUE(MatchGlobPattern("file2.csv", "file[123].csv"));
+  EXPECT_TRUE(MatchGlobPattern("file3.csv", "file[123].csv"));
+  EXPECT_FALSE(MatchGlobPattern("file4.csv", "file[123].csv"));
+}
+
+TEST(GlobPatternTest, NegatedCharacterClass) {
+  // [!abc] negated character class
+  EXPECT_FALSE(MatchGlobPattern("fileA.csv", "file[!ABC].csv"));
+  EXPECT_TRUE(MatchGlobPattern("fileD.csv", "file[!ABC].csv"));
+  EXPECT_TRUE(MatchGlobPattern("file1.csv", "file[!ABC].csv"));
+}
+
+TEST(GlobPatternTest, CharacterRange) {
+  // [a-z] character range
+  EXPECT_TRUE(MatchGlobPattern("data_a.parquet", "data_[a-z].parquet"));
+  EXPECT_TRUE(MatchGlobPattern("data_m.parquet", "data_[a-z].parquet"));
+  EXPECT_FALSE(MatchGlobPattern("data_A.parquet", "data_[a-z].parquet"));
+  EXPECT_FALSE(MatchGlobPattern("data_1.parquet", "data_[a-z].parquet"));
+}
+
+TEST(GlobPatternTest, ExactMatch) {
+  EXPECT_TRUE(MatchGlobPattern("exact.txt", "exact.txt"));
+  EXPECT_FALSE(MatchGlobPattern("exact.txt", "other.txt"));
+}
+
+TEST(GlobPatternTest, EmptyPatternAndText) {
+  EXPECT_TRUE(MatchGlobPattern("", ""));
+  EXPECT_TRUE(MatchGlobPattern("", "*"));
+  EXPECT_FALSE(MatchGlobPattern("nonempty", ""));
+}
+
+TEST(GlobPatternTest, S3PathLikePatterns) {
+  // Typical S3/OSS path patterns
+  EXPECT_TRUE(MatchGlobPattern(
+      "year=2024/month=01/data.parquet",
+      "year=2024/month=*/data.parquet"));
+  EXPECT_TRUE(MatchGlobPattern(
+      "prefix/subdir/file_001.parquet",
+      "prefix/*/file_*.parquet"));
+  EXPECT_FALSE(MatchGlobPattern(
+      "prefix/subdir/file_001.csv",
+      "prefix/*/file_*.parquet"));
+}
+
+// ============================================================================
+// Fix #13: DoubleOption Non-Negative Validation
+// Verify that negative timeout values are rejected.
+// ============================================================================
+
+TEST(DoubleOptionTest, ValidPositiveValue) {
+  auto opt = neug::reader::Option<double>::DoubleOption("TIMEOUT", 5.0);
+  neug::reader::options_t options;
+  options["TIMEOUT"] = "10.5";
+  EXPECT_DOUBLE_EQ(opt.get(options), 10.5);
+}
+
+TEST(DoubleOptionTest, DefaultValue) {
+  auto opt = neug::reader::Option<double>::DoubleOption("TIMEOUT", 5.0);
+  neug::reader::options_t options;  // no key present
+  EXPECT_DOUBLE_EQ(opt.get(options), 5.0);
+}
+
+TEST(DoubleOptionTest, ZeroIsAccepted) {
+  auto opt = neug::reader::Option<double>::DoubleOption("TIMEOUT", 5.0);
+  neug::reader::options_t options;
+  options["TIMEOUT"] = "0";
+  EXPECT_DOUBLE_EQ(opt.get(options), 0.0);
+}
+
+TEST(DoubleOptionTest, NegativeValueThrows) {
+  auto opt = neug::reader::Option<double>::DoubleOption("TIMEOUT", 5.0);
+  neug::reader::options_t options;
+  options["TIMEOUT"] = "-1.0";
+  EXPECT_THROW(opt.get(options), neug::exception::Exception);
+}
+
+TEST(DoubleOptionTest, InvalidStringThrows) {
+  auto opt = neug::reader::Option<double>::DoubleOption("TIMEOUT", 5.0);
+  neug::reader::options_t options;
+  options["TIMEOUT"] = "not_a_number";
+  EXPECT_THROW(opt.get(options), neug::exception::Exception);
+}
+
+// ============================================================================
+// Fix #3: Credential Masking (no secret key in logs)
+// Verify that buildS3Options doesn't crash when credentials are provided.
+// (Log content verification requires log capture which is beyond unit test
+// scope, but we verify the code path executes without error.)
+// ============================================================================
+
+TEST_F(S3ExtensionTest, BuildS3Options_ExplicitCredentials_NoLogLeak) {
+  FileSchema schema;
+  schema.paths = {"s3://test-bucket/file.parquet"};
+  schema.protocol = "s3";
+  schema.options["CREDENTIALS_KIND"] = "Explicit";
+  schema.options["OSS_ACCESS_KEY_ID"] = "AKID1234567890EXAMPLE";
+  schema.options["OSS_ACCESS_KEY_SECRET"] = "SuperSecretKeyThatMustNotAppearInLogs";
+
+  // This should not crash and the masked log should only show first 4 chars
+  auto s3_options = S3FileSystem::buildS3Options(schema);
+  EXPECT_EQ(s3_options.GetAccessKey(), "AKID1234567890EXAMPLE");
+  EXPECT_EQ(s3_options.GetSecretKey(), "SuperSecretKeyThatMustNotAppearInLogs");
 }

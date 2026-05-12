@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <fnmatch.h>
 #include <arrow/filesystem/filesystem.h>
 #include <memory>
 #include <string>
@@ -29,52 +30,18 @@ namespace s3 {
 /**
  * @brief Match a file path against a glob pattern
  *
- * Simple glob pattern matcher for filesystem paths.
- * Supports: * (matches any chars), ? (matches single char)
- * This is a lightweight implementation preferred for performance-critical
- * path filtering (e.g., S3 object listing).
+ * Uses POSIX fnmatch() for robust glob pattern matching.
+ * Supports: * (matches any chars including /), ? (matches single char),
+ *           [abc] (character classes), [!abc] (negated character classes)
+ * Does NOT support: ** (recursive directory matching), {a,b} (alternatives)
  *
  * @param text The file path to test
  * @param pattern The glob pattern
  * @return true if the path matches the pattern
  */
 inline bool MatchGlobPattern(const std::string& text, const std::string& pattern) {
-  size_t text_idx = 0;
-  size_t pattern_idx = 0;
-  size_t text_backup = std::string::npos;
-  size_t pattern_backup = std::string::npos;
-
-  while (text_idx < text.length()) {
-    if (pattern_idx < pattern.length()) {
-      if (pattern[pattern_idx] == '*') {
-        // Save position for backtracking
-        pattern_backup = pattern_idx++;
-        text_backup = text_idx;
-        continue;
-      } else if (pattern[pattern_idx] == '?' || pattern[pattern_idx] == text[text_idx]) {
-        // Match single char or exact match
-        pattern_idx++;
-        text_idx++;
-        continue;
-      }
-    }
-
-    // Mismatch - try backtracking if we saw a '*'
-    if (pattern_backup != std::string::npos) {
-      pattern_idx = pattern_backup + 1;
-      text_idx = ++text_backup;
-      continue;
-    }
-
-    return false;
-  }
-
-  // Consume remaining '*' in pattern
-  while (pattern_idx < pattern.length() && pattern[pattern_idx] == '*') {
-    pattern_idx++;
-  }
-
-  return pattern_idx == pattern.length();
+  // flags=0: '*' matches any character including '/', '?' matches any single char
+  return fnmatch(pattern.c_str(), text.c_str(), 0) == 0;
 }
 
 /**

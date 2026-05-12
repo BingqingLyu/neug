@@ -16,7 +16,10 @@
 
 #include <gtest/gtest.h>
 #include <glog/logging.h>
+#include <atomic>
 #include <iomanip>
+#include <thread>
+#include <vector>
 #include "../include/http_filesystem.h"
 #include "../include/http_options.h"
 #include "neug/compiler/common/case_insensitive_map.h"
@@ -316,4 +319,159 @@ TEST_F(HTTPFileSystemTest, E2E_AccessPublicHTTPParquetFile) {
       // Don't fail test if network unavailable
     }
   });
+}
+
+// ============================================================================
+// Fix #2: CURL Global Initialization Thread Safety (std::call_once)
+// Verify multiple concurrent HTTPFileSystem constructions don't crash.
+// ============================================================================
+
+TEST_F(HTTPFileSystemTest, ConcurrentConstruction_ThreadSafety) {
+  // Create multiple HTTPFileSystem instances from different threads
+  // to verify std::call_once correctly serializes curl_global_init.
+  constexpr int kNumThreads = 8;
+  std::vector<std::thread> threads;
+  std::atomic<int> success_count{0};
+
+  for (int i = 0; i < kNumThreads; ++i) {
+    threads.emplace_back([&success_count]() {
+      try {
+        neug::common::case_insensitive_map_t<std::string> options;
+        HTTPFileSystem fs(options);
+        ++success_count;
+      } catch (...) {
+        // Should not throw
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  EXPECT_EQ(success_count.load(), kNumThreads)
+      << "All threads should construct HTTPFileSystem without error";
+}
+
+// ============================================================================
+// Fix #5: GetFileInfo uses lightweight HEAD request (no full file handle)
+// Verify GetFileInfo returns correct info for a known public file.
+// ============================================================================
+
+TEST_F(HTTPFileSystemTest, GetFileInfo_ReturnsCorrectSize) {
+  neug::common::case_insensitive_map_t<std::string> options;
+  HTTPFileSystem fs(options);
+
+  // Use a known public file with a stable size
+  const std::string url =
+      "https://graphscope.oss-cn-beijing.aliyuncs.com"
+      "/neug-dataset/GithubGraphTest/nodes_Actor.parquet";
+
+  auto info_result = fs.GetFileInfo(url);
+  ASSERT_TRUE(info_result.ok()) << info_result.status().ToString();
+
+  auto info = *info_result;
+  EXPECT_EQ(info.type(), arrow::fs::FileType::File);
+  // File should report a positive size from Content-Length header
+  EXPECT_GT(info.size(), 0) << "HEAD request should retrieve Content-Length";
+}
+
+// ============================================================================
+// Fix #1: HTTP Range 200 status code handling (graceful degradation)
+// Verify ReadRange works correctly when server returns 206 (partial content),
+// and that the code path doesn't crash for standard Range responses.
+// ============================================================================
+
+TEST_F(HTTPFileSystemTest, ReadRange_Returns206_PartialContent) {
+  // OSS supports Range requests and returns 206.
+  // Verify that reading a small range from a known file works correctly.
+  neug::common::case_insensitive_map_t<std::string> options;
+  HTTPFileSystem fs(options);
+
+  const std::string url =
+      "https://graphscope.oss-cn-beijing.aliyuncs.com"
+      "/neug-dataset/GithubGraphTest/nodes_Actor.parquet";
+
+  auto file_result = fs.OpenInputFile(url);
+  ASSERT_TRUE(file_result.ok()) << file_result.status().ToString();
+
+  auto file = *file_result;
+
+  // Read first 4 bytes (Parquet magic "PAR1") via Range request
+  auto buf_result = file->ReadAt(0, 4);
+  ASSERT_TRUE(buf_result.ok()) << buf_result.status().ToString();
+
+  auto buf = *buf_result;
+  ASSERT_EQ(buf->size(), 4);
+  EXPECT_EQ(buf->data()[0], 'P');
+  EXPECT_EQ(buf->data()[1], 'A');
+  EXPECT_EQ(buf->data()[2], 'R');
+  EXPECT_EQ(buf->data()[3], '1');
+}
+
+TEST_F(HTTPFileSystemTest, ReadRange_OffsetBeyondEOF_ReturnsError) {
+  // Reading past the end of file triggers HTTP 416 Range Not Satisfiable.
+  // The server returns an error response body which exceeds the small request
+  // buffer, causing WriteCallbackDirect to abort the transfer (Fix #10).
+  // Key assertion: no crash, no buffer overflow — returns IOError gracefully.
+  neug::common::case_insensitive_map_t<std::string> options;
+  HTTPFileSystem fs(options);
+
+  const std::string url =
+      "https://graphscope.oss-cn-beijing.aliyuncs.com"
+      "/neug-dataset/GithubGraphTest/nodes_Actor.parquet";
+
+  auto file_result = fs.OpenInputFile(url);
+  ASSERT_TRUE(file_result.ok()) << file_result.status().ToString();
+
+  auto file = *file_result;
+  auto size_result = file->GetSize();
+  ASSERT_TRUE(size_result.ok());
+  int64_t file_size = *size_result;
+
+  // Request starting well beyond the file size
+  auto buf_result = file->ReadAt(file_size + 1000, 100);
+  // Server returns 416 + error body. WriteCallbackDirect aborts the transfer
+  // because the error body exceeds the 100-byte buffer. This correctly
+  // propagates as an IOError instead of a buffer overflow.
+  EXPECT_FALSE(buf_result.ok());
+}
+
+// ============================================================================
+// Fix #10: WriteCallbackDirect buffer overflow — CURL abort on overflow
+// Verify that reading a small buffer from a large range request doesn't crash.
+// The WriteCallbackDirect now returns 0 to abort CURL when buffer is full.
+// ============================================================================
+
+TEST_F(HTTPFileSystemTest, ReadRange_SmallReadNearEOF_Succeeds) {
+  // Read a small amount of data near the end of file.
+  // This exercises the ReadRange path where returned bytes may be less than
+  // requested (partial content at EOF boundary), testing buffer handling.
+  neug::common::case_insensitive_map_t<std::string> options;
+  HTTPFileSystem fs(options);
+
+  const std::string url =
+      "https://graphscope.oss-cn-beijing.aliyuncs.com"
+      "/neug-dataset/GithubGraphTest/nodes_Actor.parquet";
+
+  auto file_result = fs.OpenInputFile(url);
+  ASSERT_TRUE(file_result.ok()) << file_result.status().ToString();
+
+  auto file = *file_result;
+  auto size_result = file->GetSize();
+  ASSERT_TRUE(size_result.ok());
+  int64_t file_size = *size_result;
+  ASSERT_GT(file_size, 100);
+
+  // Read last 4 bytes of file (Parquet footer magic "PAR1")
+  auto buf_result = file->ReadAt(file_size - 4, 4);
+  ASSERT_TRUE(buf_result.ok()) << buf_result.status().ToString();
+
+  auto buf = *buf_result;
+  EXPECT_EQ(buf->size(), 4);
+  // Parquet files end with "PAR1" magic
+  EXPECT_EQ(buf->data()[0], 'P');
+  EXPECT_EQ(buf->data()[1], 'A');
+  EXPECT_EQ(buf->data()[2], 'R');
+  EXPECT_EQ(buf->data()[3], '1');
 }

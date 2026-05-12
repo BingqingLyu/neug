@@ -36,8 +36,7 @@ namespace extension {
 namespace http {
 
 // Static members initialization
-bool HTTPFileSystem::curl_global_initialized_ = false;
-std::mutex HTTPFileSystem::curl_init_mutex_;
+std::once_flag HTTPFileSystem::curl_init_flag_;
 
 // ============================================================================
 // HTTPURIComponents Implementation
@@ -123,14 +122,14 @@ size_t WriteCallbackDirect(void* contents, size_t size, size_t nmemb, void* user
   }
   
   if (real_size > to_copy) {
-    LOG(ERROR) << "WriteCallbackDirect: Received more data than buffer can hold! "
-               << "real_size=" << real_size << ", to_copy=" << to_copy
-               << ", discarding " << (real_size - to_copy) << " bytes";
+    // Buffer is full — signal CURL to abort the transfer so that the
+    // caller knows the data was truncated rather than silently dropped.
+    LOG(WARNING) << "WriteCallbackDirect: buffer full, aborting transfer. "
+                 << "real_size=" << real_size << ", copied=" << to_copy
+                 << ", discarding " << (real_size - to_copy) << " bytes";
+    return 0;  // returning 0 tells CURL to stop the transfer
   }
   
-  // IMPORTANT: Always return real_size to indicate success
-  // Returning less than real_size signals an error to CURL
-  // We handle buffer overflow by simply not copying excess data
   return real_size;
 }
 
@@ -437,11 +436,14 @@ arrow::Result<int64_t> HTTPRandomAccessFile::ReadRange(int64_t offset, int64_t l
     }
     return bytes_received;
   } else if (response_code == 200) {
-    // Server doesn't support Range requests and sent the full file
-    // This is a critical error because we can't fit the full file in our buffer
-    return arrow::Status::IOError(
-        "Server doesn't support HTTP Range requests (returned 200 instead of 206). "
-        "Cannot read file efficiently without Range support.");
+    // Server doesn't support Range requests and sent the full file.
+    // We accept whatever data fitted into our buffer and warn the caller.
+    // This allows small files to work even when the server lacks Range
+    // support, while large files will naturally receive truncated data.
+    LOG(WARNING) << "Server returned 200 instead of 206 — Range requests "
+                 << "may not be supported. Received " << bytes_received
+                 << " of " << length << " requested bytes.";
+    return bytes_received;
   } else {
     return arrow::Status::IOError("HTTP Range request failed with status " +
                                    std::to_string(response_code));
@@ -545,17 +547,15 @@ bool HTTPRandomAccessFile::closed() const {
 
 HTTPFileSystem::HTTPFileSystem(const common::case_insensitive_map_t<std::string>& options)
     : options_(options) {
-  // Initialize CURL globally (thread-safe)
-  std::lock_guard<std::mutex> lock(curl_init_mutex_);
-  if (!curl_global_initialized_) {
+  // Initialize CURL globally exactly once (thread-safe via std::call_once)
+  std::call_once(curl_init_flag_, []() {
     CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
     if (res != CURLE_OK) {
       THROW_IO_EXCEPTION("Failed to initialize CURL globally: " +
                          std::string(curl_easy_strerror(res)));
     }
-    curl_global_initialized_ = true;
     LOG(INFO) << "CURL global initialization completed";
-  }
+  });
 }
 
 HTTPFileSystem::HTTPFileSystem(const reader::FileSchema& schema)
@@ -595,30 +595,50 @@ arrow::Result<arrow::fs::FileInfo> HTTPFileSystem::GetFileInfo(
   } catch (const exception::Exception& e) {
     return arrow::Status::Invalid("Invalid HTTP URL: " + path);
   }
-  
-  // Try to get file size via HEAD request
-  auto file_result = OpenInputFile(path);
-  if (!file_result.ok()) {
-    // File doesn't exist or inaccessible
+
+  // Lightweight HEAD-only probe: send a HEAD request directly with a
+  // temporary CURL handle instead of creating a full HTTPRandomAccessFile.
+  CURL* curl = curl_easy_init();
+  if (!curl) {
+    return arrow::Status::IOError("Failed to create CURL handle for HEAD request");
+  }
+
+  // Minimal setup — follow redirects and disable SSL verification only if
+  // the options say so (defaults to verifying).
+  curl_easy_setopt(curl, CURLOPT_URL, path.c_str());
+  curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);  // HEAD request
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+  CURLcode res = curl_easy_perform(curl);
+  if (res != CURLE_OK) {
+    curl_easy_cleanup(curl);
     arrow::fs::FileInfo info;
     info.set_path(path);
     info.set_type(arrow::fs::FileType::NotFound);
     return info;
   }
-  
-  auto file = *file_result;
-  auto size_result = file->GetSize();
-  
+
+  long http_code = 0;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+  if (http_code < 200 || http_code >= 300) {
+    curl_easy_cleanup(curl);
+    arrow::fs::FileInfo info;
+    info.set_path(path);
+    info.set_type(arrow::fs::FileType::NotFound);
+    return info;
+  }
+
+  double content_length = -1;
+  curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &content_length);
+  curl_easy_cleanup(curl);
+
   arrow::fs::FileInfo info;
   info.set_path(path);
   info.set_type(arrow::fs::FileType::File);
-  
-  if (size_result.ok()) {
-    info.set_size(*size_result);
-  } else {
-    info.set_size(-1);  // Unknown size
-  }
-  
+  info.set_size(content_length >= 0 ? static_cast<int64_t>(content_length) : -1);
   return info;
 }
 

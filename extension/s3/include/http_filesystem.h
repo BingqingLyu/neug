@@ -21,6 +21,7 @@
 #include <arrow/result.h>
 #include <curl/curl.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -192,8 +193,7 @@ class HTTPFileSystem : public arrow::fs::FileSystem, public fsys::FileSystem {
   common::case_insensitive_map_t<std::string> options_;
 
   // Global CURL initialization (shared across all instances).
-  static bool curl_global_initialized_;
-  static std::mutex curl_init_mutex_;
+  static std::once_flag curl_init_flag_;
 };
 
 /**

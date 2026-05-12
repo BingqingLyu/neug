@@ -109,7 +109,14 @@ class Option {
     return Option<double>(
         key, std::to_string(default_val), [](const std::string& s) -> double {
           try {
-            return std::stod(s);
+            double val = std::stod(s);
+            if (val < 0) {
+              THROW_INVALID_ARGUMENT_EXCEPTION(
+                  "Value must be non-negative, got: " + s);
+            }
+            return val;
+          } catch (const exception::Exception&) {
+            throw;  // re-throw our own exceptions
           } catch (const std::exception& e) {
             THROW_INVALID_ARGUMENT_EXCEPTION("Failed to parse double: " + s);
           }
