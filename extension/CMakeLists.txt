@@ -131,5 +131,7 @@ endfunction()
 add_extension_if_enabled("parquet")
 # Add httpfs extension (S3/OSS + HTTP/HTTPS)
 add_extension_if_enabled("httpfs")
+# Add iceberg extension
+add_extension_if_enabled("iceberg")
 
 message(STATUS "=== Extension configuration complete ===")

@@ -1,0 +1,51 @@
+{
+  "format-version": 1,
+  "table-uuid": "test-iceberg-table-uuid-0001",
+  "location": "/home/bingqing.lbq/moran/neug/example_dataset/iceberg",
+  "schema": {
+    "type": "struct",
+    "fields": [
+      {
+        "id": 1,
+        "name": "id",
+        "required": false,
+        "type": "long"
+      },
+      {
+        "id": 2,
+        "name": "name",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "id": 3,
+        "name": "value",
+        "required": false,
+        "type": "double"
+      }
+    ]
+  },
+  "partition-spec": [],
+  "default-spec-id": 0,
+  "last-partition-id": 0,
+  "properties": {},
+  "current-snapshot-id": 1000000000,
+  "snapshots": [
+    {
+      "snapshot-id": 1000000000,
+      "timestamp-ms": 1700000000000,
+      "manifest-list": "manifests/snap-manifest-list.parquet",
+      "summary": {
+        "operation": "append",
+        "added-data-files": "1",
+        "total-records": "5"
+      }
+    }
+  ],
+  "snapshot-log": [
+    {
+      "timestamp-ms": 1700000000000,
+      "snapshot-id": 1000000000
+    }
+  ]
+}

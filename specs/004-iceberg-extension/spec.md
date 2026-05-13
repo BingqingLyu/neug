@@ -24,9 +24,11 @@
 
 **Functional Requirements**:
 
-1. **FR-001**: The extension MUST register an `ICEBERG_SCAN` table function that integrates with `LOAD FROM` syntax. The extension supports two invocation modes:
-   - **Auto-detection** (preferred): `LOAD FROM "path/to/iceberg_table" RETURN *` — the system probes the path for a `metadata/` subdirectory containing `*.metadata.json` files; if found, it is treated as an Iceberg table automatically.
-   - **Explicit format**: `LOAD FROM "path/to/iceberg_table" (format='iceberg') RETURN *` — the user explicitly specifies the format, useful when auto-detection is not possible or when the user wants to be explicit.
+1. **FR-001**: The extension MUST register an `ICEBERG_SCAN` table function that integrates with `LOAD FROM` syntax. Users specify the format explicitly via `FILE_FORMAT='iceberg'`:
+   ```cypher
+   LOAD FROM "path/to/iceberg_table" (FILE_FORMAT='iceberg') RETURN *
+   ```
+   Auto-detection (probing for `metadata/` subdirectory) is **out of scope** for this version, as it would require modifying NeuG's core binder code, violating the extension self-containment principle.
 2. **FR-002**: The extension MUST read Iceberg table metadata (snapshot, manifest list, manifest files) to identify the correct Parquet data files for the current table snapshot.
 3. **FR-003**: The extension MUST map Iceberg schema types to NeuG types as follows:
    - Direct mapping: `INT`→`INT32`, `LONG`→`INT64`, `FLOAT`→`FLOAT`, `DOUBLE`→`DOUBLE`, `DECIMAL(p,s)`→`DECIMAL`, `STRING`→`STRING`, `BOOLEAN`→`BOOL`, `DATE`→`DATE`, `TIMESTAMP`→`TIMESTAMP`/`TIMESTAMP_TZ`, `UUID`→`UUID`, `BINARY`→`BLOB`, `FIXED(L)`→`BLOB`
@@ -40,11 +42,11 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** an Iceberg table with columns `id (INT64)`, `name (STRING)`, `age (INT32)` stored on local filesystem, **When** user executes `LOAD FROM "path/to/iceberg_table" RETURN name, age`, **Then** the system auto-detects the Iceberg format via metadata directory probing, returns correct `name` and `age` values with proper types, and `id` column is not read (column projection).
-2. **Given** an Iceberg table with 3 snapshots, **When** user executes `LOAD FROM "path/to/iceberg_table" (SNAPSHOT_ID=<specific_id>) RETURN *`, **Then** only data from the specified snapshot is returned.
-3. **Given** an Iceberg table with equality delete files, **When** user executes `LOAD FROM "path/to/iceberg_table" RETURN *`, **Then** rows matching the delete predicates are excluded from results.
-4. **Given** an Iceberg table with columns of various types (DATE, TIMESTAMP, DECIMAL, UUID), **When** user executes `LOAD FROM "path/to/iceberg_table" RETURN *`, **Then** all values are correctly mapped to NeuG types.
-5. **Given** an Iceberg table with a `WHERE` filter condition on partition columns, **When** user executes `LOAD FROM "path/to/iceberg_table" WHERE partition_col='value' RETURN *`, **Then** the system prunes irrelevant data files at the manifest level before reading.
+1. **Given** an Iceberg table with columns `id (INT64)`, `name (STRING)`, `age (INT32)` stored on local filesystem, **When** user executes `LOAD FROM "path/to/iceberg_table" (FILE_FORMAT='iceberg') RETURN name, age`, **Then** the system returns correct `name` and `age` values with proper types, and `id` column is not read (column projection).
+2. **Given** an Iceberg table with 3 snapshots, **When** user executes `LOAD FROM "path/to/iceberg_table" (FILE_FORMAT='iceberg', SNAPSHOT_ID=<specific_id>) RETURN *`, **Then** only data from the specified snapshot is returned.
+3. **Given** an Iceberg table with equality delete files, **When** user executes `LOAD FROM "path/to/iceberg_table" (FILE_FORMAT='iceberg') RETURN *`, **Then** rows matching the delete predicates are excluded from results.
+4. **Given** an Iceberg table with columns of various types (DATE, TIMESTAMP, DECIMAL, UUID), **When** user executes `LOAD FROM "path/to/iceberg_table" (FILE_FORMAT='iceberg') RETURN *`, **Then** all values are correctly mapped to NeuG types.
+5. **Given** an Iceberg table with a `WHERE` filter condition on partition columns, **When** user executes `LOAD FROM "path/to/iceberg_table" (FILE_FORMAT='iceberg') WHERE partition_col='value' RETURN *`, **Then** the system prunes irrelevant data files at the manifest level before reading.
 
 **Test Strategy**:
 
@@ -73,8 +75,8 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** an Iceberg table stored at `s3://my-bucket/warehouse/my_table/`, **When** user loads both S3 and Iceberg extensions and executes `LOAD FROM "s3://my-bucket/warehouse/my_table" RETURN *`, **Then** the system auto-detects the Iceberg format and correctly returns data from S3-stored Iceberg table.
-2. **Given** an Iceberg table on OSS at `oss://my-bucket/warehouse/my_table/`, **When** user loads S3 and Iceberg extensions with appropriate OSS credentials, and executes `LOAD FROM "oss://my-bucket/warehouse/my_table" RETURN *`, **Then** the system correctly reads the Iceberg table from OSS.
+1. **Given** an Iceberg table stored at `s3://my-bucket/warehouse/my_table/`, **When** user loads both S3 and Iceberg extensions and executes `LOAD FROM "s3://my-bucket/warehouse/my_table" (FILE_FORMAT='iceberg') RETURN *`, **Then** the system correctly returns data from S3-stored Iceberg table.
+2. **Given** an Iceberg table on OSS at `oss://my-bucket/warehouse/my_table/`, **When** user loads S3 and Iceberg extensions with appropriate OSS credentials, and executes `LOAD FROM "oss://my-bucket/warehouse/my_table" (FILE_FORMAT='iceberg') RETURN *`, **Then** the system correctly reads the Iceberg table from OSS.
 
 **Test Strategy**:
 
