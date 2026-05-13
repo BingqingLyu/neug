@@ -131,5 +131,7 @@ endfunction()
 add_extension_if_enabled("parquet")
 # Add s3 extension
 add_extension_if_enabled("s3")
+# Add iceberg extension
+add_extension_if_enabled("iceberg")
 
 message(STATUS "=== Extension configuration complete ===")
