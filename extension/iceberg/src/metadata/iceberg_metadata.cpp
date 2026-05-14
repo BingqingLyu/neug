@@ -134,6 +134,20 @@ IcebergTableMetadata parseMetadataJson(const std::string& json_content) {
     metadata.schema_fields.push_back(std::move(f));
   }
 
+  // partition-spec (optional)
+  if (doc.HasMember("partition-spec") && doc["partition-spec"].IsArray()) {
+    for (const auto& ps : doc["partition-spec"].GetArray()) {
+      IcebergPartitionField pf;
+      pf.source_id =
+          ps.HasMember("source-id") ? ps["source-id"].GetInt() : 0;
+      pf.field_id = ps.HasMember("field-id") ? ps["field-id"].GetInt() : 0;
+      pf.name = ps.HasMember("name") ? ps["name"].GetString() : "";
+      pf.transform =
+          ps.HasMember("transform") ? ps["transform"].GetString() : "identity";
+      metadata.partition_spec.push_back(std::move(pf));
+    }
+  }
+
   // current-snapshot-id (required for non-empty tables)
   if (doc.HasMember("current-snapshot-id")) {
     if (doc["current-snapshot-id"].IsInt64()) {

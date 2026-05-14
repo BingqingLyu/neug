@@ -16,6 +16,7 @@
 
 #include "iceberg_read_function.h"
 
+#include <arrow/array.h>
 #include <arrow/dataset/file_parquet.h>
 #include <arrow/io/file.h>
 #include <arrow/table.h>
@@ -114,13 +115,46 @@ execution::Context IcebergReadFunction::execFunc(
       iceberg::parseScanOptions(state->schema.file.options);
 
   // Resolve table: metadata → snapshot → manifests → data files
-  auto resolved = iceberg::resolveTable(table_path, scan_options, fs.get());
+  // Pass predicate (skipRows) for manifest/data-file pruning
+  auto resolved = iceberg::resolveTable(table_path, scan_options, fs.get(),
+                                         state->skipRows.get());
 
   if (resolved.data_files.empty()) {
-    // Empty table — return empty context with correct schema
+    // All data files pruned — return empty context with typed empty columns
     LOG(INFO) << "[iceberg] Table at '" << table_path
-              << "' has no data files in the selected snapshot.";
+              << "' has no data files after predicate pruning.";
     execution::Context ctx;
+
+    // Determine which columns to produce
+    const auto& proj = state->projectColumns;
+    const auto& fields = resolved.metadata.schema_fields;
+    std::vector<const iceberg::IcebergField*> out_fields;
+    if (proj.empty()) {
+      for (const auto& f : fields) out_fields.push_back(&f);
+    } else {
+      for (const auto& col : proj) {
+        for (const auto& f : fields) {
+          if (f.name == col) { out_fields.push_back(&f); break; }
+        }
+      }
+    }
+
+    // Map Iceberg type → Arrow type, then create zero-length typed arrays
+    for (int i = 0; i < static_cast<int>(out_fields.size()); ++i) {
+      std::shared_ptr<arrow::DataType> arrow_type;
+      const std::string& t = out_fields[i]->type;
+      if (t == "long")        arrow_type = arrow::int64();
+      else if (t == "int")    arrow_type = arrow::int32();
+      else if (t == "double") arrow_type = arrow::float64();
+      else if (t == "float")  arrow_type = arrow::float32();
+      else if (t == "boolean") arrow_type = arrow::boolean();
+      else                     arrow_type = arrow::utf8();  // string / fallback
+
+      auto empty_arr = arrow::MakeEmptyArray(arrow_type).ValueOrDie();
+      execution::ArrowArrayContextColumnBuilder builder;
+      builder.push_back(empty_arr);
+      ctx.set(i, builder.finish());
+    }
     return ctx;
   }
 

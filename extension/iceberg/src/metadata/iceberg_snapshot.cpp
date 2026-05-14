@@ -17,8 +17,11 @@
 #include "metadata/iceberg_snapshot.h"
 
 #include <algorithm>
-#include <sstream>
+#include <string>
 
+#include <glog/logging.h>
+
+#include "iceberg_predicate_pruner.h"
 #include "neug/utils/exception/exception.h"
 
 namespace neug {
@@ -47,16 +50,12 @@ IcebergSnapshot resolveSnapshot(const IcebergTableMetadata& metadata,
         return snap;
       }
     }
-    // Not found — build helpful error message
-    std::ostringstream oss;
-    oss << "[iceberg] Snapshot ID " << target_id
-        << " not found. Available snapshot IDs: [";
-    for (size_t i = 0; i < metadata.snapshots.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << metadata.snapshots[i].snapshot_id;
-    }
-    oss << "]";
-    THROW_EXCEPTION_WITH_FILE_LINE(oss.str());
+    std::string ids;
+    for (const auto& s : metadata.snapshots)
+      ids += (ids.empty() ? "" : ", ") + std::to_string(s.snapshot_id);
+    THROW_EXCEPTION_WITH_FILE_LINE(
+        "[iceberg] Snapshot ID " + std::to_string(target_id) +
+        " not found. Available: [" + ids + "]");
   }
 
   // Case 2: User specified a timestamp
@@ -104,7 +103,8 @@ IcebergSnapshot resolveSnapshot(const IcebergTableMetadata& metadata,
 
 IcebergResolvedTable resolveTable(const std::string& table_path,
                                   const IcebergScanOptions& options,
-                                  fsys::FileSystem* fs) {
+                                  fsys::FileSystem* fs,
+                                  const ::common::Expression* predicate) {
   IcebergResolvedTable result;
 
   // Step 1: Read table metadata
@@ -126,6 +126,33 @@ IcebergResolvedTable resolveTable(const std::string& table_path,
   auto manifest_list_entries =
       parseManifestList(manifest_list_path, arrow_fs.get());
 
+  // ── Predicate pruning (optional) ─────────────────────────────────────
+  std::unique_ptr<IcebergPredicatePruner> pruner;
+  if (predicate) {
+    pruner = std::make_unique<IcebergPredicatePruner>(
+        *predicate,
+        result.metadata.schema_fields,
+        result.metadata.partition_spec);
+  }
+
+  // Level 1: manifest-list pruning
+  if (pruner) {
+    size_t before = manifest_list_entries.size();
+    manifest_list_entries.erase(
+        std::remove_if(manifest_list_entries.begin(),
+                        manifest_list_entries.end(),
+                        [&](const ManifestListEntry& e) {
+                          return e.content == 0 &&
+                                 pruner->canSkipManifest(e);
+                        }),
+        manifest_list_entries.end());
+    size_t after = manifest_list_entries.size();
+    if (before != after) {
+      LOG(INFO) << "[iceberg] Level-1 pruning: skipped "
+                << (before - after) << " of " << before << " manifests";
+    }
+  }
+
   // Step 4: Read each manifest file
   for (const auto& ml_entry : manifest_list_entries) {
     std::string manifest_path = ml_entry.manifest_path;
@@ -146,10 +173,15 @@ IcebergResolvedTable resolveTable(const std::string& table_path,
       }
 
       if (ml_entry.content == 0) {
-        // Data manifest
+        // Level 2: data-file pruning (only for data files, not deletes)
+        if (pruner && pruner->canSkipDataFile(entry.data_file)) {
+          LOG(INFO) << "[iceberg] Level-2 pruning: skipped data file "
+                    << file_path;
+          continue;
+        }
         result.data_files.push_back(std::move(entry.data_file));
       } else {
-        // Delete manifest
+        // Delete manifest — never prune delete files
         result.delete_files.push_back(std::move(entry.data_file));
       }
     }

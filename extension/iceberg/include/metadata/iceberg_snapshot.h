@@ -26,6 +26,8 @@
 #include "neug/compiler/common/case_insensitive_map.h"
 #include "neug/utils/file_sys/file_system.h"
 
+#include "neug/generated/proto/plan/expr.pb.h"
+
 namespace neug {
 namespace iceberg {
 
@@ -67,14 +69,20 @@ IcebergSnapshot resolveSnapshot(const IcebergTableMetadata& metadata,
  *   findLatestMetadataFile → parseMetadataJson → resolveSnapshot →
  *   parseManifestList → parseManifestFile → collect data/delete files
  *
+ * When a non-null predicate is supplied, the resolver applies:
+ *   - Level 1: manifest-list pruning via partition summaries
+ *   - Level 2: data-file pruning via per-column lower/upper bounds
+ *
  * @param table_path Root path of the Iceberg table.
  * @param options User-provided scan options.
  * @param fs FileSystem for I/O.
+ * @param predicate Optional WHERE-clause expression for pruning.
  * @return Resolved table with metadata, snapshot, data files, delete files.
  */
 IcebergResolvedTable resolveTable(const std::string& table_path,
                                   const IcebergScanOptions& options,
-                                  fsys::FileSystem* fs);
+                                  fsys::FileSystem* fs,
+                                  const ::common::Expression* predicate = nullptr);
 
 /**
  * @brief Parse IcebergScanOptions from a key-value options map.

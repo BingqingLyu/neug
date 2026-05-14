@@ -27,6 +27,21 @@ namespace neug {
 namespace iceberg {
 
 /**
+ * @brief Summary of a single partition field within a manifest.
+ *
+ * Each element in ManifestListEntry::partitions corresponds to one
+ * partition field in the partition spec.  Bounds are Iceberg
+ * single-value-serialized binary (little-endian for numerics, UTF-8
+ * for strings).
+ */
+struct PartitionFieldSummary {
+  bool contains_null = false;
+  bool contains_nan = false;
+  std::string lower_bound;  // Iceberg binary-encoded
+  std::string upper_bound;  // Iceberg binary-encoded
+};
+
+/**
  * @brief Entry from an Iceberg manifest list file.
  */
 struct ManifestListEntry {
@@ -38,6 +53,7 @@ struct ManifestListEntry {
   int32_t added_data_files_count = 0;
   int32_t existing_data_files_count = 0;
   int32_t deleted_data_files_count = 0;
+  std::vector<PartitionFieldSummary> partitions;
 };
 
 /**

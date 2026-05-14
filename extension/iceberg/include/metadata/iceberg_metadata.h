@@ -49,6 +49,16 @@ struct IcebergSnapshot {
 };
 
 /**
+ * @brief Represents a partition field in the partition spec.
+ */
+struct IcebergPartitionField {
+  int32_t source_id;     // references IcebergField.id
+  int32_t field_id;      // partition field's own ID (1000+)
+  std::string name;      // partition field name
+  std::string transform; // "identity", "bucket[N]", "truncate[N]", etc.
+};
+
+/**
  * @brief Represents the parsed content of an Iceberg metadata.json file.
  */
 struct IcebergTableMetadata {
@@ -58,6 +68,7 @@ struct IcebergTableMetadata {
   std::vector<IcebergField> schema_fields;
   int64_t current_snapshot_id;
   std::vector<IcebergSnapshot> snapshots;
+  std::vector<IcebergPartitionField> partition_spec;
 };
 
 /**
