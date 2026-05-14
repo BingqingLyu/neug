@@ -17,8 +17,12 @@
 #include "iceberg_read_function.h"
 
 #include <arrow/dataset/file_parquet.h>
+#include <arrow/io/file.h>
+#include <arrow/table.h>
+#include <parquet/arrow/reader.h>
 
 #include "glog/logging.h"
+#include "iceberg_delete_filter.h"
 #include "iceberg_options.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/reader/sniffer.h"
@@ -120,7 +124,12 @@ execution::Context IcebergReadFunction::execFunc(
     return ctx;
   }
 
-  // Collect data file paths for reading via ArrowReader
+  // Check for delete files
+  if (!resolved.delete_files.empty()) {
+    return execWithDeletes(state, resolved, table_path, fs.get());
+  }
+
+  // No delete files: fast path — read all data files at once
   std::vector<std::string> data_file_paths;
   data_file_paths.reserve(resolved.data_files.size());
   for (const auto& df : resolved.data_files) {
@@ -143,6 +152,96 @@ execution::Context IcebergReadFunction::execFunc(
   auto localState = std::make_shared<reader::ReadLocalState>();
   reader->read(localState, ctx);
   return ctx;
+}
+
+execution::Context IcebergReadFunction::execWithDeletes(
+    std::shared_ptr<reader::ReadSharedState> state,
+    const iceberg::IcebergResolvedTable& resolved,
+    const std::string& table_path, fsys::FileSystem* fs) {
+  auto arrow_fs = fs->toArrowFileSystem();
+
+  // Load delete files
+  iceberg::IcebergDeleteFilter delete_filter;
+  delete_filter.loadDeleteFiles(resolved.delete_files, table_path,
+                                arrow_fs.get());
+
+  // Read each data file individually, apply deletes, combine results
+  execution::Context combined_ctx;
+  bool first_file = true;
+
+  for (const auto& data_file : resolved.data_files) {
+    // Read this single data file as an Arrow Table
+    auto file_result = arrow_fs->OpenInputFile(data_file.file_path);
+    if (!file_result.ok()) {
+      THROW_IO_EXCEPTION("[iceberg] Failed to open data file '" +
+                         data_file.file_path +
+                         "': " + file_result.status().ToString());
+    }
+
+    std::unique_ptr<parquet::arrow::FileReader> pq_reader;
+    auto status = parquet::arrow::OpenFile(
+        file_result.ValueOrDie(), arrow::default_memory_pool(), &pq_reader);
+    if (!status.ok()) {
+      THROW_IO_EXCEPTION("[iceberg] Failed to open Parquet reader for '" +
+                         data_file.file_path + "': " + status.ToString());
+    }
+
+    // Apply column projection if available
+    std::shared_ptr<arrow::Table> table;
+    if (!state->projectColumns.empty()) {
+      // Get file schema to find column indices
+      auto file_metadata = pq_reader->parquet_reader()->metadata();
+      auto file_schema = file_metadata->schema();
+      std::vector<int> col_indices;
+      for (const auto& proj_col : state->projectColumns) {
+        for (int ci = 0; ci < file_schema->num_columns(); ++ci) {
+          if (file_schema->Column(ci)->name() == proj_col) {
+            col_indices.push_back(ci);
+            break;
+          }
+        }
+      }
+      if (!col_indices.empty()) {
+        status = pq_reader->ReadTable(col_indices, &table);
+      } else {
+        status = pq_reader->ReadTable(&table);
+      }
+    } else {
+      status = pq_reader->ReadTable(&table);
+    }
+
+    if (!status.ok()) {
+      THROW_IO_EXCEPTION("[iceberg] Failed to read data file '" +
+                         data_file.file_path + "': " + status.ToString());
+    }
+
+    // Apply deletes to this file's data
+    table = delete_filter.applyDeletes(table, data_file.file_path);
+
+    if (table->num_rows() == 0) continue;
+
+    // Build execution::Context from filtered table
+    execution::Context file_ctx;
+    int num_cols = table->num_columns();
+    for (int i = 0; i < num_cols; ++i) {
+      auto chunk_arrays = table->column(i)->chunks();
+      execution::ArrowArrayContextColumnBuilder builder;
+      for (const auto& array : chunk_arrays) {
+        builder.push_back(array);
+      }
+      file_ctx.set(i, builder.finish());
+    }
+
+    // Combine with previous results
+    if (first_file) {
+      combined_ctx = std::move(file_ctx);
+      first_file = false;
+    } else {
+      combined_ctx = combined_ctx.union_ctx(file_ctx);
+    }
+  }
+
+  return combined_ctx;
 }
 
 }  // namespace function
