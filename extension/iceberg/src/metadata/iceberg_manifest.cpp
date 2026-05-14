@@ -180,6 +180,12 @@ std::vector<ManifestFileEntry> parseManifestFile(
     if (entry.data_file.file_format.empty()) {
       entry.data_file.file_format = getStringValue(table, "file_format", i);
     }
+    // content: 0=data, 1=position_deletes, 2=equality_deletes
+    entry.data_file.content =
+        getInt32Value(table, "data_file.content", i);
+    if (entry.data_file.content == 0) {
+      entry.data_file.content = getInt32Value(table, "content", i);
+    }
     entry.data_file.record_count =
         getInt64Value(table, "data_file.record_count", i);
     if (entry.data_file.record_count == 0) {

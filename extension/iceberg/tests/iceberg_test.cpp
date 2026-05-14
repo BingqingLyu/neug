@@ -31,6 +31,7 @@
 #include "metadata/iceberg_manifest.h"
 #include "metadata/iceberg_snapshot.h"
 #include "schema/iceberg_type_mapper.h"
+#include "iceberg_delete_filter.h"
 
 namespace neug {
 namespace test {
@@ -580,6 +581,336 @@ TEST_F(IcebergMetadataDiscoveryTest, FindLatestMetadataFile) {
   // Should find v3.metadata.json (highest version)
   EXPECT_TRUE(result.find("v3.metadata.json") != std::string::npos)
       << "Expected v3.metadata.json, got: " << result;
+}
+
+// =============================================================================
+// IcebergDeleteFilterTest: Tests for delete file handling
+// =============================================================================
+
+class IcebergDeleteFilterTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    test_dir_ = std::filesystem::temp_directory_path() / "iceberg_delete_test";
+    std::filesystem::create_directories(test_dir_);
+    arrow_fs_ = std::make_shared<arrow::fs::LocalFileSystem>();
+  }
+
+  void TearDown() override {
+    std::filesystem::remove_all(test_dir_);
+  }
+
+  // Write a Parquet file with given schema and data
+  void writeParquetFile(const std::string& path,
+                        const std::shared_ptr<arrow::Table>& table) {
+    auto outfile = arrow::io::FileOutputStream::Open(path);
+    ASSERT_TRUE(outfile.ok());
+    auto status = parquet::arrow::WriteTable(
+        *table, arrow::default_memory_pool(), outfile.ValueOrDie(), 1024);
+    ASSERT_TRUE(status.ok());
+  }
+
+  // Create a positional delete file with (file_path, pos) columns
+  std::string createPositionalDeleteFile(
+      const std::string& name,
+      const std::vector<std::pair<std::string, int64_t>>& deletes) {
+    auto path_builder = std::make_shared<arrow::StringBuilder>();
+    auto pos_builder = std::make_shared<arrow::Int64Builder>();
+
+    for (const auto& [fp, pos] : deletes) {
+      EXPECT_TRUE(path_builder->Append(fp).ok());
+      EXPECT_TRUE(pos_builder->Append(pos).ok());
+    }
+
+    std::shared_ptr<arrow::Array> path_array, pos_array;
+    EXPECT_TRUE(path_builder->Finish(&path_array).ok());
+    EXPECT_TRUE(pos_builder->Finish(&pos_array).ok());
+
+    auto schema = arrow::schema(
+        {arrow::field("file_path", arrow::utf8()),
+         arrow::field("pos", arrow::int64())});
+    auto table = arrow::Table::Make(schema, {path_array, pos_array});
+
+    std::string file_path = test_dir_ / name;
+    writeParquetFile(file_path, table);
+    return file_path;
+  }
+
+  // Create an equality delete file with given columns and values
+  std::string createEqualityDeleteFile(
+      const std::string& name,
+      const std::shared_ptr<arrow::Table>& del_table) {
+    std::string file_path = test_dir_ / name;
+    writeParquetFile(file_path, del_table);
+    return file_path;
+  }
+
+  // Create a data table for testing
+  std::shared_ptr<arrow::Table> createDataTable() {
+    auto id_builder = std::make_shared<arrow::Int64Builder>();
+    auto name_builder = std::make_shared<arrow::StringBuilder>();
+    auto age_builder = std::make_shared<arrow::Int32Builder>();
+
+    // 5 rows: (1,Alice,30), (2,Bob,25), (3,Charlie,35), (4,David,28), (5,Eve,32)
+    std::vector<int64_t> ids = {1, 2, 3, 4, 5};
+    std::vector<std::string> names = {"Alice", "Bob", "Charlie", "David", "Eve"};
+    std::vector<int32_t> ages = {30, 25, 35, 28, 32};
+
+    for (size_t i = 0; i < ids.size(); ++i) {
+      EXPECT_TRUE(id_builder->Append(ids[i]).ok());
+      EXPECT_TRUE(name_builder->Append(names[i]).ok());
+      EXPECT_TRUE(age_builder->Append(ages[i]).ok());
+    }
+
+    std::shared_ptr<arrow::Array> id_array, name_array, age_array;
+    EXPECT_TRUE(id_builder->Finish(&id_array).ok());
+    EXPECT_TRUE(name_builder->Finish(&name_array).ok());
+    EXPECT_TRUE(age_builder->Finish(&age_array).ok());
+
+    auto schema = arrow::schema(
+        {arrow::field("id", arrow::int64()),
+         arrow::field("name", arrow::utf8()),
+         arrow::field("age", arrow::int32())});
+    return arrow::Table::Make(schema, {id_array, name_array, age_array});
+  }
+
+  std::filesystem::path test_dir_;
+  std::shared_ptr<arrow::fs::LocalFileSystem> arrow_fs_;
+};
+
+TEST_F(IcebergDeleteFilterTest, NoDeleteFiles) {
+  iceberg::IcebergDeleteFilter filter;
+  std::vector<iceberg::DataFileEntry> empty_deletes;
+  filter.loadDeleteFiles(empty_deletes, test_dir_.string(), arrow_fs_.get());
+
+  EXPECT_FALSE(filter.hasDeletes());
+  EXPECT_FALSE(filter.hasPositionalDeletes());
+  EXPECT_FALSE(filter.hasEqualityDeletes());
+
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, "/some/data/file.parquet");
+  EXPECT_EQ(result->num_rows(), 5);
+}
+
+TEST_F(IcebergDeleteFilterTest, PositionalDeletesSingleFile) {
+  // Create positional delete: delete rows 1 and 3 from a data file
+  std::string data_file_path = "/table/data/file1.parquet";
+  auto del_path = createPositionalDeleteFile(
+      "pos_delete.parquet",
+      {{data_file_path, 1}, {data_file_path, 3}});
+
+  iceberg::DataFileEntry del_entry;
+  del_entry.file_path = del_path;
+  del_entry.content = 1;  // positional delete
+
+  iceberg::IcebergDeleteFilter filter;
+  filter.loadDeleteFiles({del_entry}, test_dir_.string(), arrow_fs_.get());
+
+  EXPECT_TRUE(filter.hasDeletes());
+  EXPECT_TRUE(filter.hasPositionalDeletes());
+  EXPECT_FALSE(filter.hasEqualityDeletes());
+
+  // Check specific positions
+  const auto* positions = filter.getPositionalDeletes(data_file_path);
+  ASSERT_NE(positions, nullptr);
+  EXPECT_EQ(positions->size(), 2);
+  EXPECT_EQ((*positions)[0], 1);
+  EXPECT_EQ((*positions)[1], 3);
+
+  // Apply to data table
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, data_file_path);
+  EXPECT_EQ(result->num_rows(), 3);  // 5 - 2 = 3
+
+  // Verify remaining rows: indices 0, 2, 4 → (1,Alice,30), (3,Charlie,35), (5,Eve,32)
+  auto id_col = std::static_pointer_cast<arrow::Int64Array>(
+      result->column(0)->chunk(0));
+  EXPECT_EQ(id_col->Value(0), 1);
+  EXPECT_EQ(id_col->Value(1), 3);
+  EXPECT_EQ(id_col->Value(2), 5);
+}
+
+TEST_F(IcebergDeleteFilterTest, PositionalDeletesDifferentFiles) {
+  // Deletes for file1 and file2
+  std::string file1 = "/table/data/file1.parquet";
+  std::string file2 = "/table/data/file2.parquet";
+  auto del_path = createPositionalDeleteFile(
+      "pos_delete_multi.parquet",
+      {{file1, 0}, {file1, 4}, {file2, 2}});
+
+  iceberg::DataFileEntry del_entry;
+  del_entry.file_path = del_path;
+  del_entry.content = 1;
+
+  iceberg::IcebergDeleteFilter filter;
+  filter.loadDeleteFiles({del_entry}, test_dir_.string(), arrow_fs_.get());
+
+  // Check file1 positions
+  const auto* pos1 = filter.getPositionalDeletes(file1);
+  ASSERT_NE(pos1, nullptr);
+  EXPECT_EQ(pos1->size(), 2);
+
+  // Check file2 positions
+  const auto* pos2 = filter.getPositionalDeletes(file2);
+  ASSERT_NE(pos2, nullptr);
+  EXPECT_EQ(pos2->size(), 1);
+
+  // File not in deletes returns nullptr
+  EXPECT_EQ(filter.getPositionalDeletes("/other/file.parquet"), nullptr);
+
+  // Apply to file1 data
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, file1);
+  EXPECT_EQ(result->num_rows(), 3);  // deleted rows 0 and 4
+}
+
+TEST_F(IcebergDeleteFilterTest, EqualityDeleteSingleColumn) {
+  // Create equality delete: delete rows where id=2 or id=4
+  auto id_builder = std::make_shared<arrow::Int64Builder>();
+  EXPECT_TRUE(id_builder->Append(2).ok());
+  EXPECT_TRUE(id_builder->Append(4).ok());
+  std::shared_ptr<arrow::Array> id_array;
+  EXPECT_TRUE(id_builder->Finish(&id_array).ok());
+
+  auto del_schema = arrow::schema({arrow::field("id", arrow::int64())});
+  auto del_table = arrow::Table::Make(del_schema, {id_array});
+
+  auto del_path = createEqualityDeleteFile("eq_delete.parquet", del_table);
+
+  iceberg::DataFileEntry del_entry;
+  del_entry.file_path = del_path;
+  del_entry.content = 2;  // equality delete
+
+  iceberg::IcebergDeleteFilter filter;
+  filter.loadDeleteFiles({del_entry}, test_dir_.string(), arrow_fs_.get());
+
+  EXPECT_TRUE(filter.hasDeletes());
+  EXPECT_FALSE(filter.hasPositionalDeletes());
+  EXPECT_TRUE(filter.hasEqualityDeletes());
+
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, "/any/file.parquet");
+  EXPECT_EQ(result->num_rows(), 3);  // 5 - 2 = 3
+
+  // Remaining: id=1,3,5
+  auto id_col = std::static_pointer_cast<arrow::Int64Array>(
+      result->column(0)->chunk(0));
+  EXPECT_EQ(id_col->Value(0), 1);
+  EXPECT_EQ(id_col->Value(1), 3);
+  EXPECT_EQ(id_col->Value(2), 5);
+}
+
+TEST_F(IcebergDeleteFilterTest, EqualityDeleteMultiColumn) {
+  // Delete rows where (id=2, name="Bob")
+  auto id_builder = std::make_shared<arrow::Int64Builder>();
+  auto name_builder = std::make_shared<arrow::StringBuilder>();
+  EXPECT_TRUE(id_builder->Append(2).ok());
+  EXPECT_TRUE(name_builder->Append("Bob").ok());
+
+  std::shared_ptr<arrow::Array> id_array, name_array;
+  EXPECT_TRUE(id_builder->Finish(&id_array).ok());
+  EXPECT_TRUE(name_builder->Finish(&name_array).ok());
+
+  auto del_schema = arrow::schema(
+      {arrow::field("id", arrow::int64()),
+       arrow::field("name", arrow::utf8())});
+  auto del_table = arrow::Table::Make(del_schema, {id_array, name_array});
+
+  auto del_path = createEqualityDeleteFile("eq_multi.parquet", del_table);
+
+  iceberg::DataFileEntry del_entry;
+  del_entry.file_path = del_path;
+  del_entry.content = 2;
+
+  iceberg::IcebergDeleteFilter filter;
+  filter.loadDeleteFiles({del_entry}, test_dir_.string(), arrow_fs_.get());
+
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, "/any/file.parquet");
+  EXPECT_EQ(result->num_rows(), 4);  // Only (2,Bob) deleted
+}
+
+TEST_F(IcebergDeleteFilterTest, CombinedPositionalAndEqualityDeletes) {
+  std::string data_file_path = "/table/data/file1.parquet";
+
+  // Positional delete: row 0
+  auto pos_del_path = createPositionalDeleteFile(
+      "pos_del.parquet", {{data_file_path, 0}});
+
+  // Equality delete: id=5
+  auto id_builder = std::make_shared<arrow::Int64Builder>();
+  EXPECT_TRUE(id_builder->Append(5).ok());
+  std::shared_ptr<arrow::Array> id_array;
+  EXPECT_TRUE(id_builder->Finish(&id_array).ok());
+  auto del_schema = arrow::schema({arrow::field("id", arrow::int64())});
+  auto del_table = arrow::Table::Make(del_schema, {id_array});
+  auto eq_del_path = createEqualityDeleteFile("eq_del.parquet", del_table);
+
+  iceberg::DataFileEntry pos_entry;
+  pos_entry.file_path = pos_del_path;
+  pos_entry.content = 1;
+
+  iceberg::DataFileEntry eq_entry;
+  eq_entry.file_path = eq_del_path;
+  eq_entry.content = 2;
+
+  iceberg::IcebergDeleteFilter filter;
+  filter.loadDeleteFiles({pos_entry, eq_entry}, test_dir_.string(),
+                         arrow_fs_.get());
+
+  EXPECT_TRUE(filter.hasPositionalDeletes());
+  EXPECT_TRUE(filter.hasEqualityDeletes());
+
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, data_file_path);
+  EXPECT_EQ(result->num_rows(), 3);  // row 0 (positional) + id=5 (equality) = 2 deleted
+
+  // Remaining: (2,Bob,25), (3,Charlie,35), (4,David,28)
+  auto id_col = std::static_pointer_cast<arrow::Int64Array>(
+      result->column(0)->chunk(0));
+  EXPECT_EQ(id_col->Value(0), 2);
+  EXPECT_EQ(id_col->Value(1), 3);
+  EXPECT_EQ(id_col->Value(2), 4);
+}
+
+TEST_F(IcebergDeleteFilterTest, NoMatchingDeletesReturnOriginal) {
+  // Positional deletes for a different file
+  std::string data_file_path = "/table/data/file1.parquet";
+  auto del_path = createPositionalDeleteFile(
+      "pos_other.parquet",
+      {{"/table/data/other_file.parquet", 0},
+       {"/table/data/other_file.parquet", 1}});
+
+  iceberg::DataFileEntry del_entry;
+  del_entry.file_path = del_path;
+  del_entry.content = 1;
+
+  iceberg::IcebergDeleteFilter filter;
+  filter.loadDeleteFiles({del_entry}, test_dir_.string(), arrow_fs_.get());
+
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, data_file_path);
+  // No deletes for this file — all 5 rows remain
+  EXPECT_EQ(result->num_rows(), 5);
+}
+
+TEST_F(IcebergDeleteFilterTest, AllRowsDeleted) {
+  std::string data_file_path = "/table/data/file1.parquet";
+  auto del_path = createPositionalDeleteFile(
+      "pos_all.parquet",
+      {{data_file_path, 0}, {data_file_path, 1}, {data_file_path, 2},
+       {data_file_path, 3}, {data_file_path, 4}});
+
+  iceberg::DataFileEntry del_entry;
+  del_entry.file_path = del_path;
+  del_entry.content = 1;
+
+  iceberg::IcebergDeleteFilter filter;
+  filter.loadDeleteFiles({del_entry}, test_dir_.string(), arrow_fs_.get());
+
+  auto data = createDataTable();
+  auto result = filter.applyDeletes(data, data_file_path);
+  EXPECT_EQ(result->num_rows(), 0);
+  EXPECT_EQ(result->num_columns(), 3);  // Schema preserved
 }
 
 }  // namespace test

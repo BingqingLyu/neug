@@ -46,6 +46,7 @@ struct ManifestListEntry {
 struct DataFileEntry {
   std::string file_path;
   std::string file_format;  // "PARQUET"
+  int32_t content = 0;      // 0=data, 1=position_deletes, 2=equality_deletes
   int64_t record_count = 0;
   int64_t file_size_in_bytes = 0;
   std::map<std::string, std::string> partition;

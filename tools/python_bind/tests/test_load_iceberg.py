@@ -187,3 +187,94 @@ class TestLoadFromIceberg:
         assert isinstance(first[0], int), f"id should be int, got {type(first[0])}"
         assert isinstance(first[1], str), f"name should be str, got {type(first[1])}"
         assert isinstance(first[2], float), f"value should be float, got {type(first[2])}"
+
+
+def _get_delete_generator_script():
+    """Return absolute path to the Iceberg delete test data generator script."""
+    current_file = os.path.abspath(__file__)
+    tests_dir = os.path.dirname(current_file)
+    python_bind_dir = os.path.dirname(tests_dir)
+    tools_dir = os.path.dirname(python_bind_dir)
+    workspace_root = os.path.dirname(tools_dir)
+    return os.path.join(
+        workspace_root, "example_dataset", "iceberg", "generate_test_data_with_deletes.py"
+    )
+
+
+def _generate_iceberg_data_with_deletes(target_dir: str):
+    """Generate Iceberg test data with delete files."""
+    script = _get_delete_generator_script()
+    if not os.path.exists(script):
+        pytest.skip(f"Iceberg delete generator script not found: {script}")
+    result = subprocess.run(
+        [sys.executable, script, target_dir],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"Iceberg delete data generation failed:\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+
+
+@extension_test
+class TestLoadFromIcebergWithDeletes:
+    """Test LOAD FROM with Iceberg delete files (FR-008)."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        """Set up database and generate Iceberg test data with deletes."""
+        self.iceberg_path = str(tmp_path / "iceberg_table_deletes")
+        _generate_iceberg_data_with_deletes(self.iceberg_path)
+
+        self.db_dir = str(tmp_path / "test_iceberg_delete_db")
+        shutil.rmtree(self.db_dir, ignore_errors=True)
+        self.db = Database(db_path=self.db_dir, mode="w")
+        self.conn = self.db.connect()
+        self.conn.execute("load iceberg")
+
+        yield
+
+        self.conn.close()
+        self.db.close()
+
+    def test_delete_files_filter_rows(self):
+        """Test that positional and equality deletes remove correct rows.
+
+        Data: id=[1,2,3,4,5], name=[Alice,Bob,Charlie,David,Eve]
+        Positional delete: row 1 (Bob)
+        Equality delete: id=4 (David)
+        Expected result: id=[1,3,5], name=[Alice,Charlie,Eve]
+        """
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        RETURN id, name, value
+        """
+        result = self.conn.execute(query)
+        records = list(result)
+
+        assert len(records) == 3, f"Expected 3 records after deletes, got {len(records)}"
+
+        # Collect IDs and names
+        ids = sorted([int(r[0]) for r in records])
+        names = sorted([str(r[1]) for r in records])
+
+        assert ids == [1, 3, 5], f"Expected ids [1, 3, 5], got {ids}"
+        assert names == sorted(["Alice", "Charlie", "Eve"]), (
+            f"Expected names [Alice, Charlie, Eve], got {names}"
+        )
+
+    def test_delete_files_with_column_projection(self):
+        """Test that deletes work correctly with column projection."""
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        RETURN id, name
+        """
+        result = self.conn.execute(query)
+        records = list(result)
+
+        assert len(records) == 3, f"Expected 3 records after deletes, got {len(records)}"
+        # Each record should have exactly 2 columns
+        assert all(len(r) == 2 for r in records), "Expected 2 columns per record"

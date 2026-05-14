@@ -29,6 +29,7 @@
 #include "neug/compiler/function/function.h"
 #include "neug/compiler/function/read_function.h"
 #include "neug/compiler/main/metadata_registry.h"
+#include "neug/execution/common/columns/arrow_context_column.h"
 #include "neug/utils/reader/options.h"
 #include "neug/utils/reader/reader.h"
 #include "neug/utils/reader/schema.h"
@@ -64,6 +65,18 @@ struct IcebergReadFunction {
    * Used for auto-detection in the sniffer pipeline.
    */
   static bool probe(const std::string& path, fsys::FileSystem* fs);
+
+ private:
+  /**
+   * @brief Execute read with delete file filtering.
+   *
+   * When delete files are present, reads each data file individually,
+   * applies positional/equality deletes, and combines filtered results.
+   */
+  static execution::Context execWithDeletes(
+      std::shared_ptr<reader::ReadSharedState> state,
+      const iceberg::IcebergResolvedTable& resolved,
+      const std::string& table_path, fsys::FileSystem* fs);
 };
 
 }  // namespace function
