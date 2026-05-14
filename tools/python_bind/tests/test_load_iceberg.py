@@ -71,7 +71,7 @@ def _generate_iceberg_data(target_dir: str):
     if not os.path.exists(script):
         pytest.skip(f"Iceberg generator script not found: {script}")
     result = subprocess.run(
-        [sys.executable, script, target_dir],
+        [sys.executable, script, "simple", target_dir],
         capture_output=True,
         text=True,
     )
@@ -278,3 +278,145 @@ class TestLoadFromIcebergWithDeletes:
         assert len(records) == 3, f"Expected 3 records after deletes, got {len(records)}"
         # Each record should have exactly 2 columns
         assert all(len(r) == 2 for r in records), "Expected 2 columns per record"
+
+
+# ─── Partitioned Iceberg table tests (predicate pushdown / pruning) ──────
+
+def _generate_partitioned_iceberg_data(target_dir: str):
+    """Generate partitioned Iceberg test data using generate_test_data.py."""
+    script = _get_generator_script()
+    if not os.path.exists(script):
+        pytest.skip(f"Iceberg generator script not found: {script}")
+    result = subprocess.run(
+        [sys.executable, script, "partitioned", target_dir],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"Partitioned Iceberg data generation failed:\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+
+
+@extension_test
+class TestLoadFromIcebergPruning:
+    """Test predicate pushdown with manifest/data-file pruning.
+
+    Test data layout (9 rows, 3 data files, 2 manifests):
+      manifest-A  (category=A):
+        file-A1: id=[1,2,3], value=[10.5, 20.3, 30.7]
+        file-A2: id=[4,5,6], value=[40.1, 50.9, 60.2]
+      manifest-B  (category=B):
+        file-B1: id=[7,8,9], value=[70.4, 80.6, 90.8]
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        self.iceberg_path = str(tmp_path / "iceberg_partitioned")
+        _generate_partitioned_iceberg_data(self.iceberg_path)
+
+        self.db_dir = str(tmp_path / "test_iceberg_prune_db")
+        shutil.rmtree(self.db_dir, ignore_errors=True)
+        self.db = Database(db_path=self.db_dir, mode="w")
+        self.conn = self.db.connect()
+        self.conn.execute("load iceberg")
+
+        yield
+
+        self.conn.close()
+        self.db.close()
+
+    def test_return_all(self):
+        """All 9 rows from all 3 files."""
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        RETURN *
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 9, f"Expected 9 records, got {len(records)}"
+
+    def test_filter_category_eq_a(self):
+        """Level-1 prune: manifest-B skipped entirely."""
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        WHERE category = 'A'
+        RETURN id, name, value, category
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 6, f"Expected 6 records for category=A, got {len(records)}"
+        for r in records:
+            assert str(r[3]) == "A", f"Expected category A, got {r[3]}"
+
+    def test_filter_value_gt_65(self):
+        """Level-2 prune: files A1, A2 skipped (upper <= 65)."""
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        WHERE value > 65.0
+        RETURN id, value
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 3, f"Expected 3 records with value>65, got {len(records)}"
+        for r in records:
+            assert float(r[1]) > 65.0, f"Expected value>65, got {r[1]}"
+
+    def test_filter_category_a_and_value_gt_35(self):
+        """Level-1 prune B, Level-2 prune A1 → only file-A2 read."""
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        WHERE category = 'A' AND value > 35.0
+        RETURN id, name, value, category
+        """
+        records = list(self.conn.execute(query))
+        # file-A2: value [40.1, 50.9, 60.2]  (all > 35)
+        assert len(records) == 3, f"Expected 3 records, got {len(records)}"
+        for r in records:
+            assert str(r[3]) == "A"
+            assert float(r[2]) > 35.0
+
+    def test_filter_category_eq_c_returns_empty(self):
+        """Level-1 prune all manifests → empty result."""
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        WHERE category = 'C'
+        RETURN id
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 0, f"Expected 0 records for category=C, got {len(records)}"
+
+    def test_filter_value_lt_25(self):
+        """Level-2 prune A2, B1 → only file-A1 read."""
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        WHERE value < 25.0
+        RETURN id, value
+        """
+        records = list(self.conn.execute(query))
+        # file-A1 values: 10.5, 20.3, 30.7 → filter value<25 → 10.5, 20.3
+        assert len(records) == 2, f"Expected 2 records with value<25, got {len(records)}"
+        for r in records:
+            assert float(r[1]) < 25.0
+
+    def test_parquet_row_filter_no_pruning(self):
+        """Level-3 (Parquet row-group pushdown) — no manifest or file pruned.
+
+        WHERE value > 20.0:
+          Level-1: no pruning (value is not a partition column)
+          Level-2: no pruning (all files have upper_bound > 20.0)
+          Level-3: Parquet scanner filters out value <= 20.0 within files
+            A1 [10.5, 20.3, 30.7] → keep 20.3, 30.7 (2 rows)
+            A2 [40.1, 50.9, 60.2] → keep all      (3 rows)
+            B1 [70.4, 80.6, 90.8] → keep all      (3 rows)
+          Total: 8 rows
+        """
+        query = f"""
+        LOAD FROM "{self.iceberg_path}" (FILE_FORMAT='iceberg')
+        WHERE value > 20.0
+        RETURN id, value, category
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 8, f"Expected 8 records with value>20, got {len(records)}"
+        for r in records:
+            assert float(r[1]) > 20.0, f"Expected value>20.0, got {r[1]}"
+

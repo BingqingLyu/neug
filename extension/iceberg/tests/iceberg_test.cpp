@@ -23,6 +23,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,6 +33,10 @@
 #include "metadata/iceberg_snapshot.h"
 #include "schema/iceberg_type_mapper.h"
 #include "iceberg_delete_filter.h"
+#include "iceberg_predicate_pruner.h"
+
+#include "neug/generated/proto/plan/common.pb.h"
+#include "neug/generated/proto/plan/expr.pb.h"
 
 namespace neug {
 namespace test {
@@ -911,6 +916,272 @@ TEST_F(IcebergDeleteFilterTest, AllRowsDeleted) {
   auto result = filter.applyDeletes(data, data_file_path);
   EXPECT_EQ(result->num_rows(), 0);
   EXPECT_EQ(result->num_columns(), 3);  // Schema preserved
+}
+
+// =============================================================================
+// Test Suite 7: Predicate Pruner
+// =============================================================================
+
+namespace {
+
+// Helper: encode values in Iceberg single-value serialisation (little-endian)
+std::string encLong(int64_t v) {
+  std::string s(sizeof(int64_t), '\0');
+  std::memcpy(s.data(), &v, sizeof(int64_t));
+  return s;
+}
+std::string encDouble(double v) {
+  std::string s(sizeof(double), '\0');
+  std::memcpy(s.data(), &v, sizeof(double));
+  return s;
+}
+std::string encString(const std::string& v) { return v; }
+
+// Build a simple comparison expression: column op constant
+::common::Expression makeCompExpr(const std::string& col_name,
+                                   ::common::Logical op,
+                                   const ::common::Value& val) {
+  ::common::Expression expr;
+  // var
+  auto* opr_var = expr.add_operators();
+  auto* var = opr_var->mutable_var();
+  var->mutable_tag()->set_name(col_name);
+  // op
+  auto* opr_op = expr.add_operators();
+  opr_op->set_logical(op);
+  // const
+  auto* opr_const = expr.add_operators();
+  *opr_const->mutable_const_() = val;
+  return expr;
+}
+
+// Build: expr1 AND expr2
+::common::Expression makeAndExpr(const ::common::Expression& e1,
+                                  const ::common::Expression& e2) {
+  ::common::Expression expr;
+  for (int i = 0; i < e1.operators_size(); ++i) {
+    *expr.add_operators() = e1.operators(i);
+  }
+  auto* and_opr = expr.add_operators();
+  and_opr->set_logical(::common::Logical::AND);
+  for (int i = 0; i < e2.operators_size(); ++i) {
+    *expr.add_operators() = e2.operators(i);
+  }
+  return expr;
+}
+
+::common::Value valDouble(double v) {
+  ::common::Value val;
+  val.set_f64(v);
+  return val;
+}
+::common::Value valStr(const std::string& v) {
+  ::common::Value val;
+  val.set_str(v);
+  return val;
+}
+
+}  // namespace
+
+class IcebergPredicatePrunerTest : public ::testing::Test {
+ protected:
+  // Schema: id(1,long), name(2,string), value(3,double), category(4,string)
+  std::vector<iceberg::IcebergField> schema_ = {
+      {1, "id", false, "long"},
+      {2, "name", false, "string"},
+      {3, "value", false, "double"},
+      {4, "category", false, "string"},
+  };
+  // Partition spec: category identity
+  std::vector<iceberg::IcebergPartitionField> partition_ = {
+      {4, 1000, "category", "identity"},
+  };
+
+  // Helpers to build DataFileEntry with bounds
+  iceberg::DataFileEntry makeDataFile(
+      const std::string& path,
+      int64_t id_lo, int64_t id_hi,
+      double val_lo, double val_hi,
+      const std::string& cat) {
+    iceberg::DataFileEntry df;
+    df.file_path = path;
+    df.file_format = "PARQUET";
+    df.lower_bounds = {{1, encLong(id_lo)}, {3, encDouble(val_lo)},
+                       {4, encString(cat)}};
+    df.upper_bounds = {{1, encLong(id_hi)}, {3, encDouble(val_hi)},
+                       {4, encString(cat)}};
+    return df;
+  }
+
+  iceberg::ManifestListEntry makeManifest(
+      const std::string& path,
+      const std::string& cat_lo, const std::string& cat_hi) {
+    iceberg::ManifestListEntry ml;
+    ml.manifest_path = path;
+    ml.content = 0;
+    iceberg::PartitionFieldSummary ps;
+    ps.lower_bound = cat_lo;
+    ps.upper_bound = cat_hi;
+    ml.partitions.push_back(ps);
+    return ml;
+  }
+};
+
+// ── Level 2 (data-file pruning) tests ──────────────────────────────────
+
+TEST_F(IcebergPredicatePrunerTest, DataFilePruneGT) {
+  // WHERE value > 65.0
+  auto expr = makeCompExpr("value", ::common::Logical::GT, valDouble(65.0));
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  auto df_a1 = makeDataFile("a1", 1, 3, 10.5, 30.7, "A");
+  auto df_a2 = makeDataFile("a2", 4, 6, 40.1, 60.2, "A");
+  auto df_b1 = makeDataFile("b1", 7, 9, 70.4, 90.8, "B");
+
+  EXPECT_TRUE(pruner.canSkipDataFile(df_a1));   // upper 30.7 <= 65
+  EXPECT_TRUE(pruner.canSkipDataFile(df_a2));   // upper 60.2 <= 65
+  EXPECT_FALSE(pruner.canSkipDataFile(df_b1));  // upper 90.8 > 65
+}
+
+TEST_F(IcebergPredicatePrunerTest, DataFilePruneLT) {
+  // WHERE value < 25.0
+  auto expr = makeCompExpr("value", ::common::Logical::LT, valDouble(25.0));
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  auto df_a1 = makeDataFile("a1", 1, 3, 10.5, 30.7, "A");
+  auto df_a2 = makeDataFile("a2", 4, 6, 40.1, 60.2, "A");
+
+  EXPECT_FALSE(pruner.canSkipDataFile(df_a1));  // lower 10.5 < 25
+  EXPECT_TRUE(pruner.canSkipDataFile(df_a2));   // lower 40.1 >= 25
+}
+
+TEST_F(IcebergPredicatePrunerTest, DataFilePruneEQ) {
+  // WHERE category = 'A'
+  auto expr = makeCompExpr("category", ::common::Logical::EQ, valStr("A"));
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  auto df_a1 = makeDataFile("a1", 1, 3, 10.5, 30.7, "A");
+  auto df_b1 = makeDataFile("b1", 7, 9, 70.4, 90.8, "B");
+
+  EXPECT_FALSE(pruner.canSkipDataFile(df_a1));  // category A in [A,A]
+  EXPECT_TRUE(pruner.canSkipDataFile(df_b1));   // category B not in [A,A]
+}
+
+TEST_F(IcebergPredicatePrunerTest, DataFilePruneAND) {
+  // WHERE category = 'A' AND value > 35.0
+  auto e1 = makeCompExpr("category", ::common::Logical::EQ, valStr("A"));
+  auto e2 = makeCompExpr("value", ::common::Logical::GT, valDouble(35.0));
+  auto expr = makeAndExpr(e1, e2);
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  auto df_a1 = makeDataFile("a1", 1, 3, 10.5, 30.7, "A");
+  auto df_a2 = makeDataFile("a2", 4, 6, 40.1, 60.2, "A");
+  auto df_b1 = makeDataFile("b1", 7, 9, 70.4, 90.8, "B");
+
+  // df_a1: category=A matches but value upper 30.7 <= 35 → skip (AND: any sub fails)
+  EXPECT_TRUE(pruner.canSkipDataFile(df_a1));
+  // df_a2: both match
+  EXPECT_FALSE(pruner.canSkipDataFile(df_a2));
+  // df_b1: category=B ≠ A → skip
+  EXPECT_TRUE(pruner.canSkipDataFile(df_b1));
+}
+
+TEST_F(IcebergPredicatePrunerTest, DataFileNoBounds) {
+  // No bounds → conservative, never skip
+  auto expr = makeCompExpr("value", ::common::Logical::GT, valDouble(65.0));
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  iceberg::DataFileEntry df;
+  df.file_path = "no-bounds.parquet";
+  EXPECT_FALSE(pruner.canSkipDataFile(df));
+}
+
+// ── Level 1 (manifest pruning) tests ───────────────────────────────────
+
+TEST_F(IcebergPredicatePrunerTest, ManifestPruneEQ) {
+  // WHERE category = 'A'
+  auto expr = makeCompExpr("category", ::common::Logical::EQ, valStr("A"));
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  auto ml_a = makeManifest("manifest-A.parquet", "A", "A");
+  auto ml_b = makeManifest("manifest-B.parquet", "B", "B");
+
+  EXPECT_FALSE(pruner.canSkipManifest(ml_a));  // A in [A,A]
+  EXPECT_TRUE(pruner.canSkipManifest(ml_b));   // A not in [B,B]
+}
+
+TEST_F(IcebergPredicatePrunerTest, ManifestPruneNonPartitionCol) {
+  // WHERE value > 65.0  (value is NOT a partition column)
+  auto expr = makeCompExpr("value", ::common::Logical::GT, valDouble(65.0));
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  auto ml_a = makeManifest("manifest-A.parquet", "A", "A");
+  auto ml_b = makeManifest("manifest-B.parquet", "B", "B");
+
+  // Can't prune manifests on non-partition column
+  EXPECT_FALSE(pruner.canSkipManifest(ml_a));
+  EXPECT_FALSE(pruner.canSkipManifest(ml_b));
+}
+
+TEST_F(IcebergPredicatePrunerTest, ManifestPruneNoPartitions) {
+  // Manifest without partition summaries → can't prune
+  auto expr = makeCompExpr("category", ::common::Logical::EQ, valStr("A"));
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  iceberg::ManifestListEntry ml;
+  ml.manifest_path = "no-partitions.parquet";
+  ml.content = 0;
+  EXPECT_FALSE(pruner.canSkipManifest(ml));
+}
+
+TEST_F(IcebergPredicatePrunerTest, ManifestPruneAND) {
+  // WHERE category = 'A' AND value > 35.0
+  // Only category is partition column; value can't be evaluated at manifest level
+  auto e1 = makeCompExpr("category", ::common::Logical::EQ, valStr("A"));
+  auto e2 = makeCompExpr("value", ::common::Logical::GT, valDouble(35.0));
+  auto expr = makeAndExpr(e1, e2);
+  iceberg::IcebergPredicatePruner pruner(expr, schema_, partition_);
+
+  auto ml_a = makeManifest("manifest-A.parquet", "A", "A");
+  auto ml_b = makeManifest("manifest-B.parquet", "B", "B");
+
+  // AND: any child can skip → category = 'A' fails for B → skip B
+  EXPECT_FALSE(pruner.canSkipManifest(ml_a));
+  EXPECT_TRUE(pruner.canSkipManifest(ml_b));
+}
+
+// ── Metadata parsing: partition-spec ────────────────────────────────────
+
+TEST_F(IcebergMetadataTest, ParsePartitionSpec) {
+  std::string json = R"({
+    "format-version": 1,
+    "table-uuid": "part-uuid",
+    "location": "/data/partitioned_table",
+    "schema": {
+      "type": "struct",
+      "fields": [
+        {"id": 1, "name": "id", "required": false, "type": "long"},
+        {"id": 4, "name": "category", "required": false, "type": "string"}
+      ]
+    },
+    "partition-spec": [
+      {
+        "source-id": 4,
+        "field-id": 1000,
+        "name": "category",
+        "transform": "identity"
+      }
+    ],
+    "current-snapshot-id": -1,
+    "snapshots": []
+  })";
+
+  auto metadata = iceberg::parseMetadataJson(json);
+  ASSERT_EQ(metadata.partition_spec.size(), 1u);
+  EXPECT_EQ(metadata.partition_spec[0].source_id, 4);
+  EXPECT_EQ(metadata.partition_spec[0].field_id, 1000);
+  EXPECT_EQ(metadata.partition_spec[0].name, "category");
+  EXPECT_EQ(metadata.partition_spec[0].transform, "identity");
 }
 
 }  // namespace test

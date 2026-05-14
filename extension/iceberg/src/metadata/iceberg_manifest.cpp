@@ -121,6 +121,91 @@ int64_t getInt64Value(const std::shared_ptr<arrow::Table>& table,
   return default_val;
 }
 
+// Helper: get map<int32, binary> value from a column at a given row
+std::map<int32_t, std::string> getMapInt32BinaryValue(
+    const std::shared_ptr<arrow::Table>& table,
+    const std::string& col_name, int64_t row) {
+  std::map<int32_t, std::string> result;
+  auto col = table->GetColumnByName(col_name);
+  if (!col || col->num_chunks() == 0) return result;
+
+  int64_t offset = 0;
+  for (int i = 0; i < col->num_chunks(); ++i) {
+    auto chunk = col->chunk(i);
+    if (row < offset + chunk->length()) {
+      int64_t local_idx = row - offset;
+      if (chunk->IsNull(local_idx)) return result;
+      auto map_array = std::static_pointer_cast<arrow::MapArray>(chunk);
+      auto keys =
+          std::static_pointer_cast<arrow::Int32Array>(map_array->keys());
+      auto values =
+          std::static_pointer_cast<arrow::BinaryArray>(map_array->items());
+      int64_t start = map_array->value_offset(local_idx);
+      int64_t end = map_array->value_offset(local_idx + 1);
+      for (int64_t j = start; j < end; ++j) {
+        int32_t key = keys->Value(j);
+        auto val = values->GetView(j);
+        result[key] = std::string(val.data(), val.size());
+      }
+      return result;
+    }
+    offset += chunk->length();
+  }
+  return result;
+}
+
+// Helper: get partition field summaries from "partitions" list<struct> column
+std::vector<PartitionFieldSummary> getPartitionSummaries(
+    const std::shared_ptr<arrow::Table>& table, int64_t row) {
+  std::vector<PartitionFieldSummary> result;
+  auto col = table->GetColumnByName("partitions");
+  if (!col || col->num_chunks() == 0) return result;
+
+  int64_t offset = 0;
+  for (int i = 0; i < col->num_chunks(); ++i) {
+    auto chunk = col->chunk(i);
+    if (row < offset + chunk->length()) {
+      int64_t local_idx = row - offset;
+      if (chunk->IsNull(local_idx)) return result;
+      auto list_array = std::static_pointer_cast<arrow::ListArray>(chunk);
+      int64_t start = list_array->value_offset(local_idx);
+      int64_t end = list_array->value_offset(local_idx + 1);
+      auto struct_array =
+          std::static_pointer_cast<arrow::StructArray>(list_array->values());
+      // Field indices: contains_null(0), contains_nan(1),
+      //               lower_bound(2), upper_bound(3)
+      auto contains_null_arr =
+          std::static_pointer_cast<arrow::BooleanArray>(
+              struct_array->GetFieldByName("contains_null"));
+      auto lower_arr =
+          std::static_pointer_cast<arrow::BinaryArray>(
+              struct_array->GetFieldByName("lower_bound"));
+      auto upper_arr =
+          std::static_pointer_cast<arrow::BinaryArray>(
+              struct_array->GetFieldByName("upper_bound"));
+
+      for (int64_t j = start; j < end; ++j) {
+        PartitionFieldSummary summary;
+        if (contains_null_arr && !contains_null_arr->IsNull(j)) {
+          summary.contains_null = contains_null_arr->Value(j);
+        }
+        if (lower_arr && !lower_arr->IsNull(j)) {
+          auto v = lower_arr->GetView(j);
+          summary.lower_bound = std::string(v.data(), v.size());
+        }
+        if (upper_arr && !upper_arr->IsNull(j)) {
+          auto v = upper_arr->GetView(j);
+          summary.upper_bound = std::string(v.data(), v.size());
+        }
+        result.push_back(std::move(summary));
+      }
+      return result;
+    }
+    offset += chunk->length();
+  }
+  return result;
+}
+
 }  // namespace
 
 std::vector<ManifestListEntry> parseManifestList(
@@ -145,6 +230,7 @@ std::vector<ManifestListEntry> parseManifestList(
         getInt32Value(table, "existing_data_files_count", i);
     entry.deleted_data_files_count =
         getInt32Value(table, "deleted_data_files_count", i);
+    entry.partitions = getPartitionSummaries(table, i);
     entries.push_back(std::move(entry));
   }
 
@@ -196,6 +282,20 @@ std::vector<ManifestFileEntry> parseManifestFile(
     if (entry.data_file.file_size_in_bytes == 0) {
       entry.data_file.file_size_in_bytes =
           getInt64Value(table, "file_size_in_bytes", i);
+    }
+
+    // Parse lower_bounds / upper_bounds (map<int32, binary>)
+    entry.data_file.lower_bounds =
+        getMapInt32BinaryValue(table, "data_file.lower_bounds", i);
+    if (entry.data_file.lower_bounds.empty()) {
+      entry.data_file.lower_bounds =
+          getMapInt32BinaryValue(table, "lower_bounds", i);
+    }
+    entry.data_file.upper_bounds =
+        getMapInt32BinaryValue(table, "data_file.upper_bounds", i);
+    if (entry.data_file.upper_bounds.empty()) {
+      entry.data_file.upper_bounds =
+          getMapInt32BinaryValue(table, "upper_bounds", i);
     }
 
     entries.push_back(std::move(entry));
