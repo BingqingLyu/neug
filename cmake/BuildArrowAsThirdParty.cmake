@@ -84,6 +84,22 @@ function(build_arrow_as_third_party)
     endif()
     if(ARROW_ENABLE_S3)
         set(ARROW_S3 ON CACHE BOOL "" FORCE)
+        # On Debian/Ubuntu multiarch, headers and libraries live under
+        # /usr/include/<triplet>/ and /usr/lib/<triplet>/ which CMake's
+        # FindCURL may not search by default.  Use CMAKE_LIBRARY_ARCHITECTURE
+        # (auto-detected triplet, e.g. x86_64-linux-gnu or aarch64-linux-gnu).
+        if(CMAKE_LIBRARY_ARCHITECTURE)
+            set(_curl_multiarch_inc "/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}")
+            set(_curl_multiarch_lib "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+            if(NOT CURL_INCLUDE_DIR AND EXISTS "${_curl_multiarch_inc}/curl/curl.h")
+                set(CURL_INCLUDE_DIR "${_curl_multiarch_inc}" CACHE PATH "" FORCE)
+            endif()
+            if(NOT CURL_LIBRARY AND EXISTS "${_curl_multiarch_lib}/libcurl.so")
+                set(CURL_LIBRARY "${_curl_multiarch_lib}/libcurl.so" CACHE FILEPATH "" FORCE)
+            endif()
+            unset(_curl_multiarch_inc)
+            unset(_curl_multiarch_lib)
+        endif()
     else()
         set(ARROW_S3 OFF CACHE BOOL "" FORCE)
     endif()
