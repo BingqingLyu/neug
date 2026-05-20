@@ -899,7 +899,6 @@ class TestExportS3:
         self.db = Database(db_path=self.db_dir, mode="w")
         self.conn = self.db.connect()
         self.conn.execute("LOAD S3")
-        self.conn.execute("LOAD JSON")
         self.conn.execute("LOAD PARQUET")
 
         self.bucket = "graphscope"
