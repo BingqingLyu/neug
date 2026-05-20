@@ -594,6 +594,12 @@ if(BUILD_EXTENSIONS AND "parquet" IN_LIST BUILD_EXTENSIONS)
     message(STATUS "Arrow Parquet support enabled for parquet extension")
 endif()
 
+# Configure Arrow S3 support if s3 extension is enabled
+if(BUILD_EXTENSIONS AND "s3" IN_LIST BUILD_EXTENSIONS)
+    set(ARROW_ENABLE_S3 ON CACHE BOOL "" FORCE)
+    message(STATUS "Arrow S3 support enabled for s3 extension")
+endif()
+
 set(NEUG_USE_SYSTEM_ARROW OFF)
 if(DEFINED ENV{CI})
     if("$ENV{CI}" STREQUAL "ON")
