@@ -123,8 +123,8 @@ jobs:
         NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_export.py -k "parquet"
         NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_db_import_export.py -k "copy_from_parquet"
         NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_sniffer.py -k "parquet"
-        NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_load.py -k "s3"
-        NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_export.py -k "s3"
+        NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_load.py -k "httpfs"
+        NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_export.py -k "httpfs"
 
   extension_tests_wheel_linux_x86_64:
     runs-on: [self-hosted, daily, linux, x64]
@@ -200,18 +200,6 @@ jobs:
         env:
           TMP_DIR: ${{ github.workspace }}/${{ github.run_id }}
         run: |
-          # Bundled libcurl (from auditwheel) was built in a manylinux container
-          # with a default CA path that does not exist on Ubuntu bare-metal runners.
-          # Set CURL_CA_BUNDLE / SSL_CERT_FILE to the system CA file so HTTPS to
-          # S3/OSS endpoints does not fail with curlCode 77 (CURLE_SSL_CACERT_BADFILE).
-          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
-            export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-            export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
-            export CURL_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
-            export SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
-          fi
-          echo "CURL_CA_BUNDLE=${CURL_CA_BUNDLE:-<unset>}"
           rm -rf ${TMP_DIR}/test_example
           GLOG_v=10 python3 tools/python_bind/example/simple_example.py example_dataset/modern_graph ${TMP_DIR}/test_example
           NEUG_RUN_EXTENSION_TESTS=1 python3 tools/python_bind/example/complex_test.py
@@ -277,11 +265,6 @@ jobs:
           mkdir -p $NEUG_SITE/extension
           rm -rf $NEUG_SITE/extension
           cp -r extension_packages/extension $NEUG_SITE/
-          # Copy auditwheel-bundled shared libraries (e.g. libcurl, libarrow_s3)
-          # from the extension wheel.  auditwheel renames .so files with a
-          # content hash (e.g. libcurl-34c6b10f.so.4.3.0) and places them in
-          # <package>.libs/.  Without this step the extension .so files fail to
-          # load at runtime because the hash-renamed libraries are missing.
           if [ -d extension_packages/neug.libs ]; then
             mkdir -p $NEUG_SITE/neug.libs
             cp -rf extension_packages/neug.libs/* $NEUG_SITE/neug.libs/
@@ -291,18 +274,6 @@ jobs:
         env:
           TMP_DIR: ${{ github.workspace }}/${{ github.run_id }}
         run: |
-          # Bundled libcurl (from auditwheel) was built in a manylinux container
-          # with a default CA path that does not exist on Ubuntu bare-metal runners.
-          # Set CURL_CA_BUNDLE / SSL_CERT_FILE to the system CA file so HTTPS to
-          # S3/OSS endpoints does not fail with curlCode 77 (CURLE_SSL_CACERT_BADFILE).
-          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
-            export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-            export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-          elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
-            export CURL_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
-            export SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
-          fi
-          echo "CURL_CA_BUNDLE=${CURL_CA_BUNDLE:-<unset>}"
           rm -rf ${TMP_DIR}/test_example
           GLOG_v=10 python3 tools/python_bind/example/simple_example.py example_dataset/modern_graph ${TMP_DIR}/test_example
           NEUG_RUN_EXTENSION_TESTS=1 python3 tools/python_bind/example/complex_test.py
