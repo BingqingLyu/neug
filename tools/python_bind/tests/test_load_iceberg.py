@@ -420,3 +420,159 @@ class TestLoadFromIcebergPruning:
         for r in records:
             assert float(r[1]) > 20.0, f"Expected value>20.0, got {r[1]}"
 
+
+# ─── S3/OSS Iceberg integration tests ──────────────────────────────────────
+#
+# Pre-uploaded test data on OSS:
+#   oss://graphscope/neug/test_data/iceberg            — simple table (5 rows: id/name/value)
+#   oss://graphscope/neug/test_data/iceberg/partitioned — partitioned table (9 rows: id/name/value/category)
+#
+# Iceberg requires LIST permission on metadata/manifests directories, so Anonymous
+# access may not work. Use CREDENTIALS_KIND='Default' which reads AK/SK from env:
+#   export OSS_ACCESS_KEY_ID=...
+#   export OSS_ACCESS_KEY_SECRET=...
+#
+# Run:  NEUG_RUN_EXTENSION_TESTS=1 python3 -m pytest -sv tests/test_load_iceberg.py::TestLoadFromIcebergS3
+
+_OSS_SIMPLE_PATH = "oss://graphscope/neug/test_data/iceberg"
+_OSS_PARTITIONED_PATH = "oss://graphscope/neug/test_data/iceberg/partitioned"
+_OSS_OPTS = "FILE_FORMAT='iceberg', CREDENTIALS_KIND='Default', ENDPOINT_OVERRIDE='oss-cn-beijing.aliyuncs.com'"
+
+_OSS_CREDENTIALS_SET = bool(
+    os.environ.get("OSS_ACCESS_KEY_ID") and os.environ.get("OSS_ACCESS_KEY_SECRET")
+)
+
+oss_iceberg_test = pytest.mark.skipif(
+    not EXTENSION_TESTS_ENABLED or not _OSS_CREDENTIALS_SET,
+    reason="OSS Iceberg tests disabled; set NEUG_RUN_EXTENSION_TESTS=1, OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET.",
+)
+
+
+@oss_iceberg_test
+class TestLoadFromIcebergS3:
+    """Test reading Iceberg tables from OSS storage.
+
+    Simple table (oss://graphscope/neug/test_data/iceberg):
+      5 rows, columns: id(long), name(string), value(double)
+
+    Partitioned table (oss://graphscope/neug/test_data/iceberg/partitioned):
+      9 rows, 3 data files, 2 manifests
+      manifest-A (category=A): file-A1 [10.5,20.3,30.7], file-A2 [40.1,50.9,60.2]
+      manifest-B (category=B): file-B1 [70.4,80.6,90.8]
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        self.db_dir = str(tmp_path / "test_iceberg_httpfs_db")
+        shutil.rmtree(self.db_dir, ignore_errors=True)
+        self.db = Database(db_path=self.db_dir, mode="w")
+        self.conn = self.db.connect()
+        self.conn.execute("load httpfs")
+        self.conn.execute("load iceberg")
+
+        yield
+
+        self.conn.close()
+        self.db.close()
+
+    # ── Simple table tests ──────────────────────────────────────────────
+
+    def test_simple_return_all(self):
+        """Read all 5 rows from simple Iceberg table on OSS."""
+        query = f"""
+        LOAD FROM "{_OSS_SIMPLE_PATH}" ({_OSS_OPTS})
+        RETURN *
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 5, f"Expected 5 records, got {len(records)}"
+        assert len(records[0]) == 3, f"Expected 3 columns, got {len(records[0])}"
+
+    def test_simple_column_projection(self):
+        """Column projection on simple table: only id and name."""
+        query = f"""
+        LOAD FROM "{_OSS_SIMPLE_PATH}" ({_OSS_OPTS})
+        RETURN id, name
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 5
+        assert len(records[0]) == 2, f"Expected 2 columns, got {len(records[0])}"
+
+    def test_simple_filter(self):
+        """Row filter on simple table: value > 30.0."""
+        query = f"""
+        LOAD FROM "{_OSS_SIMPLE_PATH}" ({_OSS_OPTS})
+        WHERE value > 30.0
+        RETURN id, name, value
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 3, f"Expected 3 records with value>30, got {len(records)}"
+        for r in records:
+            assert float(r[2]) > 30.0
+
+    # ── Partitioned table tests ─────────────────────────────────────────
+
+    def test_partitioned_return_all(self):
+        """Read all 9 rows from partitioned Iceberg table on OSS."""
+        query = f"""
+        LOAD FROM "{_OSS_PARTITIONED_PATH}" ({_OSS_OPTS})
+        RETURN *
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 9, f"Expected 9 records, got {len(records)}"
+
+    def test_partitioned_column_projection(self):
+        """Column projection: only id and value."""
+        query = f"""
+        LOAD FROM "{_OSS_PARTITIONED_PATH}" ({_OSS_OPTS})
+        RETURN id, value
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 9
+        assert len(records[0]) == 2
+
+    def test_manifest_pruning_category_eq_a(self):
+        """Level-1 manifest pruning: skip manifest-B, only 6 rows from category=A."""
+        query = f"""
+        LOAD FROM "{_OSS_PARTITIONED_PATH}" ({_OSS_OPTS})
+        WHERE category = 'A'
+        RETURN id, name, value, category
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 6, f"Expected 6 records for category=A, got {len(records)}"
+        for r in records:
+            assert str(r[3]) == "A"
+
+    def test_datafile_pruning_value_gt_65(self):
+        """Level-2 data-file pruning: skip A1 and A2, only 3 rows from B1."""
+        query = f"""
+        LOAD FROM "{_OSS_PARTITIONED_PATH}" ({_OSS_OPTS})
+        WHERE value > 65.0
+        RETURN id, value
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 3, f"Expected 3 records with value>65, got {len(records)}"
+        for r in records:
+            assert float(r[1]) > 65.0
+
+    def test_parquet_row_pushdown(self):
+        """Level-3 Parquet row-group pushdown: filter value > 20.0 at scanner level."""
+        query = f"""
+        LOAD FROM "{_OSS_PARTITIONED_PATH}" ({_OSS_OPTS})
+        WHERE value > 20.0
+        RETURN id, value
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 8, f"Expected 8 records with value>20, got {len(records)}"
+        for r in records:
+            assert float(r[1]) > 20.0
+
+    def test_manifest_pruning_empty_result(self):
+        """Level-1 prune all manifests: category=C doesn't exist → 0 rows."""
+        query = f"""
+        LOAD FROM "{_OSS_PARTITIONED_PATH}" ({_OSS_OPTS})
+        WHERE category = 'C'
+        RETURN id
+        """
+        records = list(self.conn.execute(query))
+        assert len(records) == 0, f"Expected 0 records for category=C, got {len(records)}"
+
