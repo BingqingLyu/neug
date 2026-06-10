@@ -1,7 +1,7 @@
 {
   "format-version": 1,
   "table-uuid": "test-iceberg-table-uuid-0001",
-  "location": "/home/bingqing.lbq/moran/neug/example_dataset/iceberg",
+  "location": "oss://graphscope/neug/test_data/iceberg",
   "schema": {
     "type": "struct",
     "fields": [

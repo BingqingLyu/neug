@@ -61,7 +61,7 @@ class S3FileSystemWrapper : public arrow::fs::FileSystem {
   }
 
   arrow::Result<std::string> NormalizePath(std::string path) override {
-    return inner_->NormalizePath(std::move(path));
+    return inner_->NormalizePath(stripS3Scheme(path));
   }
 
   arrow::Result<std::string> PathFromUri(
@@ -130,7 +130,10 @@ class S3FileSystemWrapper : public arrow::fs::FileSystem {
   }
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(
       const arrow::fs::FileInfo& info) override {
-    return inner_->OpenInputStream(info);
+    // FileInfo may contain URI-prefixed path (e.g. from
+    // FileSystemDatasetFactory::Make which stores paths as-is).
+    // Delegate to the string-path overload to ensure scheme stripping.
+    return inner_->OpenInputStream(stripS3Scheme(info.path()));
   }
 
   // OpenInputFile: both string-path and FileInfo overloads
@@ -140,7 +143,8 @@ class S3FileSystemWrapper : public arrow::fs::FileSystem {
   }
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(
       const arrow::fs::FileInfo& info) override {
-    return inner_->OpenInputFile(info);
+    // FileInfo may contain URI-prefixed path — strip before delegating.
+    return inner_->OpenInputFile(stripS3Scheme(info.path()));
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
