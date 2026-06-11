@@ -1024,6 +1024,16 @@ bool Schema::Equals(const Schema& other) const {
   return true;
 }
 
+// Forward declarations for functions defined later in the
+// `config_parsing` namespace below. These are needed because
+// Schema::to_yaml() uses them prior to their full definition.
+namespace config_parsing {
+bool dump_vertices_schema(const Schema& schema, YAML::Node& node,
+                          bool include_temporary);
+bool dump_edges_schema(const Schema& schema, YAML::Node& node,
+                       bool include_temporary);
+}  // namespace config_parsing
+
 neug::result<YAML::Node> Schema::to_yaml() const {
   YAML::Node graph_node;
   graph_node["name"] = GetGraphName();
@@ -2484,7 +2494,10 @@ OutArchive& operator>>(OutArchive& archive, EdgeSchema& e_schema) {
 }
 
 result<rapidjson::Document> Schema::ToJson() const {
-  auto yaml_result = to_yaml();
+  // Persistence path: excludes temporary labels (DumpToYaml drops them);
+  // do NOT use to_yaml() here, which intentionally keeps temporary labels
+  // for the in-memory compiler/catalog snapshot.
+  auto yaml_result = Schema::DumpToYaml(*this);
   if (!yaml_result) {
     return tl::unexpected(yaml_result.error());
   }

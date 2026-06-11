@@ -15,8 +15,12 @@
 
 #include <gtest/gtest.h>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 #include "neug/execution/common/types/value.h"
+#include "neug/main/connection.h"
+#include "neug/main/neug_db.h"
 #include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph/schema.h"
@@ -253,6 +257,31 @@ TEST_F(SchemaSerializationTest, DumpToYamlExcludesTemporaryLabels) {
   EXPECT_FALSE(yaml_has_edge_type(yaml, "TempFollows"));
 }
 
+// Verifies the binary Schema::Serialize path does not propagate the
+// `temporary` flag. operator<<(InArchive, VertexSchema/EdgeSchema) intentionally
+// omits the field, so a round-trip through Serialize/Deserialize yields a
+// non-temporary copy of every label. This guards the spec L28 invariant that
+// any persistence path drops temp markers.
+TEST_F(SchemaSerializationTest, SerializeStripsTemporaryFlag) {
+  // Sanity: source schema has temp labels.
+  ASSERT_FALSE(schema_.get_temporary_vertex_labels().empty());
+  ASSERT_FALSE(schema_.get_temporary_edge_triplet_keys().empty());
+
+  std::stringstream ss;
+  schema_.Serialize(ss);
+
+  Schema restored;
+  restored.Deserialize(ss);
+
+  // Persistent labels survive…
+  EXPECT_TRUE(restored.is_vertex_label_valid("Person"));
+  EXPECT_TRUE(restored.is_edge_label_valid("Knows"));
+
+  // …and after deserialize NO label should still be marked temporary.
+  EXPECT_TRUE(restored.get_temporary_vertex_labels().empty());
+  EXPECT_TRUE(restored.get_temporary_edge_triplet_keys().empty());
+}
+
 // ============================================================================
 // Part 3: PropertyGraph temporary data protection tests
 // ============================================================================
@@ -425,6 +454,32 @@ TEST_F(PropertyGraphTemporaryTest, DumpSkipsTemporaryData) {
   // Temporary data is gone (not even in schema)
   auto temp_labels = graph2->schema().get_temporary_vertex_labels();
   EXPECT_TRUE(temp_labels.empty());
+}
+
+// Verifies the on-disk checkpoint manifest JSON does not leak temporary
+// label names. spec L28 requires Dump()/persistence to skip temporary
+// labels entirely, so the serialized manifest text MUST NOT mention
+// `temp_user` even though that label was live in memory at Dump time.
+TEST_F(PropertyGraphTemporaryTest, DumpManifestFileExcludesTemporary) {
+  CreatePersistentPerson();
+  CreateTemporaryUser();
+
+  auto ckp2 = make_checkpoint(ws_);
+  graph_->Dump(ckp2);
+
+  std::string meta_file = ckp2->path() + "/meta";
+  ASSERT_TRUE(std::filesystem::exists(meta_file)) << meta_file;
+
+  std::ifstream ifs(meta_file);
+  ASSERT_TRUE(ifs.is_open());
+  std::stringstream buf;
+  buf << ifs.rdbuf();
+  std::string manifest_text = buf.str();
+
+  // Persistent label name appears, temporary label name does not.
+  EXPECT_NE(manifest_text.find("person"), std::string::npos);
+  EXPECT_EQ(manifest_text.find("temp_user"), std::string::npos)
+      << "temporary label leaked into on-disk manifest:\n" << manifest_text;
 }
 
 TEST_F(PropertyGraphTemporaryTest, DumpToYamlExcludesTemporary) {
