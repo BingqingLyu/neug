@@ -91,6 +91,14 @@ class Transformer {
       CypherParser::NEUG_ScanSourceContext& ctx);
   options_t transformOptions(CypherParser::NEUG_OptionsContext& ctx);
 
+  // Transform load-as statement.
+  std::unique_ptr<Statement> transformLoadNodeTable(
+      CypherParser::NEUG_LoadNodeTableContext& ctx);
+  std::unique_ptr<Statement> transformLoadEdgeTable(
+      CypherParser::NEUG_LoadEdgeTableContext& ctx);
+  std::vector<std::string> transformReturnColumns(
+      CypherParser::NEUG_ReturnColumnsContext& ctx);
+
   std::unique_ptr<Statement> transformExportDatabase(
       CypherParser::NEUG_ExportDatabaseContext& ctx);
   std::unique_ptr<Statement> transformImportDatabase(

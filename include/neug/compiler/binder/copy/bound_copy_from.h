@@ -59,7 +59,8 @@ struct NEUG_API DDLVertexInfo : public DDLTableInfo {
   // create inner node table entry and table info from the given parameters
   DDLVertexInfo(const std::string& vertexLabelName,
                 const std::string& primaryKeyName,
-                const expression_vector& columns, ExpressionBinder& binder);
+                const expression_vector& columns, ExpressionBinder& binder,
+                bool temporary = false);
 
   // return vertex label name
   std::string getVertexLabelName();
@@ -76,7 +77,7 @@ struct NEUG_API DDLEdgeInfo : public DDLTableInfo {
   DDLEdgeInfo(const std::string& edgeLabelName, const std::string& srcLabelName,
               const std::string& dstLabelName, common::table_id_t srcLabelID,
               common::table_id_t dstLabelID, const expression_vector& columns,
-              ExpressionBinder& binder);
+              ExpressionBinder& binder, bool temporary = false);
   // return edge label name
   std::string getEdgeLabelName();
   std::string getSrcLabelName();
@@ -104,6 +105,8 @@ struct NEUG_API BoundCopyFromInfo {
   std::unique_ptr<ExtraBoundCopyFromInfo> extraInfo;
   // extra table info to create vertex or edge type from inferred results
   std::shared_ptr<DDLTableInfo> ddlTableInfo;
+  // Optional WHERE predicate for LOAD AS filter pushdown.
+  std::shared_ptr<Expression> wherePredicate;
 
   BoundCopyFromInfo(catalog::TableCatalogEntry* tableEntry,
                     std::unique_ptr<BoundBaseScanSource> source,
@@ -117,7 +120,8 @@ struct NEUG_API BoundCopyFromInfo {
         columnExprs{std::move(columnExprs)},
         columnEvaluateTypes{std::move(columnEvaluateTypes)},
         extraInfo{std::move(extraInfo)},
-        ddlTableInfo{nullptr} {}
+        ddlTableInfo{nullptr},
+        wherePredicate{nullptr} {}
 
   // to support vertex or edge type not exist in catalog
   // tableEntry should not be null, need to set tableEntry with
@@ -145,7 +149,8 @@ struct NEUG_API BoundCopyFromInfo {
   BoundCopyFromInfo(const BoundCopyFromInfo& other)
       : offset{other.offset},
         columnExprs{other.columnExprs},
-        columnEvaluateTypes{other.columnEvaluateTypes} {
+        columnEvaluateTypes{other.columnEvaluateTypes},
+        wherePredicate{other.wherePredicate} {
     // ref to table entry in catalog or ddl table info
     tableEntry = other.tableEntry;
     // Shadow copy of ddl table info to avoid extra overhead

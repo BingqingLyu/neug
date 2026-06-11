@@ -57,7 +57,7 @@ namespace binder {
 DDLVertexInfo::DDLVertexInfo(const std::string& vertexLabelName,
                              const std::string& primaryKeyName,
                              const expression_vector& columns,
-                             ExpressionBinder& binder) {
+                             ExpressionBinder& binder, bool temporary) {
   nodeTableEntry =
       std::make_unique<NodeTableCatalogEntry>(vertexLabelName, primaryKeyName);
   bool primaryKeyFound = false;
@@ -85,7 +85,8 @@ DDLVertexInfo::DDLVertexInfo(const std::string& vertexLabelName,
   createTableInfo =
       BoundCreateTableInfo(CatalogEntryType::NODE_TABLE_ENTRY, vertexLabelName,
                            ConflictAction::ON_CONFLICT_THROW,
-                           std::move(boundExtra), false /* isInternal */);
+                           std::move(boundExtra), false /* isInternal */,
+                           false /* hasParent */, temporary);
 }
 
 std::string DDLVertexInfo::getVertexLabelName() {
@@ -105,7 +106,7 @@ DDLEdgeInfo::DDLEdgeInfo(const std::string& edgeLabelName,
                          const std::string& dstLabelName, table_id_t srcLabelID,
                          table_id_t dstLabelID,
                          const expression_vector& columns,
-                         ExpressionBinder& binder)
+                         ExpressionBinder& binder, bool temporary)
     : srcLabelName_{srcLabelName}, dstLabelName_{dstLabelName} {
   if (columns.size() < 2u) {
     THROW_BINDER_EXCEPTION(stringFormat(
@@ -133,7 +134,8 @@ DDLEdgeInfo::DDLEdgeInfo(const std::string& edgeLabelName,
   createTableInfo =
       BoundCreateTableInfo(CatalogEntryType::REL_TABLE_ENTRY, edgeLabelName,
                            ConflictAction::ON_CONFLICT_THROW,
-                           std::move(boundExtra), false /* isInternal */);
+                           std::move(boundExtra), false /* isInternal */,
+                           false /* hasParent */, temporary);
 
   relTableEntry = std::make_unique<GRelTableCatalogEntry>(
       edgeLabelName, RelMultiplicity::MANY, RelMultiplicity::MANY,

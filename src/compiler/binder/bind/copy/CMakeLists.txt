@@ -1,7 +1,8 @@
 add_library(neug_binder_bind_copy
         OBJECT
         bind_copy_to.cpp
-        bind_copy_from.cpp)
+        bind_copy_from.cpp
+        bind_load_as.cpp)
 add_dependencies(neug_binder_bind_copy neug_proto)
 
 set(ALL_OBJECT_FILES

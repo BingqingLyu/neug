@@ -16,6 +16,8 @@ oC_Statement
         | nEUG_CopyFrom
         | nEUG_CopyFromByColumn
         | nEUG_CopyTO
+        | nEUG_LoadNodeTable
+        | nEUG_LoadEdgeTable
         | nEUG_StandaloneCall
         | nEUG_CreateMacro
         | nEUG_CommentOn
@@ -279,6 +281,15 @@ oC_ReadingClause
 
 nEUG_LoadFrom
     :  LOAD ( SP WITH SP HEADERS SP? '(' SP? nEUG_ColumnDefinitions SP? ')' )? SP FROM SP nEUG_ScanSource (SP? '(' SP? nEUG_Options SP? ')')? (SP? oC_Where)? ;
+
+nEUG_LoadNodeTable
+    :  LOAD SP NODE SP TABLE SP FROM SP nEUG_ScanSource (SP? '(' SP? nEUG_Options SP? ')')? (SP? oC_Where)? (SP? nEUG_ReturnColumns)? SP AS SP oC_SchemaName ;
+
+nEUG_LoadEdgeTable
+    :  LOAD SP EDGE SP TABLE SP FROM SP nEUG_ScanSource (SP? '(' SP? nEUG_Options SP? ')')? (SP? oC_Where)? (SP? nEUG_ReturnColumns)? SP AS SP oC_SchemaName ;
+
+nEUG_ReturnColumns
+    :  RETURN SP oC_SchemaName ( SP? ',' SP? oC_SchemaName )* ;
 
 
 oC_YieldItem
