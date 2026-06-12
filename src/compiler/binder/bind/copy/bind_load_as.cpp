@@ -240,9 +240,11 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
         expressionBinder, /*temporary=*/true);
   }
 
+  std::vector<ColumnEvaluateType> ddlEvaluateTypes(
+      ddlColumns.size(), ColumnEvaluateType::REFERENCE);
   auto boundCopyFromInfo =
       BoundCopyFromInfo(std::move(boundSource), std::move(offset),
-                        std::move(columns), std::move(evaluateTypes),
+                        std::move(ddlColumns), std::move(ddlEvaluateTypes),
                         std::move(extraInfo), std::move(ddlTableInfo));
 
   // Bind optional WHERE predicate for filter pushdown.

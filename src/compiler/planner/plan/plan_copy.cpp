@@ -54,7 +54,7 @@ static void appendCopyFrom(const BoundCopyFromInfo& info,
 
 static void pushLoadAsFilterAndProjection(const BoundCopyFromInfo& info,
                                           LogicalPlan& plan) {
-  auto* op = plan.getLastOperator();
+  auto op = plan.getLastOperator();
   if (!op || op->getOperatorType() != LogicalOperatorType::TABLE_FUNCTION_CALL) {
     return;
   }
