@@ -94,8 +94,8 @@ class Transformer {
   // Transform load-as statement.
   std::unique_ptr<Statement> transformLoadNodeTable(
       CypherParser::NEUG_LoadNodeTableContext& ctx);
-  std::unique_ptr<Statement> transformLoadEdgeTable(
-      CypherParser::NEUG_LoadEdgeTableContext& ctx);
+  std::unique_ptr<Statement> transformLoadRelTable(
+      CypherParser::NEUG_LoadRelTableContext& ctx);
   std::vector<std::string> transformReturnColumns(
       CypherParser::NEUG_ReturnColumnsContext& ctx);
 

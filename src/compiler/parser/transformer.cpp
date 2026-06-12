@@ -77,8 +77,8 @@ std::unique_ptr<Statement> Transformer::transformStatement(
     return transformCopyTo(*ctx.nEUG_CopyTO());
   } else if (ctx.nEUG_LoadNodeTable()) {
     return transformLoadNodeTable(*ctx.nEUG_LoadNodeTable());
-  } else if (ctx.nEUG_LoadEdgeTable()) {
-    return transformLoadEdgeTable(*ctx.nEUG_LoadEdgeTable());
+  } else if (ctx.nEUG_LoadRelTable()) {
+    return transformLoadRelTable(*ctx.nEUG_LoadRelTable());
   } else if (ctx.nEUG_StandaloneCall()) {
     return transformStandaloneCall(*ctx.nEUG_StandaloneCall());
   } else if (ctx.nEUG_CreateMacro()) {

@@ -47,26 +47,31 @@ class LoadAsTest : public ::testing::Test {
     std::filesystem::create_directories(DB_DIR);
     std::filesystem::create_directories(CSV_DIR);
 
-    // CSV files for LOAD NODE TABLE tests
+    // CSV files for LOAD NODE TABLE tests.
+    // NeuG's CSV reader defaults to '|' delimiter
+    // (CopyConstants::DEFAULT_CSV_DELIMITER) and HEADER=false
+    // (DEFAULT_CSV_HAS_HEADER). To stay aligned with those defaults we
+    // write '|'-delimited content here and pass `header = true` in every
+    // LOAD statement below so the first row is parsed as column names.
     write_csv("people.csv",
-              "id,name,age\n"
-              "1,Alice,30\n"
-              "2,Bob,25\n"
-              "3,Carol,35\n"
-              "4,Dave,20\n");
+              "id|name|age\n"
+              "1|Alice|30\n"
+              "2|Bob|25\n"
+              "3|Carol|35\n"
+              "4|Dave|20\n");
 
     write_csv("items.csv",
-              "item_id,title,price\n"
-              "101,Widget,9.99\n"
-              "102,Gadget,19.99\n"
-              "103,Doohickey,4.99\n");
+              "item_id|title|price\n"
+              "101|Widget|9.99\n"
+              "102|Gadget|19.99\n"
+              "103|Doohickey|4.99\n");
 
     // CSV for edge tests: src_id, dst_id, weight
     write_csv("edges.csv",
-              "src_id,dst_id,weight\n"
-              "1,2,0.5\n"
-              "2,3,1.0\n"
-              "3,4,0.8\n");
+              "src_id|dst_id|weight\n"
+              "1|2|0.5\n"
+              "2|3|1.0\n"
+              "3|4|0.8\n");
 
     db_ = std::make_unique<NeugDB>();
     NeugDBConfig config;
@@ -100,19 +105,22 @@ class LoadAsTest : public ::testing::Test {
   }
 
   // Insert some vertices so edge lookups can succeed.
+  // Note: tl::expected<QueryResult, Status> has no move-assignment
+  // (QueryResult is move-only and the expected specialization disables
+  // operator=), so each call needs its own variable.
   void insertPersistentVertices(std::shared_ptr<Connection> conn) {
-    auto res = conn->Query(
+    auto r1 = conn->Query(
         "CREATE (p:Person {id: 1, name: 'Alice', age: 30});");
-    EXPECT_TRUE(res) << res.error().ToString();
-    res = conn->Query(
+    EXPECT_TRUE(r1) << r1.error().ToString();
+    auto r2 = conn->Query(
         "CREATE (p:Person {id: 2, name: 'Bob', age: 25});");
-    EXPECT_TRUE(res) << res.error().ToString();
-    res = conn->Query(
+    EXPECT_TRUE(r2) << r2.error().ToString();
+    auto r3 = conn->Query(
         "CREATE (p:Person {id: 3, name: 'Carol', age: 35});");
-    EXPECT_TRUE(res) << res.error().ToString();
-    res = conn->Query(
+    EXPECT_TRUE(r3) << r3.error().ToString();
+    auto r4 = conn->Query(
         "CREATE (p:Person {id: 4, name: 'Dave', age: 20});");
-    EXPECT_TRUE(res) << res.error().ToString();
+    EXPECT_TRUE(r4) << r4.error().ToString();
   }
 };
 
@@ -126,7 +134,7 @@ TEST_F(LoadAsTest, LoadNodeTableBasic) {
 
   auto res = conn->Query(
       "LOAD NODE TABLE FROM \"" + csv_path +
-      "\" (primary_key = 'id') AS TempPeople;");
+      "\" (primary_key = 'id', header = true) AS TempPeople;");
   EXPECT_TRUE(res) << res.error().ToString();
 
   // Verify data is queryable
@@ -155,7 +163,7 @@ TEST_F(LoadAsTest, LoadNodeTableDefaultPrimaryKey) {
 
   // No primary_key option: should default to first column (id)
   auto res = conn->Query(
-      "LOAD NODE TABLE FROM \"" + csv_path + "\" AS TempDefault;");
+      "LOAD NODE TABLE FROM \"" + csv_path + "\" (header = true) AS TempDefault;");
   EXPECT_TRUE(res) << res.error().ToString();
 
   auto match_res = conn->Query(
@@ -175,7 +183,7 @@ TEST_F(LoadAsTest, LoadNodeTableWithWhere) {
 
   auto res = conn->Query(
       "LOAD NODE TABLE FROM \"" + csv_path +
-      "\" (primary_key = 'id') WHERE age > 25 AS TempAdults;");
+      "\" (primary_key = 'id', header = true) WHERE age > 25 AS TempAdults;");
   EXPECT_TRUE(res) << res.error().ToString();
 
   auto match_res = conn->Query(
@@ -205,7 +213,7 @@ TEST_F(LoadAsTest, LoadNodeTableWithReturn) {
   // Only project id and name (drop age)
   auto res = conn->Query(
       "LOAD NODE TABLE FROM \"" + csv_path +
-      "\" (primary_key = 'id') RETURN id, name AS TempSlim;");
+      "\" (primary_key = 'id', header = true) RETURN id, name AS TempSlim;");
   EXPECT_TRUE(res) << res.error().ToString();
 
   // id and name should be accessible
@@ -227,7 +235,7 @@ TEST_F(LoadAsTest, LoadNodeTableWhereAndReturn) {
   // Filter age >= 25, project only id and age
   auto res = conn->Query(
       "LOAD NODE TABLE FROM \"" + csv_path +
-      "\" (primary_key = 'id') WHERE age >= 25 RETURN id, age "
+      "\" (primary_key = 'id', header = true) WHERE age >= 25 RETURN id, age "
       "AS TempFiltered;");
   EXPECT_TRUE(res) << res.error().ToString();
 
@@ -240,17 +248,22 @@ TEST_F(LoadAsTest, LoadNodeTableWhereAndReturn) {
   EXPECT_EQ(table.row_count(), 3);
   const auto& id_col = table.arrays(0).int64_array();
   const auto& age_col = table.arrays(1).int64_array();
-  EXPECT_EQ(id_col.values(0), 2);
-  EXPECT_EQ(id_col.values(1), 1);
+  // Filtered by age >= 25 → Alice(1,30), Bob(2,25), Carol(3,35);
+  // ORDER BY n.id ascending → ids = [1,2,3], ages = [30,25,35].
+  EXPECT_EQ(id_col.values(0), 1);
+  EXPECT_EQ(id_col.values(1), 2);
   EXPECT_EQ(id_col.values(2), 3);
+  EXPECT_EQ(age_col.values(0), 30);
+  EXPECT_EQ(age_col.values(1), 25);
+  EXPECT_EQ(age_col.values(2), 35);
   conn->Close();
 }
 
 // ============================================================================
-// LOAD EDGE TABLE basic
+// LOAD REL TABLE basic
 // ============================================================================
 
-TEST_F(LoadAsTest, LoadEdgeTableBasic) {
+TEST_F(LoadAsTest, LoadRelTableBasic) {
   auto conn = db_->Connect();
   setupPersistentNodeTables(conn);
   insertPersistentVertices(conn);
@@ -259,14 +272,14 @@ TEST_F(LoadAsTest, LoadEdgeTableBasic) {
   std::string people_csv = std::string(CSV_DIR) + "/people.csv";
   auto load_nodes_res = conn->Query(
       "LOAD NODE TABLE FROM \"" + people_csv +
-      "\" (primary_key = 'id') AS TempPerson;");
+      "\" (primary_key = 'id', header = true) AS TempPerson;");
   EXPECT_TRUE(load_nodes_res) << load_nodes_res.error().ToString();
 
   std::string edges_csv = std::string(CSV_DIR) + "/edges.csv";
   auto load_edges_res = conn->Query(
-      "LOAD EDGE TABLE FROM \"" + edges_csv +
+      "LOAD REL TABLE FROM \"" + edges_csv +
       "\" (from = 'TempPerson', to = 'TempPerson', "
-      "from_col = 'src_id', to_col = 'dst_id') AS TempKnows;");
+      "from_col = 'src_id', to_col = 'dst_id', header = true) AS TempKnows;");
   EXPECT_TRUE(load_edges_res) << load_edges_res.error().ToString();
 
   // Query the loaded edges
@@ -291,7 +304,7 @@ TEST_F(LoadAsTest, LoadNodeTableReturnMissingPrimaryKey) {
   // primary_key is 'id' but RETURN only has name and age
   auto res = conn->Query(
       "LOAD NODE TABLE FROM \"" + csv_path +
-      "\" (primary_key = 'id') RETURN name, age AS TempBad;");
+      "\" (primary_key = 'id', header = true) RETURN name, age AS TempBad;");
   EXPECT_FALSE(res);
   // Should report missing primary_key in RETURN
   EXPECT_NE(res.error().ToString().find("primary key"), std::string::npos)
@@ -300,15 +313,15 @@ TEST_F(LoadAsTest, LoadNodeTableReturnMissingPrimaryKey) {
 }
 
 // ============================================================================
-// Error: LOAD EDGE TABLE without from/to options
+// Error: LOAD REL TABLE without from/to options
 // ============================================================================
 
-TEST_F(LoadAsTest, LoadEdgeTableMissingFromTo) {
+TEST_F(LoadAsTest, LoadRelTableMissingFromTo) {
   auto conn = db_->Connect();
   std::string csv_path = std::string(CSV_DIR) + "/edges.csv";
 
   auto res = conn->Query(
-      "LOAD EDGE TABLE FROM \"" + csv_path + "\" AS TempEdge;");
+      "LOAD REL TABLE FROM \"" + csv_path + "\" (header = true) AS TempEdge;");
   EXPECT_FALSE(res);
   EXPECT_NE(res.error().ToString().find("from"), std::string::npos)
       << res.error().ToString();
@@ -325,7 +338,7 @@ TEST_F(LoadAsTest, LoadNodeTableReturnNonexistentColumn) {
 
   auto res = conn->Query(
       "LOAD NODE TABLE FROM \"" + csv_path +
-      "\" (primary_key = 'id') RETURN id, nonexistent AS TempMissing;");
+      "\" (primary_key = 'id', header = true) RETURN id, nonexistent AS TempMissing;");
   EXPECT_FALSE(res);
   EXPECT_NE(res.error().ToString().find("not found"), std::string::npos)
       << res.error().ToString();
@@ -343,7 +356,7 @@ TEST_F(LoadAsTest, CleanupOnClose) {
     std::string csv_path = std::string(CSV_DIR) + "/people.csv";
     auto res = conn->Query(
         "LOAD NODE TABLE FROM \"" + csv_path +
-        "\" (primary_key = 'id') AS TempEphemeral;");
+        "\" (primary_key = 'id', header = true) AS TempEphemeral;");
     EXPECT_TRUE(res) << res.error().ToString();
 
     auto match_res = conn->Query(
@@ -354,6 +367,11 @@ TEST_F(LoadAsTest, CleanupOnClose) {
 
   // Phase 2: reopen DB, temp table should be gone
   {
+    // Release the fixture's db_ first; NeugDB takes an exclusive write
+    // lock on the data directory and the same process cannot hold two
+    // locks at once.
+    db_->Close();
+    db_.reset();
     auto db2 = std::make_unique<NeugDB>();
     NeugDBConfig config;
     config.data_dir = DB_DIR;
@@ -389,7 +407,7 @@ TEST_F(LoadAsTest, LoadAsLabelConflict) {
   // Try to LOAD AS 'Person' — should conflict
   auto res = conn->Query(
       "LOAD NODE TABLE FROM \"" + csv_path +
-      "\" (primary_key = 'id') AS Person;");
+      "\" (primary_key = 'id', header = true) AS Person;");
   EXPECT_FALSE(res);
   conn->Close();
 }

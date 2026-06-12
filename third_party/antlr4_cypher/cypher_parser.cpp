@@ -70,10 +70,10 @@ void cypherParserInitialize() {
       "oC_Query", "oC_RegularQuery", "oC_Union", "oC_CallUnionQuery", "oC_CallUnion", 
       "oC_CallUnionScope", "oC_SingleQuery", "oC_SinglePartQuery", "oC_MultiPartQuery", 
       "nEUG_QueryPart", "oC_UpdatingClause", "oC_ReadingClause", "nEUG_LoadFrom", 
-      "nEUG_LoadNodeTable", "nEUG_LoadEdgeTable", "nEUG_ReturnColumns", 
-      "oC_YieldItem", "oC_YieldItems", "nEUG_InQueryCall", "oC_Match", "nEUG_Hint", 
-      "nEUG_JoinNode", "oC_Unwind", "oC_Create", "oC_Merge", "oC_MergeAction", 
-      "oC_Set", "oC_SetItem", "oC_Delete", "oC_With", "oC_Return", "oC_ProjectionBody", 
+      "nEUG_LoadNodeTable", "nEUG_LoadRelTable", "nEUG_ReturnColumns", "oC_YieldItem", 
+      "oC_YieldItems", "nEUG_InQueryCall", "oC_Match", "nEUG_Hint", "nEUG_JoinNode", 
+      "oC_Unwind", "oC_Create", "oC_Merge", "oC_MergeAction", "oC_Set", 
+      "oC_SetItem", "oC_Delete", "oC_With", "oC_Return", "oC_ProjectionBody", 
       "oC_ProjectionItems", "oC_ProjectionItem", "oC_Order", "oC_Skip", 
       "oC_Limit", "oC_SortItem", "oC_Where", "oC_Pattern", "oC_PatternPart", 
       "oC_AnonymousPatternPart", "oC_PatternElement", "oC_NodePattern", 
@@ -140,11 +140,11 @@ void cypherParserInitialize() {
       "NonZeroDigit", "NonZeroOctDigit", "ZeroDigit", "ExponentDecimalReal", 
       "RegularDecimalReal", "UnescapedSymbolicName", "IdentifierStart", 
       "IdentifierPart", "EscapedSymbolicName", "SP", "WHITESPACE", "CypherComment", 
-      "Unknown", "EDGE"
+      "Unknown"
     }
   );
   static const int32_t serializedATNSegment[] = {
-  	4,1,182,2988,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,6,
+  	4,1,181,2988,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,6,
   	2,7,7,7,2,8,7,8,2,9,7,9,2,10,7,10,2,11,7,11,2,12,7,12,2,13,7,13,2,14,
   	7,14,2,15,7,15,2,16,7,16,2,17,7,17,2,18,7,18,2,19,7,19,2,20,7,20,2,21,
   	7,21,2,22,7,22,2,23,7,23,2,24,7,24,2,25,7,25,2,26,7,26,2,27,7,27,2,28,
@@ -840,7 +840,7 @@ void cypherParserInitialize() {
   	0,0,1556,1557,1,0,0,0,1557,1559,3,148,74,0,1558,1555,1,0,0,0,1558,1559,
   	1,0,0,0,1559,1560,1,0,0,0,1560,1561,5,178,0,0,1561,1562,5,53,0,0,1562,
   	1563,5,178,0,0,1563,1564,3,340,170,0,1564,145,1,0,0,0,1565,1566,5,103,
-  	0,0,1566,1567,5,178,0,0,1567,1568,5,182,0,0,1568,1569,5,178,0,0,1569,
+  	0,0,1566,1567,5,178,0,0,1567,1568,5,125,0,0,1568,1569,5,178,0,0,1569,
   	1570,5,135,0,0,1570,1571,5,178,0,0,1571,1572,5,88,0,0,1572,1573,5,178,
   	0,0,1573,1587,3,10,5,0,1574,1576,5,178,0,0,1575,1574,1,0,0,0,1575,1576,
   	1,0,0,0,1576,1577,1,0,0,0,1577,1579,5,2,0,0,1578,1580,5,178,0,0,1579,
@@ -1639,8 +1639,8 @@ CypherParser::NEUG_LoadNodeTableContext* CypherParser::OC_StatementContext::nEUG
   return getRuleContext<CypherParser::NEUG_LoadNodeTableContext>(0);
 }
 
-CypherParser::NEUG_LoadEdgeTableContext* CypherParser::OC_StatementContext::nEUG_LoadEdgeTable() {
-  return getRuleContext<CypherParser::NEUG_LoadEdgeTableContext>(0);
+CypherParser::NEUG_LoadRelTableContext* CypherParser::OC_StatementContext::nEUG_LoadRelTable() {
+  return getRuleContext<CypherParser::NEUG_LoadRelTableContext>(0);
 }
 
 CypherParser::NEUG_StandaloneCallContext* CypherParser::OC_StatementContext::nEUG_StandaloneCall() {
@@ -1784,7 +1784,7 @@ CypherParser::OC_StatementContext* CypherParser::oC_Statement() {
     case 12: {
       enterOuterAlt(_localctx, 12);
       setState(395);
-      nEUG_LoadEdgeTable();
+      nEUG_LoadRelTable();
       break;
     }
 
@@ -9213,69 +9213,69 @@ CypherParser::NEUG_LoadNodeTableContext* CypherParser::nEUG_LoadNodeTable() {
   return _localctx;
 }
 
-//----------------- NEUG_LoadEdgeTableContext ------------------------------------------------------------------
+//----------------- NEUG_LoadRelTableContext ------------------------------------------------------------------
 
-CypherParser::NEUG_LoadEdgeTableContext::NEUG_LoadEdgeTableContext(ParserRuleContext *parent, size_t invokingState)
+CypherParser::NEUG_LoadRelTableContext::NEUG_LoadRelTableContext(ParserRuleContext *parent, size_t invokingState)
   : ParserRuleContext(parent, invokingState) {
 }
 
-tree::TerminalNode* CypherParser::NEUG_LoadEdgeTableContext::LOAD() {
+tree::TerminalNode* CypherParser::NEUG_LoadRelTableContext::LOAD() {
   return getToken(CypherParser::LOAD, 0);
 }
 
-std::vector<tree::TerminalNode *> CypherParser::NEUG_LoadEdgeTableContext::SP() {
+std::vector<tree::TerminalNode *> CypherParser::NEUG_LoadRelTableContext::SP() {
   return getTokens(CypherParser::SP);
 }
 
-tree::TerminalNode* CypherParser::NEUG_LoadEdgeTableContext::SP(size_t i) {
+tree::TerminalNode* CypherParser::NEUG_LoadRelTableContext::SP(size_t i) {
   return getToken(CypherParser::SP, i);
 }
 
-tree::TerminalNode* CypherParser::NEUG_LoadEdgeTableContext::EDGE() {
-  return getToken(CypherParser::EDGE, 0);
+tree::TerminalNode* CypherParser::NEUG_LoadRelTableContext::REL() {
+  return getToken(CypherParser::REL, 0);
 }
 
-tree::TerminalNode* CypherParser::NEUG_LoadEdgeTableContext::TABLE() {
+tree::TerminalNode* CypherParser::NEUG_LoadRelTableContext::TABLE() {
   return getToken(CypherParser::TABLE, 0);
 }
 
-tree::TerminalNode* CypherParser::NEUG_LoadEdgeTableContext::FROM() {
+tree::TerminalNode* CypherParser::NEUG_LoadRelTableContext::FROM() {
   return getToken(CypherParser::FROM, 0);
 }
 
-CypherParser::NEUG_ScanSourceContext* CypherParser::NEUG_LoadEdgeTableContext::nEUG_ScanSource() {
+CypherParser::NEUG_ScanSourceContext* CypherParser::NEUG_LoadRelTableContext::nEUG_ScanSource() {
   return getRuleContext<CypherParser::NEUG_ScanSourceContext>(0);
 }
 
-tree::TerminalNode* CypherParser::NEUG_LoadEdgeTableContext::AS() {
+tree::TerminalNode* CypherParser::NEUG_LoadRelTableContext::AS() {
   return getToken(CypherParser::AS, 0);
 }
 
-CypherParser::OC_SchemaNameContext* CypherParser::NEUG_LoadEdgeTableContext::oC_SchemaName() {
+CypherParser::OC_SchemaNameContext* CypherParser::NEUG_LoadRelTableContext::oC_SchemaName() {
   return getRuleContext<CypherParser::OC_SchemaNameContext>(0);
 }
 
-CypherParser::NEUG_OptionsContext* CypherParser::NEUG_LoadEdgeTableContext::nEUG_Options() {
+CypherParser::NEUG_OptionsContext* CypherParser::NEUG_LoadRelTableContext::nEUG_Options() {
   return getRuleContext<CypherParser::NEUG_OptionsContext>(0);
 }
 
-CypherParser::OC_WhereContext* CypherParser::NEUG_LoadEdgeTableContext::oC_Where() {
+CypherParser::OC_WhereContext* CypherParser::NEUG_LoadRelTableContext::oC_Where() {
   return getRuleContext<CypherParser::OC_WhereContext>(0);
 }
 
-CypherParser::NEUG_ReturnColumnsContext* CypherParser::NEUG_LoadEdgeTableContext::nEUG_ReturnColumns() {
+CypherParser::NEUG_ReturnColumnsContext* CypherParser::NEUG_LoadRelTableContext::nEUG_ReturnColumns() {
   return getRuleContext<CypherParser::NEUG_ReturnColumnsContext>(0);
 }
 
 
-size_t CypherParser::NEUG_LoadEdgeTableContext::getRuleIndex() const {
-  return CypherParser::RuleNEUG_LoadEdgeTable;
+size_t CypherParser::NEUG_LoadRelTableContext::getRuleIndex() const {
+  return CypherParser::RuleNEUG_LoadRelTable;
 }
 
 
-CypherParser::NEUG_LoadEdgeTableContext* CypherParser::nEUG_LoadEdgeTable() {
-  NEUG_LoadEdgeTableContext *_localctx = _tracker.createInstance<NEUG_LoadEdgeTableContext>(_ctx, getState());
-  enterRule(_localctx, 146, CypherParser::RuleNEUG_LoadEdgeTable);
+CypherParser::NEUG_LoadRelTableContext* CypherParser::nEUG_LoadRelTable() {
+  NEUG_LoadRelTableContext *_localctx = _tracker.createInstance<NEUG_LoadRelTableContext>(_ctx, getState());
+  enterRule(_localctx, 146, CypherParser::RuleNEUG_LoadRelTable);
   size_t _la = 0;
 
 #if __cplusplus > 201703L
@@ -9292,7 +9292,7 @@ CypherParser::NEUG_LoadEdgeTableContext* CypherParser::nEUG_LoadEdgeTable() {
     setState(1566);
     match(CypherParser::SP);
     setState(1567);
-    match(CypherParser::EDGE);
+    match(CypherParser::REL);
     setState(1568);
     match(CypherParser::SP);
     setState(1569);

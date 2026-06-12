@@ -1,6 +1,6 @@
 # Module 1: LOAD AS 语法与临时数据接入
 
-**Goal**: 提供完整的 `LOAD NODE TABLE` / `LOAD EDGE TABLE` 语句支持，把外部文件物化为会话内的临时节点/边表，并确保临时数据不写入磁盘。
+**Goal**: 提供完整的 `LOAD NODE TABLE` / `LOAD REL TABLE` 语句支持，把外部文件物化为会话内的临时节点/边表，并确保临时数据不写入磁盘。
 
 **Assignee**: TBD
 **Label**: temp-graph
@@ -78,13 +78,13 @@
 
 ## [F008-T106] Parser — LoadAs Statement 与 Cypher.g4 语法
 
-**description**: 在 Cypher 语法中新增 `LOAD NODE TABLE` / `LOAD EDGE TABLE` 规则（含可选 WHERE/RETURN 子句），创建独立的 LoadAs Statement 类。LoadAs 是 DDL 操作（创建类型+写入图），与现有 LoadFrom ReadingClause（返回行）语义完全不同。
+**description**: 在 Cypher 语法中新增 `LOAD NODE TABLE` / `LOAD REL TABLE` 规则（含可选 WHERE/RETURN 子句），创建独立的 LoadAs Statement 类。LoadAs 是 DDL 操作（创建类型+写入图），与现有 LoadFrom ReadingClause（返回行）语义完全不同。
 
 **details**:
 * 文件: `src/compiler/antlr4/Cypher.g4`, `src/compiler/parser/load_as.h`（新增）
 * Cypher.g4 新增规则:
   - `nEUG_LoadNodeTable`: `LOAD NODE TABLE FROM <source> (<options>) [WHERE <predicate>] [RETURN <columns>] AS <label>`
-  - `nEUG_LoadEdgeTable`: `LOAD EDGE TABLE FROM <source> (<options>) [WHERE <predicate>] [RETURN <columns>] AS <label>`
+  - `nEUG_LoadRelTable`: `LOAD REL TABLE FROM <source> (<options>) [WHERE <predicate>] [RETURN <columns>] AS <label>`
 * 节点 options: `primary_key`, `header`, `auto_detect` 等 key=value 对
 * 边 options: `from`, `to`, `from_col`, `to_col`, `header`, `auto_detect` 等
 * WHERE 子句: 可选，解析为 `ParsedExpression`，用于数据源行过滤（filter pushdown）
@@ -92,7 +92,7 @@
 * 新增 `LoadAs` Statement 类，包含:
   - `std::unique_ptr<BaseScanSource> source` — 文件源（复用现有）
   - `std::string target_label` — AS 后的 label 名
-  - `bool is_edge` — NODE TABLE vs EDGE TABLE
+  - `bool is_rel` — NODE TABLE vs REL TABLE
   - 节点相关: `std::string primary_key`
   - 边相关: `std::string from_label` / `to_label` / `from_col` / `to_col`
   - 通用: `bool header`, `bool auto_detect`

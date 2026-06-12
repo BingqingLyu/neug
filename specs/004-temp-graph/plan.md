@@ -34,7 +34,7 @@ src/execution/execute/ops/ddl/
 └── create_edge_type.cc                    # 变更: 同上
 
 src/compiler/antlr4/
-└── Cypher.g4                              # 变更: 新增 nEUG_LoadNodeTable / nEUG_LoadEdgeTable 规则
+└── Cypher.g4                              # 变更: 新增 nEUG_LoadNodeTable / nEUG_LoadRelTable 规则
 
 src/compiler/parser/
 └── load_as.h                              # 新增: LoadAs Statement 类
@@ -165,7 +165,7 @@ message CreateEdgeSchema {
 class LoadAs : public Statement {
   std::unique_ptr<BaseScanSource> source;        // 文件源（复用现有）
   std::string target_label;                      // AS 后的 label 名
-  bool is_edge = false;                          // NODE TABLE vs EDGE TABLE
+  bool is_rel = false;                          // NODE TABLE vs REL TABLE
   // 通用 options
   bool header = true;
   bool auto_detect = true;
@@ -193,7 +193,7 @@ class LoadAs : public Statement {
 
 **Data Access & Update**:
 
-- 由 Parser 的 `transformLoadNodeTable()` / `transformLoadEdgeTable()` 从 ANTLR 上下文构造
+- 由 Parser 的 `transformLoadNodeTable()` / `transformLoadRelTable()` 从 ANTLR 上下文构造
 - 由 Binder 的 `bindLoadAs()` 校验（label 冲突、类型绑定、边约束、WHERE 表达式绑定、RETURN 列校验）
 - 由 Planner 的 `planLoadAs()` 转化为 PhysicalPlan（在 DataSource 上设置 filter/projection）
 
@@ -217,7 +217,7 @@ LOAD NODE TABLE FROM 'users.csv' (primary_key = 'user_id')
   ↓
 1. [Parser]
    Cypher.g4 匹配 nEUG_LoadNodeTable 规则
-   transformLoadNodeTable() → 生成 LoadAs Statement 实例 (is_edge=false)
+   transformLoadNodeTable() → 生成 LoadAs Statement 实例 (is_rel=false)
    - 解析 WHERE 子句 → where_clause (ParsedExpression)
    - 解析 RETURN 列表 → return_columns = ["user_id", "name", "age"]
   ↓

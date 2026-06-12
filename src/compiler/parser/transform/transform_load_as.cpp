@@ -28,7 +28,7 @@ std::unique_ptr<Statement> Transformer::transformLoadNodeTable(
   auto targetLabel = transformSchemaName(*ctx.oC_SchemaName());
   auto loadAs = std::make_unique<LoadAs>(std::move(source),
                                          std::move(targetLabel),
-                                         /*isEdge=*/false);
+                                         /*isRel=*/false);
   if (ctx.nEUG_Options()) {
     loadAs->setParsingOption(transformOptions(*ctx.nEUG_Options()));
   }
@@ -42,13 +42,13 @@ std::unique_ptr<Statement> Transformer::transformLoadNodeTable(
   return loadAs;
 }
 
-std::unique_ptr<Statement> Transformer::transformLoadEdgeTable(
-    CypherParser::NEUG_LoadEdgeTableContext& ctx) {
+std::unique_ptr<Statement> Transformer::transformLoadRelTable(
+    CypherParser::NEUG_LoadRelTableContext& ctx) {
   auto source = transformScanSource(*ctx.nEUG_ScanSource());
   auto targetLabel = transformSchemaName(*ctx.oC_SchemaName());
   auto loadAs = std::make_unique<LoadAs>(std::move(source),
                                          std::move(targetLabel),
-                                         /*isEdge=*/true);
+                                         /*isRel=*/true);
   if (ctx.nEUG_Options()) {
     loadAs->setParsingOption(transformOptions(*ctx.nEUG_Options()));
   }

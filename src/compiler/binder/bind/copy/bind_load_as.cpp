@@ -68,7 +68,7 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
   std::unique_ptr<ExtraBoundCopyFromInfo> extraInfo;
   std::unique_ptr<DDLTableInfo> ddlTableInfo;
 
-  if (!loadAs.isEdgeLoad()) {
+  if (!loadAs.isRelLoad()) {
     // --- LOAD NODE TABLE ---
     auto primaryKey = extractStringOption(parsingOptions, "primary_key");
     if (primaryKey.empty()) {
@@ -78,12 +78,12 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
         labelName, primaryKey, columns, expressionBinder,
         /*temporary=*/true);
   } else {
-    // --- LOAD EDGE TABLE ---
+    // --- LOAD REL TABLE ---
     auto fromLabel = extractStringOption(parsingOptions, "from");
     auto toLabel = extractStringOption(parsingOptions, "to");
     if (fromLabel.empty() || toLabel.empty()) {
       THROW_BINDER_EXCEPTION(stringFormat(
-          "LOAD EDGE TABLE requires `from` and `to` options naming "
+          "LOAD REL TABLE requires `from` and `to` options naming "
           "existing vertex types."));
     }
     auto* srcCatalogEntry = bindNodeTableEntry(fromLabel);
@@ -153,7 +153,7 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
       }
     }
     // Validate required columns are included in RETURN.
-    if (!loadAs.isEdgeLoad()) {
+    if (!loadAs.isRelLoad()) {
       auto primaryKey = extractStringOption(parsingOptions, "primary_key");
       if (!primaryKey.empty()) {
         bool pkFound = false;
@@ -171,6 +171,7 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
         }
       }
     } else {
+      // LOAD REL TABLE
       auto fromCol = extractStringOption(parsingOptions, "from_col");
       auto toCol = extractStringOption(parsingOptions, "to_col");
       if (!fromCol.empty()) {
@@ -183,7 +184,7 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
         }
         if (!fromFound) {
           THROW_BINDER_EXCEPTION(stringFormat(
-              "RETURN must include from_col `{}` for LOAD EDGE TABLE AS `{}`",
+              "RETURN must include from_col `{}` for LOAD REL TABLE AS `{}`",
               fromCol, labelName));
         }
       }
@@ -197,7 +198,7 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
         }
         if (!toFound) {
           THROW_BINDER_EXCEPTION(stringFormat(
-              "RETURN must include to_col `{}` for LOAD EDGE TABLE AS `{}`",
+              "RETURN must include to_col `{}` for LOAD REL TABLE AS `{}`",
               toCol, labelName));
         }
       }

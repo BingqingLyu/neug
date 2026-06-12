@@ -9,7 +9,7 @@
 
 ### Module 1: LOAD AS 语法与临时数据接入 (Priority: P1)
 
-**Purpose**: 提供 `LOAD NODE TABLE` / `LOAD EDGE TABLE` 语句，把外部文件物化为会话内的临时节点/边表，并允许临时边的端点引用持久化图中的节点。
+**Purpose**: 提供 `LOAD NODE TABLE` / `LOAD REL TABLE` 语句，把外部文件物化为会话内的临时节点/边表，并允许临时边的端点引用持久化图中的节点。
 
 **Why this priority**: 整个功能的入口。没有 LOAD AS，临时图既无 schema 也无数据，后续模块都无法运行。
 
@@ -17,7 +17,7 @@
 
 **Key Components**:
 
-**LoadAs Parser**: 在 Cypher 语法中新增 `LOAD NODE TABLE FROM <source> (<options>) AS <label>` 和 `LOAD EDGE TABLE FROM <source> (<options>) AS <label>` 规则。独立于现有 LoadFrom ReadingClause（LoadFrom 返回行，LoadAs 写入图，语义不同）。
+**LoadAs Parser**: 在 Cypher 语法中新增 `LOAD NODE TABLE FROM <source> (<options>) AS <label>` 和 `LOAD REL TABLE FROM <source> (<options>) AS <label>` 规则。命名上与 NeuG 现有的 `CREATE REL TABLE` 保持一致。独立于现有 LoadFrom ReadingClause（LoadFrom 返回行，LoadAs 写入图，语义不同）。
 
 **LoadAs Binder/Planner**: 校验 label 冲突、类型绑定、边约束，生成 PhysicalPlan（`CreateVertexSchema(temporary=true)` + `DataSource` + `BatchInsertVertex`）。模式门禁（AP READ_WRITE 检查）由 `QueryProcessor` 层通过 `is_read_only_` + `ExecutionFlag.create_temp_table` 统一处理。
 
@@ -30,7 +30,7 @@
 **Functional Requirements**:
 
 1. **FR-001**: 系统 MUST 支持 `LOAD NODE TABLE FROM <source> (<options>) [WHERE <predicate>] [RETURN <columns>] AS <label>` 创建临时节点表。`<source>` 可以是本地文件路径或受支持的远程 URI。options 包括 `primary_key`、`header`、`auto_detect` 等。可选的 WHERE 子句对源数据做行过滤（filter pushdown），可选的 RETURN 子句指定投影列（projection pushdown）——仅 RETURN 中列出的列成为 vertex properties。若指定了 RETURN，MUST 显式包含 primary_key 列，否则报错。WHERE 中引用但不在 RETURN 中的列仅用于过滤，不成为 property。
-2. **FR-002**: 系统 MUST 支持 `LOAD EDGE TABLE FROM <source> (<options>) [WHERE <predicate>] [RETURN <columns>] AS <label>` 创建临时边表。options 中通过 `from`/`to` 指定端点类型，`from_col`/`to_col` 指定外键列。`from`/`to` 可以是临时节点类型或持久化节点类型的任意组合。可选的 WHERE/RETURN 语义同 FR-001；若指定了 RETURN，MUST 显式包含 from_col 和 to_col 列。
+2. **FR-002**: 系统 MUST 支持 `LOAD REL TABLE FROM <source> (<options>) [WHERE <predicate>] [RETURN <columns>] AS <label>` 创建临时边表。options 中通过 `from`/`to` 指定端点类型，`from_col`/`to_col` 指定外键列。`from`/`to` 可以是临时节点类型或持久化节点类型的任意组合。可选的 WHERE/RETURN 语义同 FR-001；若指定了 RETURN，MUST 显式包含 from_col 和 to_col 列。
 3. **FR-003**: LOAD AS 执行时校验：源 URI 可访问、字段类型可解析、端点类型存在；任意一项失败 MUST 整体失败，不得只导入部分数据。已创建的 schema entry 和 table MUST 被回滚。
 4. **FR-004**: 临时类型名 MUST 在本会话内唯一；如与已有持久化类型同名，MUST 拒绝创建并提示冲突。
 5. **FR-005**: 系统 MUST 拒绝在非 AP read-write 连接上执行 LOAD AS，并返回明确错误。TP service 路径同样拒绝。
@@ -138,7 +138,7 @@
 - **SC-002**: 混合 Cypher 查询（1 个临时节点类型 + 1 个临时边类型 + 1 个持久化节点类型）端到端完成率 ≥ 99%（仅排除外部数据源不可达类故障）。
 - **SC-003**: Connection 以正常或异常方式结束后，临时图占用的进程内存在该会话生命周期结束时被完全回收，持久化目录无残留。
 - **SC-004**: 临时图查询结果与基于持久化图（用同样数据导入持久化）执行同样 Cypher 的结果完全一致（行级一致）。
-- **SC-005**: 在非 AP read-write 连接上执行 LOAD NODE/EDGE TABLE 时，100% 返回明确错误，不会出现段错误、挂起或静默失败。
+- **SC-005**: 在非 AP read-write 连接上执行 LOAD NODE/REL TABLE 时，100% 返回明确错误，不会出现段错误、挂起或静默失败。
 
 ## Assumptions
 

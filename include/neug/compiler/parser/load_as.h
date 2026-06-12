@@ -29,15 +29,15 @@ namespace parser {
 class LoadAs : public Statement {
  public:
   LoadAs(std::unique_ptr<BaseScanSource> source, std::string targetLabel,
-         bool isEdge)
+         bool isRel)
       : Statement{common::StatementType::LOAD_AS},
         source{std::move(source)},
         targetLabel{std::move(targetLabel)},
-        isEdge{isEdge} {}
+        isRel{isRel} {}
 
   BaseScanSource* getSource() const { return source.get(); }
   const std::string& getTargetLabel() const { return targetLabel; }
-  bool isEdgeLoad() const { return isEdge; }
+  bool isRelLoad() const { return isRel; }
 
   void setParsingOption(options_t options) {
     parsingOptions = std::move(options);
@@ -48,7 +48,7 @@ class LoadAs : public Statement {
   void setPrimaryKey(std::string key) { primaryKey = std::move(key); }
   const std::string& getPrimaryKey() const { return primaryKey; }
 
-  // Edge-specific
+  // Edge/rel-specific
   void setFromLabel(std::string label) { fromLabel = std::move(label); }
   const std::string& getFromLabel() const { return fromLabel; }
   void setToLabel(std::string label) { toLabel = std::move(label); }
@@ -79,13 +79,13 @@ class LoadAs : public Statement {
  private:
   std::unique_ptr<BaseScanSource> source;
   std::string targetLabel;
-  bool isEdge;
+  bool isRel;
   options_t parsingOptions;
 
   // Node-specific
   std::string primaryKey;
 
-  // Edge-specific
+  // Edge/rel-specific
   std::string fromLabel;
   std::string toLabel;
   std::string fromCol;

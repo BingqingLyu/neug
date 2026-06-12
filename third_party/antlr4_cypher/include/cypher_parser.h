@@ -45,7 +45,7 @@ public:
     ZeroDigit = 171, ExponentDecimalReal = 172, RegularDecimalReal = 173, 
     UnescapedSymbolicName = 174, IdentifierStart = 175, IdentifierPart = 176, 
     EscapedSymbolicName = 177, SP = 178, WHITESPACE = 179, CypherComment = 180, 
-    Unknown = 181, EDGE = 182
+    Unknown = 181
   };
 
   enum {
@@ -73,7 +73,7 @@ public:
     RuleOC_CallUnion = 63, RuleOC_CallUnionScope = 64, RuleOC_SingleQuery = 65, 
     RuleOC_SinglePartQuery = 66, RuleOC_MultiPartQuery = 67, RuleNEUG_QueryPart = 68, 
     RuleOC_UpdatingClause = 69, RuleOC_ReadingClause = 70, RuleNEUG_LoadFrom = 71, 
-    RuleNEUG_LoadNodeTable = 72, RuleNEUG_LoadEdgeTable = 73, RuleNEUG_ReturnColumns = 74, 
+    RuleNEUG_LoadNodeTable = 72, RuleNEUG_LoadRelTable = 73, RuleNEUG_ReturnColumns = 74, 
     RuleOC_YieldItem = 75, RuleOC_YieldItems = 76, RuleNEUG_InQueryCall = 77, 
     RuleOC_Match = 78, RuleNEUG_Hint = 79, RuleNEUG_JoinNode = 80, RuleOC_Unwind = 81, 
     RuleOC_Create = 82, RuleOC_Merge = 83, RuleOC_MergeAction = 84, RuleOC_Set = 85, 
@@ -202,7 +202,7 @@ public:
   class OC_ReadingClauseContext;
   class NEUG_LoadFromContext;
   class NEUG_LoadNodeTableContext;
-  class NEUG_LoadEdgeTableContext;
+  class NEUG_LoadRelTableContext;
   class NEUG_ReturnColumnsContext;
   class OC_YieldItemContext;
   class OC_YieldItemsContext;
@@ -350,7 +350,7 @@ public:
     NEUG_CopyFromByColumnContext *nEUG_CopyFromByColumn();
     NEUG_CopyTOContext *nEUG_CopyTO();
     NEUG_LoadNodeTableContext *nEUG_LoadNodeTable();
-    NEUG_LoadEdgeTableContext *nEUG_LoadEdgeTable();
+    NEUG_LoadRelTableContext *nEUG_LoadRelTable();
     NEUG_StandaloneCallContext *nEUG_StandaloneCall();
     NEUG_CreateMacroContext *nEUG_CreateMacro();
     NEUG_CommentOnContext *nEUG_CommentOn();
@@ -1457,14 +1457,14 @@ public:
 
   NEUG_LoadNodeTableContext* nEUG_LoadNodeTable();
 
-  class  NEUG_LoadEdgeTableContext : public antlr4::ParserRuleContext {
+  class  NEUG_LoadRelTableContext : public antlr4::ParserRuleContext {
   public:
-    NEUG_LoadEdgeTableContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+    NEUG_LoadRelTableContext(antlr4::ParserRuleContext *parent, size_t invokingState);
     virtual size_t getRuleIndex() const override;
     antlr4::tree::TerminalNode *LOAD();
     std::vector<antlr4::tree::TerminalNode *> SP();
     antlr4::tree::TerminalNode* SP(size_t i);
-    antlr4::tree::TerminalNode *EDGE();
+    antlr4::tree::TerminalNode *REL();
     antlr4::tree::TerminalNode *TABLE();
     antlr4::tree::TerminalNode *FROM();
     NEUG_ScanSourceContext *nEUG_ScanSource();
@@ -1477,7 +1477,7 @@ public:
    
   };
 
-  NEUG_LoadEdgeTableContext* nEUG_LoadEdgeTable();
+  NEUG_LoadRelTableContext* nEUG_LoadRelTable();
 
   class  NEUG_ReturnColumnsContext : public antlr4::ParserRuleContext {
   public:
