@@ -87,11 +87,17 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
   }
 
   // When RETURN is specified, only those columns become vertex/edge properties.
+  // ddlColumns must be ordered by source column order (NOT RETURN declaration
+  // order) so it matches the projectColumns order produced by
+  // ProjectionPushDownOptimizer::visitTableFunctionCall, which iterates
+  // allColumns in source order. A mismatch here would cause
+  // convertCopyFrom to wire propMapping[i].column_id to a column of the wrong
+  // type. For edges, from_col / to_col are forced to slots [0]/[1] because
+  // ExtraBoundCopyRelInfo and convertBatchInsertEdge hard-code that.
   expression_vector ddlColumns = columns;
   if (!validatedReturnCols.empty()) {
     ddlColumns.clear();
     if (loadAs.isRelLoad()) {
-      // For edges, from_col and to_col must come first in DDL order.
       auto fromCol = extractStringOption(parsingOptions, "from_col");
       auto toCol = extractStringOption(parsingOptions, "to_col");
       if (!fromCol.empty()) {
@@ -110,19 +116,22 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
           }
         }
       }
-      // Append remaining return columns.
-      for (const auto& retCol : validatedReturnCols) {
-        if (retCol == fromCol || retCol == toCol) continue;
-        for (const auto& srcCol : columns) {
-          if (srcCol->rawName() == retCol) {
-            ddlColumns.push_back(srcCol);
-            break;
-          }
+      // Append remaining return columns in source order.
+      for (const auto& srcCol : columns) {
+        const auto& srcName = srcCol->rawName();
+        if (srcName == fromCol || srcName == toCol) continue;
+        bool inReturn = false;
+        for (const auto& retCol : validatedReturnCols) {
+          if (retCol == srcName) { inReturn = true; break; }
+        }
+        if (inReturn) {
+          ddlColumns.push_back(srcCol);
         }
       }
     } else {
-      for (const auto& retCol : validatedReturnCols) {
-        for (const auto& srcCol : columns) {
+      // NODE: filter source columns in source order, keeping RETURN subset.
+      for (const auto& srcCol : columns) {
+        for (const auto& retCol : validatedReturnCols) {
           if (srcCol->rawName() == retCol) {
             ddlColumns.push_back(srcCol);
             break;
