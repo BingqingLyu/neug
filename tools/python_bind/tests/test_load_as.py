@@ -748,6 +748,293 @@ class TestLoadAs:
         # Only edges with weight >= 0.8: (2→3, 1.0) and (3→4, 0.8).
         assert len(rows) == 2, f"Expected 2 edges, got {len(rows)}"
 
+    # ------------------------------------------------------------------
+    # Additional corner cases
+    # ------------------------------------------------------------------
+
+    def test_empty_csv_file(self):
+        """LOAD NODE TABLE from a CSV with header only (no data rows)
+        should succeed and create an empty table."""
+        empty_csv = _write_csv(
+            self.csv_dir, "empty.csv", "id|name|age\n"
+        )
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{empty_csv}" '
+            f"(primary_key = 'id', header = true) AS TempEmpty;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempEmpty) RETURN count(n);"
+        )
+        assert list(result)[0][0] == 0
+
+    def test_where_filters_out_all_rows(self):
+        """WHERE that matches no rows should create an empty temp table."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"WHERE age > 1000 AS TempNone;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempNone) RETURN count(n);"
+        )
+        assert list(result)[0][0] == 0
+
+    def test_where_references_only_return_columns(self):
+        """WHERE and RETURN share the same columns — no WHERE-only
+        columns, so no extra projection logic is needed."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"WHERE age >= 30 RETURN id, age AS TempOverlap;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempOverlap) RETURN n.id, n.age ORDER BY n.id;"
+        )
+        rows = list(result)
+        # Alice(1,30) and Carol(3,35) pass age >= 30
+        assert len(rows) == 2
+        assert rows[0][0] == 1
+        assert rows[1][0] == 3
+
+    def test_multiple_where_only_columns(self):
+        """Multiple WHERE-only columns (not in RETURN) should all be
+        filtered correctly without becoming properties."""
+        score_csv = _write_csv(
+            self.csv_dir, "people_score.csv",
+            "id|name|age|score\n"
+            "1|Alice|30|85\n"
+            "2|Bob|25|90\n"
+            "3|Carol|35|75\n"
+            "4|Dave|20|95\n",
+        )
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{score_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"WHERE age > 25 AND score > 80 "
+            f"RETURN id, name AS TempMultiWhere;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempMultiWhere) RETURN n.id, n.name ORDER BY n.id;"
+        )
+        rows = list(result)
+        # Only Alice(1, age=30, score=85) passes both conditions
+        assert len(rows) == 1
+        assert rows[0][0] == 1
+        assert rows[0][1] == "Alice"
+
+        # age and score must not be properties
+        with pytest.raises(Exception):
+            list(self.conn.execute(
+                "MATCH (n:TempMultiWhere) RETURN n.age;"
+            ))
+        with pytest.raises(Exception):
+            list(self.conn.execute(
+                "MATCH (n:TempMultiWhere) RETURN n.score;"
+            ))
+
+    def test_where_with_arithmetic_expression(self):
+        """WHERE with arithmetic expression (age * 2 > 60)."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"WHERE age * 2 > 60 AS TempArith;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempArith) RETURN n.id ORDER BY n.id;"
+        )
+        rows = list(result)
+        # Only Carol(3, age=35) passes age * 2 > 60
+        assert len(rows) == 1
+        assert rows[0][0] == 3
+
+    def test_return_only_primary_key(self):
+        """RETURN with only the primary key column should succeed."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"RETURN id AS TempIdOnly;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempIdOnly) RETURN n.id ORDER BY n.id;"
+        )
+        rows = list(result)
+        assert len(rows) == 4
+
+        # name and age must not be properties
+        with pytest.raises(Exception):
+            list(self.conn.execute(
+                "MATCH (n:TempIdOnly) RETURN n.name;"
+            ))
+
+    def test_temp_and_persistent_join(self):
+        """MATCH query joining temp and persistent tables."""
+        self._load_persistent_person_table()
+
+        extra_csv = _write_csv(
+            self.csv_dir, "extra_people.csv",
+            "id|nickname\n"
+            "1|Ally\n"
+            "2|Bobby\n"
+            "5|Eve\n",
+        )
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{extra_csv}" '
+            f"(primary_key = 'id', header = true) AS TempExtra;"
+        )
+
+        result = self.conn.execute(
+            "MATCH (p:Person), (t:TempExtra) "
+            "WHERE p.id = t.id "
+            "RETURN p.name, t.nickname ORDER BY p.id;"
+        )
+        rows = list(result)
+        # IDs 1 and 2 exist in both tables
+        assert len(rows) == 2
+        assert rows[0][0] == "Alice"
+        assert rows[0][1] == "Ally"
+        assert rows[1][0] == "Bob"
+        assert rows[1][1] == "Bobby"
+
+    def test_multiple_queries_on_same_temp_table(self):
+        """Multiple MATCH queries on the same temp table should all
+        work correctly."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) AS TempStable;"
+        )
+
+        # Query 1: count
+        result = self.conn.execute(
+            "MATCH (n:TempStable) RETURN count(n);"
+        )
+        assert list(result)[0][0] == 4
+
+        # Query 2: filter
+        result = self.conn.execute(
+            "MATCH (n:TempStable) WHERE n.age > 25 RETURN n.id ORDER BY n.id;"
+        )
+        rows = list(result)
+        assert len(rows) == 2
+
+        # Query 3: aggregation
+        result = self.conn.execute(
+            "MATCH (n:TempStable) RETURN sum(n.age);"
+        )
+        assert list(result)[0][0] == 110  # 30+25+35+20
+
+        # Query 4: order + limit
+        result = self.conn.execute(
+            "MATCH (n:TempStable) RETURN n.name ORDER BY n.name LIMIT 2;"
+        )
+        rows = list(result)
+        assert len(rows) == 2
+        assert rows[0][0] == "Alice"
+        assert rows[1][0] == "Bob"
+
+    def test_aggregation_on_temp_table(self):
+        """SUM, AVG, MIN, MAX on temp table properties."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) AS TempAgg;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempAgg) "
+            "RETURN sum(n.age), min(n.age), max(n.age);"
+        )
+        rows = list(result)
+        assert len(rows) == 1
+        # ages: 30+25+35+20 = 110, min = 20, max = 35
+        assert rows[0][0] == 110
+        assert rows[0][1] == 20
+        assert rows[0][2] == 35
+
+    def test_where_with_string_comparison(self):
+        """WHERE with string equality comparison."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"WHERE name = 'Alice' AS TempAlice;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempAlice) RETURN n.id, n.name;"
+        )
+        rows = list(result)
+        assert len(rows) == 1
+        assert rows[0][0] == 1
+        assert rows[0][1] == "Alice"
+
+    def test_load_rel_table_with_where_only_columns(self):
+        """LOAD REL TABLE with WHERE-only columns (category not in
+        RETURN) should filter correctly without category becoming a
+        property."""
+        edges_extra_csv = _write_csv(
+            self.csv_dir, "edges_extra.csv",
+            "src_id|dst_id|weight|category\n"
+            "1|2|0.5|A\n"
+            "2|3|1.0|B\n"
+            "3|4|0.8|A\n",
+        )
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) AS TempPersonEWC;"
+        )
+        self.conn.execute(
+            f'LOAD REL TABLE FROM "{edges_extra_csv}" '
+            f"(header = true, "
+            f"from = 'TempPersonEWC', to = 'TempPersonEWC', "
+            f"from_col = 'src_id', to_col = 'dst_id') "
+            f"WHERE category = 'B' "
+            f"RETURN src_id, dst_id, weight AS TempWOC;"
+        )
+        result = self.conn.execute(
+            "MATCH (a:TempPersonEWC)-[r:TempWOC]->(b:TempPersonEWC) "
+            "RETURN a.id, b.id, r.weight;"
+        )
+        rows = list(result)
+        # Only edge (2→3, 1.0) has category='B'
+        assert len(rows) == 1
+        assert rows[0][0] == 2
+        assert rows[0][1] == 3
+
+        # category must not be a property
+        with pytest.raises(Exception):
+            list(self.conn.execute(
+                "MATCH (a:TempPersonEWC)-[r:TempWOC]->(b:TempPersonEWC) "
+                "RETURN r.category;"
+            ))
+
+    def test_where_with_or_expression(self):
+        """WHERE with OR expression."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"WHERE age < 22 OR age > 32 AS TempOr;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempOr) RETURN n.id ORDER BY n.id;"
+        )
+        rows = list(result)
+        # Dave(4, age=20) and Carol(3, age=35)
+        assert len(rows) == 2
+        assert rows[0][0] == 3
+        assert rows[1][0] == 4
+
+    def test_where_with_range_condition(self):
+        """WHERE with AND of two comparisons (range condition)."""
+        self.conn.execute(
+            f'LOAD NODE TABLE FROM "{self.people_csv}" '
+            f"(primary_key = 'id', header = true) "
+            f"WHERE age >= 25 AND age <= 30 AS TempRange;"
+        )
+        result = self.conn.execute(
+            "MATCH (n:TempRange) RETURN n.id ORDER BY n.id;"
+        )
+        rows = list(result)
+        # Bob(2, age=25) and Alice(1, age=30)
+        assert len(rows) == 2
+        assert rows[0][0] == 1
+        assert rows[1][0] == 2
+
 
 # ---------------------------------------------------------------------------
 # LOAD AS from JSONL / Parquet (using tinysnb dataset)
@@ -807,8 +1094,6 @@ class TestLoadAsJsonl:
             "MATCH (n:TempJsonOld) RETURN n.fName, n.age ORDER BY n.age;"
         )
         rows = list(result)
-        # age >= 35: Alice(35), Carol(45), Dan(40), Elizabeth(20->no),
-        # Farooq(25->no), Greg(40), Hubert Blaine(83)
         assert len(rows) >= 3
         for row in rows:
             assert row[1] >= 35
@@ -825,9 +1110,7 @@ class TestLoadAsJsonl:
         )
         rows = list(result)
         assert len(rows) == 8
-        # Verify projected columns exist.
         assert rows[0][1] == "Alice"
-        # eyeSight should NOT be a property.
         with pytest.raises(RuntimeError):
             self.conn.execute(
                 "MATCH (n:TempJsonSlim) RETURN n.eyeSight;"
@@ -835,7 +1118,6 @@ class TestLoadAsJsonl:
 
     def test_load_node_table_from_jsonl_where_and_return(self):
         """WHERE + RETURN combined on JSONL: WHERE col not in RETURN."""
-        # WHERE filters on age, but RETURN only projects ID, fName, gender.
         self.conn.execute(
             f'LOAD NODE TABLE FROM "{self.jsonl_path}" '
             f"(primary_key = 'ID') "
@@ -847,7 +1129,6 @@ class TestLoadAsJsonl:
         )
         rows = list(result)
         assert len(rows) >= 3
-        # age is NOT a property (not in RETURN).
         with pytest.raises(RuntimeError):
             self.conn.execute(
                 "MATCH (n:TempJsonWR) RETURN n.age;"
@@ -914,7 +1195,6 @@ class TestLoadAsJson:
         rows = list(result)
         assert len(rows) == 8
         assert rows[0][1] == "Alice"
-        # eyeSight should NOT be a property.
         with pytest.raises(RuntimeError):
             self.conn.execute(
                 "MATCH (n:TempJsonArrSlim) RETURN n.eyeSight;"
@@ -933,7 +1213,6 @@ class TestLoadAsJson:
         )
         rows = list(result)
         assert len(rows) >= 3
-        # age is NOT a property.
         with pytest.raises(RuntimeError):
             self.conn.execute(
                 "MATCH (n:TempJsonArrWR) RETURN n.age;"
@@ -1002,7 +1281,6 @@ class TestLoadAsParquet:
         )
         rows = list(result)
         assert len(rows) == 8
-        # age should NOT be a property.
         with pytest.raises(RuntimeError):
             self.conn.execute(
                 "MATCH (n:TempPqSlim) RETURN n.age;"
@@ -1021,7 +1299,6 @@ class TestLoadAsParquet:
         )
         rows = list(result)
         assert len(rows) >= 2
-        # age is NOT a property.
         with pytest.raises(RuntimeError):
             self.conn.execute(
                 "MATCH (n:TempPqWR) RETURN n.age;"

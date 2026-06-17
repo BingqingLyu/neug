@@ -845,5 +845,418 @@ TEST_F(LoadAsTest, LoadRelTableWhereAndReturn) {
   conn->Close();
 }
 
+// ============================================================================
+// Corner case: empty CSV file (header only)
+// ============================================================================
+
+TEST_F(LoadAsTest, EmptyCsvFile) {
+  write_csv("empty.csv", "id|name|age\n");
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/empty.csv";
+
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) AS TempEmpty;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempEmpty) RETURN count(n);");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  const auto& count_col = table.arrays(0).int64_array();
+  EXPECT_EQ(count_col.values(0), 0);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: WHERE filters out all rows
+// ============================================================================
+
+TEST_F(LoadAsTest, WhereFiltersOutAllRows) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  // age > 1000 filters out everyone
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) WHERE age > 1000 AS TempNone;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempNone) RETURN count(n);");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  const auto& count_col = table.arrays(0).int64_array();
+  EXPECT_EQ(count_col.values(0), 0);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: WHERE references only RETURN columns (no WHERE-only columns)
+// ============================================================================
+
+TEST_F(LoadAsTest, WhereReferencesOnlyReturnColumns) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  // WHERE age >= 30, RETURN id, age — age is in both WHERE and RETURN
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) WHERE age >= 30 "
+      "RETURN id, age AS TempOverlap;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempOverlap) RETURN n.id, n.age ORDER BY n.id;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  // Alice(1,30) and Carol(3,35) pass age >= 30
+  EXPECT_EQ(table.row_count(), 2);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: multiple WHERE-only columns
+// ============================================================================
+
+TEST_F(LoadAsTest, MultipleWhereOnlyColumns) {
+  write_csv("people_score.csv",
+            "id|name|age|score\n"
+            "1|Alice|30|85\n"
+            "2|Bob|25|90\n"
+            "3|Carol|35|75\n"
+            "4|Dave|20|95\n");
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people_score.csv";
+
+  // WHERE age > 25 AND score > 80, RETURN id, name
+  // Both age and score are WHERE-only columns
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) "
+      "WHERE age > 25 AND score > 80 RETURN id, name AS TempMultiWhere;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempMultiWhere) RETURN n.id, n.name ORDER BY n.id;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  // Only Alice(1, age=30, score=85) passes both conditions
+  EXPECT_EQ(table.row_count(), 1);
+  const auto& id_col = table.arrays(0).int64_array();
+  EXPECT_EQ(id_col.values(0), 1);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: WHERE with arithmetic expression
+// ============================================================================
+
+TEST_F(LoadAsTest, WhereWithArithmeticExpression) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  // WHERE age * 2 > 60 (i.e., age > 30)
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) WHERE age * 2 > 60 AS TempArith;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempArith) RETURN n.id ORDER BY n.id;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  // Only Carol(3, age=35) passes age * 2 > 60
+  EXPECT_EQ(table.row_count(), 1);
+  const auto& id_col = table.arrays(0).int64_array();
+  EXPECT_EQ(id_col.values(0), 3);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: RETURN with only primary_key
+// ============================================================================
+
+TEST_F(LoadAsTest, ReturnOnlyPrimaryKey) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) RETURN id AS TempIdOnly;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempIdOnly) RETURN n.id ORDER BY n.id;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  EXPECT_EQ(match_res.value().response().row_count(), 4);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: temp + persistent JOIN query
+// ============================================================================
+
+TEST_F(LoadAsTest, TempAndPersistentJoin) {
+  auto conn = db_->Connect();
+  setupPersistentNodeTables(conn);
+  insertPersistentVertices(conn);
+
+  // Create a temp table with overlapping IDs
+  write_csv("extra_people.csv",
+            "id|nickname\n"
+            "1|Ally\n"
+            "2|Bobby\n"
+            "5|Eve\n");
+  std::string extra_csv = std::string(CSV_DIR) + "/extra_people.csv";
+  auto load_res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + extra_csv +
+      "\" (primary_key = 'id', header = true) AS TempExtra;");
+  EXPECT_TRUE(load_res) << load_res.error().ToString();
+
+  // JOIN query: match nodes from both temp and persistent tables
+  auto match_res = conn->Query(
+      "MATCH (p:Person), (t:TempExtra) "
+      "WHERE p.id = t.id "
+      "RETURN p.name, t.nickname ORDER BY p.id;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  // IDs 1 and 2 exist in both tables
+  EXPECT_EQ(table.row_count(), 2);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: multiple queries on same temp table
+// ============================================================================
+
+TEST_F(LoadAsTest, MultipleQueriesOnSameTempTable) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) AS TempStable;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  // Query 1: count
+  auto q1 = conn->Query("MATCH (n:TempStable) RETURN count(n);");
+  EXPECT_TRUE(q1) << q1.error().ToString();
+
+  // Query 2: filter
+  auto q2 = conn->Query(
+      "MATCH (n:TempStable) WHERE n.age > 25 RETURN n.id;");
+  EXPECT_TRUE(q2) << q2.error().ToString();
+  EXPECT_EQ(q2.value().response().row_count(), 2);
+
+  // Query 3: aggregation
+  auto q3 = conn->Query(
+      "MATCH (n:TempStable) RETURN sum(n.age);");
+  EXPECT_TRUE(q3) << q3.error().ToString();
+
+  // Query 4: order + limit
+  auto q4 = conn->Query(
+      "MATCH (n:TempStable) RETURN n.name ORDER BY n.name LIMIT 2;");
+  EXPECT_TRUE(q4) << q4.error().ToString();
+  EXPECT_EQ(q4.value().response().row_count(), 2);
+
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: aggregation on temp table
+// ============================================================================
+
+TEST_F(LoadAsTest, AggregationOnTempTable) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) AS TempAgg;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  // SUM, AVG, MIN, MAX
+  auto match_res = conn->Query(
+      "MATCH (n:TempAgg) "
+      "RETURN sum(n.age), avg(n.age), min(n.age), max(n.age);");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  EXPECT_EQ(table.row_count(), 1);
+  // ages: 30+25+35+20 = 110, avg = 27.5, min = 20, max = 35
+  const auto& sum_col = table.arrays(0).int64_array();
+  EXPECT_EQ(sum_col.values(0), 110);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: same session create multiple temp tables and query both
+// ============================================================================
+
+TEST_F(LoadAsTest, SameSessionMultipleTempTables) {
+  auto conn = db_->Connect();
+  std::string people_csv = std::string(CSV_DIR) + "/people.csv";
+  std::string items_csv = std::string(CSV_DIR) + "/items.csv";
+
+  auto r1 = conn->Query(
+      "LOAD NODE TABLE FROM \"" + people_csv +
+      "\" (primary_key = 'id', header = true) AS TempP;");
+  EXPECT_TRUE(r1) << r1.error().ToString();
+
+  auto r2 = conn->Query(
+      "LOAD NODE TABLE FROM \"" + items_csv +
+      "\" (primary_key = 'item_id', header = true) AS TempI;");
+  EXPECT_TRUE(r2) << r2.error().ToString();
+
+  // Query both in a single query (cross-product style)
+  auto match_res = conn->Query(
+      "MATCH (p:TempP), (i:TempI) "
+      "RETURN count(p), count(i);");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  const auto& count_p = table.arrays(0).int64_array();
+  const auto& count_i = table.arrays(1).int64_array();
+  // 4 people × 3 items = 12 cross-product rows, but count() aggregates
+  EXPECT_EQ(count_p.values(0), 12);
+  EXPECT_EQ(count_i.values(0), 12);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: WHERE with string comparison
+// ============================================================================
+
+TEST_F(LoadAsTest, WhereWithStringComparison) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  // WHERE name = 'Alice'
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) "
+      "WHERE name = 'Alice' AS TempAlice;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempAlice) RETURN n.id, n.name;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  EXPECT_EQ(match_res.value().response().row_count(), 1);
+  const auto& name_col = match_res.value().response().arrays(1).string_array();
+  EXPECT_EQ(name_col.values(0), "Alice");
+  conn->Close();
+}
+
+// ============================================================================
+// Error: LOAD REL TABLE RETURN missing from_col/to_col
+// ============================================================================
+
+TEST_F(LoadAsTest, LoadRelTableReturnMissingFromToCol) {
+  auto conn = db_->Connect();
+  std::string people_csv = std::string(CSV_DIR) + "/people.csv";
+  auto load_nodes_res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + people_csv +
+      "\" (primary_key = 'id', header = true) AS TempPersonRFC;");
+  EXPECT_TRUE(load_nodes_res) << load_nodes_res.error().ToString();
+
+  std::string edges_csv = std::string(CSV_DIR) + "/edges.csv";
+  // RETURN only weight, missing src_id and dst_id
+  auto load_edges_res = conn->Query(
+      "LOAD REL TABLE FROM \"" + edges_csv +
+      "\" (header = true, from = 'TempPersonRFC', to = 'TempPersonRFC', "
+      "from_col = 'src_id', to_col = 'dst_id') "
+      "RETURN weight AS TempBadReturnEdge;");
+  EXPECT_FALSE(load_edges_res);
+  EXPECT_NE(load_edges_res.error().ToString().find("from_col"), std::string::npos)
+      << load_edges_res.error().ToString();
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: LOAD REL TABLE with WHERE-only columns
+// ============================================================================
+
+TEST_F(LoadAsTest, LoadRelTableWithWhereOnlyColumns) {
+  write_csv("edges_extra.csv",
+            "src_id|dst_id|weight|category\n"
+            "1|2|0.5|A\n"
+            "2|3|1.0|B\n"
+            "3|4|0.8|A\n");
+  auto conn = db_->Connect();
+  std::string people_csv = std::string(CSV_DIR) + "/people.csv";
+  auto load_nodes_res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + people_csv +
+      "\" (primary_key = 'id', header = true) AS TempPersonEWC;");
+  EXPECT_TRUE(load_nodes_res) << load_nodes_res.error().ToString();
+
+  std::string edges_csv = std::string(CSV_DIR) + "/edges_extra.csv";
+  // WHERE category = 'B' (category is WHERE-only), RETURN src_id, dst_id, weight
+  auto load_edges_res = conn->Query(
+      "LOAD REL TABLE FROM \"" + edges_csv +
+      "\" (header = true, from = 'TempPersonEWC', to = 'TempPersonEWC', "
+      "from_col = 'src_id', to_col = 'dst_id') "
+      "WHERE category = 'B' "
+      "RETURN src_id, dst_id, weight AS TempWOC;");
+  EXPECT_TRUE(load_edges_res) << load_edges_res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (a:TempPersonEWC)-[r:TempWOC]->(b:TempPersonEWC) "
+      "RETURN a.id, b.id, r.weight;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  // Only edge (2→3, 1.0) has category='B'
+  EXPECT_EQ(match_res.value().response().row_count(), 1);
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: WHERE with OR expression
+// ============================================================================
+
+TEST_F(LoadAsTest, WhereWithOrExpression) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  // WHERE age < 22 OR age > 32 (Dave=20, Carol=35)
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) WHERE age < 22 OR age > 32 AS TempOr;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempOr) RETURN n.id ORDER BY n.id;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  EXPECT_EQ(table.row_count(), 2);
+  const auto& id_col = table.arrays(0).int64_array();
+  EXPECT_EQ(id_col.values(0), 3);  // Carol
+  EXPECT_EQ(id_col.values(1), 4);  // Dave
+  conn->Close();
+}
+
+// ============================================================================
+// Corner case: WHERE with BETWEEN-like range (AND of comparisons)
+// ============================================================================
+
+TEST_F(LoadAsTest, WhereWithRange) {
+  auto conn = db_->Connect();
+  std::string csv_path = std::string(CSV_DIR) + "/people.csv";
+
+  // WHERE age >= 25 AND age <= 30 (Bob=25, Alice=30)
+  auto res = conn->Query(
+      "LOAD NODE TABLE FROM \"" + csv_path +
+      "\" (primary_key = 'id', header = true) "
+      "WHERE age >= 25 AND age <= 30 AS TempRange;");
+  EXPECT_TRUE(res) << res.error().ToString();
+
+  auto match_res = conn->Query(
+      "MATCH (n:TempRange) RETURN n.id ORDER BY n.id;");
+  EXPECT_TRUE(match_res) << match_res.error().ToString();
+  const auto& table = match_res.value().response();
+  EXPECT_EQ(table.row_count(), 2);
+  const auto& id_col = table.arrays(0).int64_array();
+  EXPECT_EQ(id_col.values(0), 1);  // Alice
+  EXPECT_EQ(id_col.values(1), 2);  // Bob
+  conn->Close();
+}
+
 }  // namespace test
 }  // namespace neug
