@@ -981,21 +981,9 @@ void PropertyGraph::Dump(std::shared_ptr<Checkpoint> ckp, bool reopen) {
   // the in-memory meta_ rather than reloading the JSON — also sees a
   // temp-free schema.
   auto persistable_yaml = Schema::DumpToYaml(schema_);
-  if (persistable_yaml) {
-    auto persistable_schema =
-        Schema::LoadFromYamlNode(persistable_yaml.value());
-    if (persistable_schema) {
-      meta.SetSchema(persistable_schema.value());
-    } else {
-      LOG(ERROR) << "Dump: failed to rebuild temp-free schema: "
-                 << persistable_schema.error().error_message();
-      meta.SetSchema(schema_);
-    }
-  } else {
-    LOG(ERROR) << "Dump: failed to dump schema to YAML: "
-               << persistable_yaml.error().error_message();
-    meta.SetSchema(schema_);
-  }
+  auto persistable_schema =
+      Schema::LoadFromYamlNode(persistable_yaml.value());
+  meta.SetSchema(persistable_schema.value());
   ckp->UpdateMeta(
       std::move(meta));  // Persist meta and set checkpoint to use this meta.
   LOG(INFO) << "Dump graph to checkpoint " << ckp->path();

@@ -1897,8 +1897,7 @@ neug::result<Schema> Schema::LoadFromYamlNode(
   }
 }
 
-// Serialize schema to YAML. This is the single source of truth for schema
-// YAML construction.
+// Serialize schema to YAML. 
 //
 // - include_temporary=true  (runtime path): used by to_yaml() to feed the
 //   compiler/planner/query-cache with a full view including temporary labels.
