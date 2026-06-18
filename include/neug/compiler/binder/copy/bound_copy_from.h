@@ -105,11 +105,6 @@ struct NEUG_API BoundCopyFromInfo {
   std::unique_ptr<ExtraBoundCopyFromInfo> extraInfo;
   // extra table info to create vertex or edge type from inferred results
   std::shared_ptr<DDLTableInfo> ddlTableInfo;
-  // Optional WHERE predicate for LOAD AS filter pushdown.
-  std::shared_ptr<Expression> wherePredicate;
-  // Optional RETURN column names for LOAD AS projection pushdown.
-  // Empty means all columns are projected.
-  std::vector<std::string> returnColumns;
 
   BoundCopyFromInfo(catalog::TableCatalogEntry* tableEntry,
                     std::unique_ptr<BoundBaseScanSource> source,
@@ -123,8 +118,7 @@ struct NEUG_API BoundCopyFromInfo {
         columnExprs{std::move(columnExprs)},
         columnEvaluateTypes{std::move(columnEvaluateTypes)},
         extraInfo{std::move(extraInfo)},
-        ddlTableInfo{nullptr},
-        wherePredicate{nullptr} {}
+        ddlTableInfo{nullptr} {}
 
   // to support vertex or edge type not exist in catalog
   // tableEntry should not be null, need to set tableEntry with
@@ -152,9 +146,7 @@ struct NEUG_API BoundCopyFromInfo {
   BoundCopyFromInfo(const BoundCopyFromInfo& other)
       : offset{other.offset},
         columnExprs{other.columnExprs},
-        columnEvaluateTypes{other.columnEvaluateTypes},
-        wherePredicate{other.wherePredicate},
-        returnColumns{other.returnColumns} {
+        columnEvaluateTypes{other.columnEvaluateTypes} {
     // ref to table entry in catalog or ddl table info
     tableEntry = other.tableEntry;
     // Shadow copy of ddl table info to avoid extra overhead

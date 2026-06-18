@@ -17,9 +17,13 @@
 #include "neug/compiler/binder/binder.h"
 #include "neug/compiler/binder/bound_scan_source.h"
 #include "neug/compiler/binder/copy/bound_copy_from.h"
+#include "neug/compiler/binder/copy/bound_query_scan_info.h"
 #include "neug/compiler/binder/ddl/bound_create_table_info.h"
 #include "neug/compiler/binder/expression/expression_util.h"
 #include "neug/compiler/binder/expression_binder.h"
+#include "neug/compiler/binder/query/bound_regular_query.h"
+#include "neug/compiler/binder/query/reading_clause/bound_load_from.h"
+#include "neug/compiler/binder/query/return_with_clause/bound_projection_body.h"
 #include "neug/compiler/catalog/catalog_entry/node_table_catalog_entry.h"
 #include "neug/compiler/common/constants.h"
 #include "neug/compiler/common/types/value/value.h"
@@ -47,6 +51,112 @@ static std::string extractStringOption(const options_t& options,
   return literal->getValue().getValue<std::string>();
 }
 
+// Build an ordered list of columns for DDL schema creation.
+// For NODE: RETURN columns in source order.
+// For REL: [from_col, to_col] first, then remaining RETURN columns in source
+// order. This ordering matches what ExtraBoundCopyRelInfo expects (slots [0]
+// and [1] are src/dst keys).
+static expression_vector buildDdlColumns(
+    const expression_vector& sourceColumns,
+    const std::vector<std::string>& returnCols, bool isRel,
+    const options_t& parsingOptions) {
+  if (returnCols.empty()) {
+    return sourceColumns;
+  }
+  expression_vector result;
+  if (isRel) {
+    auto fromCol = extractStringOption(parsingOptions, "from_col");
+    auto toCol = extractStringOption(parsingOptions, "to_col");
+    // Push from_col and to_col first.
+    if (!fromCol.empty()) {
+      for (const auto& c : sourceColumns) {
+        if (c->rawName() == fromCol) { result.push_back(c); break; }
+      }
+    }
+    if (!toCol.empty()) {
+      for (const auto& c : sourceColumns) {
+        if (c->rawName() == toCol) { result.push_back(c); break; }
+      }
+    }
+    // Append remaining RETURN columns in source order.
+    for (const auto& c : sourceColumns) {
+      const auto& name = c->rawName();
+      if (name == fromCol || name == toCol) continue;
+      for (const auto& ret : returnCols) {
+        if (ret == name) { result.push_back(c); break; }
+      }
+    }
+  } else {
+    // NODE: keep RETURN subset in source order.
+    for (const auto& c : sourceColumns) {
+      for (const auto& ret : returnCols) {
+        if (c->rawName() == ret) { result.push_back(c); break; }
+      }
+    }
+  }
+  return result;
+}
+
+// When LOAD AS has WHERE and/or RETURN, construct an internal subquery
+// equivalent to: LOAD FROM <source> WHERE <pred> RETURN <cols>
+// This returns a BoundQueryScanSource that CopyFrom can use via the
+// ScanSourceType::QUERY execution path, delegating filter/projection to the
+// standard query planner rather than hacking CopyFrom's optimizer.
+static std::unique_ptr<BoundBaseScanSource> buildFilteredSubquerySource(
+    BoundTableScanInfo scanInfo, std::shared_ptr<Expression> wherePredicate,
+    const std::vector<std::string>& projectedColumnNames) {
+  // Get columns from the scanInfo that will be registered in the
+  // TableFunctionCall's schema. Projection must reference THESE objects.
+  expression_vector scanColumns = scanInfo.bindData->columns;
+
+  // Build projection expressions by matching column names.
+  expression_vector projExprs;
+  for (const auto& name : projectedColumnNames) {
+    for (const auto& col : scanColumns) {
+      if (col->rawName() == name) {
+        projExprs.push_back(col);
+        break;
+      }
+    }
+  }
+
+  // 1. Create BoundLoadFrom (the reading clause).
+  auto boundLoadFrom = std::make_unique<BoundLoadFrom>(std::move(scanInfo));
+  if (wherePredicate) {
+    boundLoadFrom->setPredicate(std::move(wherePredicate));
+  }
+
+  // 2. Create BoundProjectionBody with the selected columns.
+  auto projBody = BoundProjectionBody(/*distinct=*/false);
+  projBody.setProjectionExpressions(projExprs);
+
+  // 3. Assemble NormalizedQueryPart.
+  auto queryPart = NormalizedQueryPart();
+  queryPart.addReadingClause(std::move(boundLoadFrom));
+  queryPart.setProjectionBody(std::move(projBody));
+
+  // 4. Assemble NormalizedSingleQuery with statement result.
+  auto singleQuery = NormalizedSingleQuery();
+  auto stmtResult = BoundStatementResult();
+  for (const auto& expr : projExprs) {
+    stmtResult.addColumn(expr->rawName(), expr);
+  }
+  singleQuery.appendQueryPart(std::move(queryPart));
+  singleQuery.setStatementResult(std::move(stmtResult));
+
+  // 5. Create BoundRegularQuery.
+  auto stmtResultForQuery = singleQuery.getStatementResult()->copy();
+  auto boundQuery = std::make_shared<BoundRegularQuery>(
+      std::vector<bool>{}, std::move(stmtResultForQuery));
+  boundQuery->addSingleQuery(std::move(singleQuery));
+
+  // 6. Wrap in BoundQueryScanSource.
+  auto querySourceInfo =
+      BoundQueryScanSourceInfo(case_insensitive_map_t<Value>{});
+  return std::make_unique<BoundQueryScanSource>(std::move(boundQuery),
+                                                std::move(querySourceInfo));
+}
+
 std::unique_ptr<BoundStatement> Binder::bindLoadAs(
     const Statement& statement) {
   auto& loadAs = statement.constCast<LoadAs>();
@@ -54,8 +164,6 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
   auto boundSource = bindScanSource(loadAs.getSource(),
                                     parsingOptions, {}, {});
   expression_vector columns = boundSource->getColumns();
-  std::vector<ColumnEvaluateType> evaluateTypes(
-      columns.size(), ColumnEvaluateType::REFERENCE);
   auto offset = createInvisibleVariable(
       std::string(InternalKeyword::ROW_OFFSET), LogicalType::INT64());
   const auto& labelName = loadAs.getTargetLabel();
@@ -65,7 +173,7 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
         "No columns found for LOAD AS `{}`, cannot infer schema", labelName));
   }
 
-  // Validate RETURN columns early so they can filter DDL properties.
+  // Validate RETURN columns early.
   std::vector<std::string> validatedReturnCols;
   if (loadAs.hasReturnColumns()) {
     const auto& returnCols = loadAs.getReturnColumns();
@@ -86,61 +194,42 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
     validatedReturnCols = returnCols;
   }
 
-  // When RETURN is specified, only those columns become vertex/edge properties.
-  // ddlColumns must be ordered by source column order (NOT RETURN declaration
-  // order) so it matches the projectColumns order produced by
-  // ProjectionPushDownOptimizer::visitTableFunctionCall, which iterates
-  // allColumns in source order. A mismatch here would cause
-  // convertCopyFrom to wire propMapping[i].column_id to a column of the wrong
-  // type. For edges, from_col / to_col are forced to slots [0]/[1] because
-  // ExtraBoundCopyRelInfo and convertBatchInsertEdge hard-code that.
-  expression_vector ddlColumns = columns;
-  if (!validatedReturnCols.empty()) {
-    ddlColumns.clear();
-    if (loadAs.isRelLoad()) {
-      auto fromCol = extractStringOption(parsingOptions, "from_col");
-      auto toCol = extractStringOption(parsingOptions, "to_col");
-      if (!fromCol.empty()) {
-        for (const auto& srcCol : columns) {
-          if (srcCol->rawName() == fromCol) {
-            ddlColumns.push_back(srcCol);
-            break;
-          }
-        }
-      }
-      if (!toCol.empty()) {
-        for (const auto& srcCol : columns) {
-          if (srcCol->rawName() == toCol) {
-            ddlColumns.push_back(srcCol);
-            break;
-          }
-        }
-      }
-      // Append remaining return columns in source order.
-      for (const auto& srcCol : columns) {
-        const auto& srcName = srcCol->rawName();
-        if (srcName == fromCol || srcName == toCol) continue;
-        bool inReturn = false;
-        for (const auto& retCol : validatedReturnCols) {
-          if (retCol == srcName) { inReturn = true; break; }
-        }
-        if (inReturn) {
-          ddlColumns.push_back(srcCol);
-        }
-      }
-    } else {
-      // NODE: filter source columns in source order, keeping RETURN subset.
-      for (const auto& srcCol : columns) {
-        for (const auto& retCol : validatedReturnCols) {
-          if (srcCol->rawName() == retCol) {
-            ddlColumns.push_back(srcCol);
-            break;
-          }
-        }
-      }
+  // Determine whether we need a subquery source (has WHERE or RETURN).
+  bool hasFilter = loadAs.hasWherePredicate();
+  bool hasProjection = !validatedReturnCols.empty();
+  bool useSubquery = hasFilter || hasProjection;
+
+  // Build DDL columns (determines the schema of the temporary table).
+  expression_vector ddlColumns = buildDdlColumns(
+      columns, validatedReturnCols, loadAs.isRelLoad(), parsingOptions);
+
+  // Build the data source for CopyFrom.
+  std::unique_ptr<BoundBaseScanSource> copySource;
+  if (useSubquery) {
+    // Extract scan info from the bound source to construct LOAD FROM subquery.
+    auto& tableScanSource = boundSource->constCast<BoundTableScanSource>();
+    auto scanInfo = tableScanSource.info.copy();
+
+    // Bind WHERE predicate (columns are accessible in current binder state).
+    std::shared_ptr<Expression> wherePred;
+    if (hasFilter) {
+      wherePred = bindWhereExpression(*loadAs.getWherePredicate());
     }
+
+    // Projection column names: ddlColumns names determine what the subquery
+    // outputs. The subquery internally matches these against scanInfo's columns.
+    std::vector<std::string> projColNames;
+    for (const auto& col : ddlColumns) {
+      projColNames.push_back(col->rawName());
+    }
+
+    copySource = buildFilteredSubquerySource(
+        std::move(scanInfo), std::move(wherePred), projColNames);
+  } else {
+    copySource = std::move(boundSource);
   }
 
+  // --- Build DDL info and ExtraCopyInfo ---
   std::unique_ptr<ExtraBoundCopyFromInfo> extraInfo;
   std::unique_ptr<DDLTableInfo> ddlTableInfo;
 
@@ -150,14 +239,10 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
     if (primaryKey.empty()) {
       primaryKey = columns[0]->rawName();
     }
-    // Validate RETURN includes primary key.
     if (!validatedReturnCols.empty()) {
       bool pkFound = false;
       for (const auto& retCol : validatedReturnCols) {
-        if (retCol == primaryKey) {
-          pkFound = true;
-          break;
-        }
+        if (retCol == primaryKey) { pkFound = true; break; }
       }
       if (!pkFound) {
         THROW_BINDER_EXCEPTION(stringFormat(
@@ -198,28 +283,22 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
       auto fromCol = extractStringOption(parsingOptions, "from_col");
       auto toCol = extractStringOption(parsingOptions, "to_col");
       if (!fromCol.empty()) {
-        bool fromFound = false;
-        for (const auto& retCol : validatedReturnCols) {
-          if (retCol == fromCol) {
-            fromFound = true;
-            break;
-          }
+        bool found = false;
+        for (const auto& r : validatedReturnCols) {
+          if (r == fromCol) { found = true; break; }
         }
-        if (!fromFound) {
+        if (!found) {
           THROW_BINDER_EXCEPTION(stringFormat(
               "RETURN must include from_col `{}` for LOAD REL TABLE AS `{}`",
               fromCol, labelName));
         }
       }
       if (!toCol.empty()) {
-        bool toFound = false;
-        for (const auto& retCol : validatedReturnCols) {
-          if (retCol == toCol) {
-            toFound = true;
-            break;
-          }
+        bool found = false;
+        for (const auto& r : validatedReturnCols) {
+          if (r == toCol) { found = true; break; }
         }
-        if (!toFound) {
+        if (!found) {
           THROW_BINDER_EXCEPTION(stringFormat(
               "RETURN must include to_col `{}` for LOAD REL TABLE AS `{}`",
               toCol, labelName));
@@ -232,8 +311,10 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
     auto dstOffset = createVariable(std::string(InternalKeyword::DST_OFFSET),
                                     LogicalType::INT64());
     expression_vector warningDataExprs;
-    std::shared_ptr<Expression> srcKey = columns[0];
-    std::shared_ptr<Expression> dstKey = columns[1];
+    // For edge loads, ddlColumns[0] and [1] are always from_col and to_col
+    // (enforced by buildDdlColumns). Use them as lookup keys.
+    std::shared_ptr<Expression> srcKey = ddlColumns[0];
+    std::shared_ptr<Expression> dstKey = ddlColumns[1];
     auto srcLookUpInfo =
         IndexLookupInfo(srcTableID, srcOffset, srcKey, warningDataExprs);
     auto dstLookUpInfo =
@@ -251,21 +332,13 @@ std::unique_ptr<BoundStatement> Binder::bindLoadAs(
 
   std::vector<ColumnEvaluateType> ddlEvaluateTypes(
       ddlColumns.size(), ColumnEvaluateType::REFERENCE);
+  // In the subquery path, offset is not needed: the subquery plan handles
+  // row-level tracking internally. Only the direct file scan path uses offset.
+  auto copyOffset = useSubquery ? nullptr : std::move(offset);
   auto boundCopyFromInfo =
-      BoundCopyFromInfo(std::move(boundSource), std::move(offset),
+      BoundCopyFromInfo(std::move(copySource), std::move(copyOffset),
                         std::move(ddlColumns), std::move(ddlEvaluateTypes),
                         std::move(extraInfo), std::move(ddlTableInfo));
-
-  // Bind optional WHERE predicate for filter pushdown.
-  if (loadAs.hasWherePredicate()) {
-    auto wherePredicate = bindWhereExpression(*loadAs.getWherePredicate());
-    boundCopyFromInfo.wherePredicate = std::move(wherePredicate);
-  }
-
-  // Store validated return columns for projection pushdown.
-  if (!validatedReturnCols.empty()) {
-    boundCopyFromInfo.returnColumns = std::move(validatedReturnCols);
-  }
 
   return std::make_unique<BoundCopyFrom>(std::move(boundCopyFromInfo));
 }
