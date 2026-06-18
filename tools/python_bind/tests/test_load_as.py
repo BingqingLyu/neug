@@ -1468,3 +1468,71 @@ class TestLoadAsRemoteHttpfs:
         # Verify we get actual names from the persistent table.
         assert all(isinstance(row[0], str) for row in rows)
         assert all(isinstance(row[1], str) for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# LOAD AS rejected in read-only mode
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAsReadOnlyRejection:
+    """Verify that LOAD AS is rejected when the database is in read-only mode."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        self.db_dir = str(tmp_path / "test_load_as_readonly_db")
+        self.csv_dir = str(tmp_path / "csv_ro")
+        os.makedirs(self.csv_dir, exist_ok=True)
+
+        self.people_csv = _write_csv(
+            self.csv_dir,
+            "people.csv",
+            "id|name|age\n" "1|Alice|30\n" "2|Bob|25\n" "3|Carol|35\n",
+        )
+        self.edges_csv = _write_csv(
+            self.csv_dir,
+            "edges.csv",
+            "src_id|dst_id|weight\n" "1|2|0.5\n" "2|3|1.0\n",
+        )
+
+        # Phase 1: create a persistent schema in read-write mode so the DB
+        # directory is valid and LOAD REL TABLE can resolve vertex references.
+        db_rw = Database(db_path=self.db_dir, mode="w")
+        conn_rw = db_rw.connect()
+        conn_rw.execute(
+            "CREATE NODE TABLE Person(id INT64, name STRING, age INT64, "
+            "PRIMARY KEY(id));"
+        )
+        for vid, name, age in [(1, "Alice", 30), (2, "Bob", 25), (3, "Carol", 35)]:
+            conn_rw.execute(
+                f"CREATE (p:Person {{id: {vid}, name: '{name}', age: {age}}});"
+            )
+        conn_rw.close()
+        db_rw.close()
+
+        # Phase 2: reopen in read-only mode for testing.
+        self.db = Database(db_path=self.db_dir, mode="r")
+        self.conn = self.db.connect()
+
+        yield
+
+        self.conn.close()
+        self.db.close()
+        shutil.rmtree(self.db_dir, ignore_errors=True)
+
+    def test_load_node_table_rejected_in_read_only(self):
+        """LOAD NODE TABLE must fail with a clear read-write mode error."""
+        with pytest.raises(Exception, match="read-write mode"):
+            self.conn.execute(
+                f'LOAD NODE TABLE FROM "{self.people_csv}" '
+                f"(primary_key = 'id', header = true) AS TempFail;"
+            )
+
+    def test_load_rel_table_rejected_in_read_only(self):
+        """LOAD REL TABLE must fail with a clear read-write mode error."""
+        with pytest.raises(Exception, match="read-write mode"):
+            self.conn.execute(
+                f'LOAD REL TABLE FROM "{self.edges_csv}" '
+                f"(header = true, from = 'Person', to = 'Person', "
+                f"from_col = 'src_id', to_col = 'dst_id') AS TempEdgeFail;"
+            )

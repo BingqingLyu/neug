@@ -38,6 +38,11 @@ void Connection::Close() {
   }
   LOG(INFO) << "Closing connection.";
 
+  // Clean up all temporary schemas created during this session.
+  // This is safe to do globally because LOAD AS is only supported in
+  // READ_WRITE mode, and ConnectionManager enforces that at most ONE
+  // read-write connection exists at a time. Therefore, all temporary
+  // labels in the schema must belong to this connection.
   auto temp_edges = graph_.schema().get_temporary_edge_triplet_keys();
   for (auto key : temp_edges) {
     auto [src, dst, edge] = graph_.schema().parse_edge_label(key);
