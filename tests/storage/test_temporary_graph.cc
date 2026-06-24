@@ -217,7 +217,9 @@ TEST_F(SchemaSerializationTest, ToYamlMarksTemporaryLabels) {
 }
 
 TEST_F(SchemaSerializationTest, DumpToYamlExcludesTemporaryLabels) {
-  auto yaml_res = Schema::DumpToYaml(schema_);
+  // DumpToYaml is a raw serializer; caller must StripTemporary() first
+  // to exclude temporary labels from the output.
+  auto yaml_res = Schema::DumpToYaml(schema_.StripTemporary());
   ASSERT_TRUE(yaml_res);
   auto yaml = yaml_res.value();
 
@@ -447,7 +449,8 @@ TEST_F(PropertyGraphTemporaryTest, DumpToYamlExcludesTemporary) {
   CreatePersistentPerson();
   CreateTemporaryUser();
 
-  auto yaml_res = Schema::DumpToYaml(graph_->schema());
+  // DumpToYaml is a raw serializer; caller must StripTemporary() first.
+  auto yaml_res = Schema::DumpToYaml(graph_->schema().StripTemporary());
   ASSERT_TRUE(yaml_res);
   auto yaml = yaml_res.value();
 
