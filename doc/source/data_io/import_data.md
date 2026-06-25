@@ -133,7 +133,17 @@ COPY TEMP TempAdults FROM (
     WHERE age >= 18
     RETURN id, name
 );
+
+-- From a Cypher query (materialize intermediate results):
+COPY TEMP TempHighDegree FROM (
+    MATCH (p:Person)-[:KNOWS]->(f)
+    WITH p, count(f) AS degree
+    WHERE degree > 5
+    RETURN p.id AS id, p.name AS name, degree
+);
 ```
+
+> **Cypher query source:** `COPY TEMP` can also materialize results from a Cypher MATCH query. The inner query must be **read-only** (no INSERT/DELETE/SET/MERGE). Column names are taken from the RETURN aliases.
 
 ## Import into Relationship Table
 
@@ -163,6 +173,13 @@ COPY TEMP TempKnows FROM "edges.csv" (
 COPY TEMP TempKnows FROM (
     LOAD FROM "edges_shuffled.csv" (header=true)
     RETURN src_id, dst_id, weight
+) (from='Person', to='Person');
+
+-- From a Cypher query:
+COPY TEMP TempRecommend FROM (
+    MATCH (a:Person)-[:KNOWS]->()-[:KNOWS]->(b:Person)
+    WHERE a <> b AND NOT (a)-[:KNOWS]->(b)
+    RETURN DISTINCT a.id AS src, b.id AS dst
 ) (from='Person', to='Person');
 ```
 
