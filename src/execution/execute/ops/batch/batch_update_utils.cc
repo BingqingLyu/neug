@@ -33,6 +33,7 @@
 
 #include "neug/execution/common/columns/arrow_context_column.h"
 #include "neug/execution/common/columns/i_context_column.h"
+#include "neug/execution/common/columns/value_columns.h"
 #include "neug/execution/common/context.h"
 #include "neug/execution/common/types/value.h"
 #include "neug/storages/graph/graph_interface.h"
@@ -405,6 +406,154 @@ create_record_batch_supplier_from_arrow_stream_column(
   THROW_RUNTIME_ERROR("No valid column mappings found.");
 }
 
+// Convert a DataTypeId to the corresponding Arrow type.
+static std::shared_ptr<arrow::DataType> data_type_id_to_arrow(
+    DataTypeId type_id) {
+  switch (type_id) {
+  case DataTypeId::kInt32:
+    return arrow::int32();
+  case DataTypeId::kInt64:
+    return arrow::int64();
+  case DataTypeId::kUInt32:
+    return arrow::uint32();
+  case DataTypeId::kUInt64:
+    return arrow::uint64();
+  case DataTypeId::kFloat:
+    return arrow::float32();
+  case DataTypeId::kDouble:
+    return arrow::float64();
+  case DataTypeId::kBoolean:
+    return arrow::boolean();
+  case DataTypeId::kVarchar:
+    return arrow::large_utf8();
+  case DataTypeId::kDate:
+    return arrow::date32();
+  case DataTypeId::kTimestampMs:
+    return arrow::timestamp(arrow::TimeUnit::MILLI);
+  default:
+    THROW_RUNTIME_ERROR("Unsupported DataTypeId for Arrow conversion: " +
+                        std::to_string(static_cast<int>(type_id)));
+  }
+}
+
+// Build a single Arrow array from a generic IContextColumn by reading values
+// one by one.  This is not the fastest path but correct for all supported
+// types.
+static std::shared_ptr<arrow::Array> build_arrow_array_from_value_column(
+    const std::shared_ptr<IContextColumn>& column) {
+  auto type_id = column->elem_type().id();
+  auto arrow_type = data_type_id_to_arrow(type_id);
+  size_t n = column->size();
+
+  auto builder_res = arrow::MakeBuilder(arrow_type);
+  if (!builder_res.ok()) {
+    THROW_RUNTIME_ERROR("Failed to create Arrow builder: " +
+                        builder_res.status().ToString());
+  }
+  auto builder = std::move(*builder_res);
+  auto st = builder->Reserve(static_cast<int64_t>(n));
+  if (!st.ok()) {
+    THROW_RUNTIME_ERROR("Arrow builder reserve failed: " + st.ToString());
+  }
+
+  for (size_t i = 0; i < n; ++i) {
+    if (!column->has_value(i)) {
+      st = builder->AppendNull();
+    } else {
+      auto val = column->get_elem(i);
+      switch (type_id) {
+      case DataTypeId::kInt32:
+        st = static_cast<arrow::Int32Builder*>(builder.get())
+                 ->Append(val.GetValue<int32_t>());
+        break;
+      case DataTypeId::kInt64:
+        st = static_cast<arrow::Int64Builder*>(builder.get())
+                 ->Append(val.GetValue<int64_t>());
+        break;
+      case DataTypeId::kUInt32:
+        st = static_cast<arrow::UInt32Builder*>(builder.get())
+                 ->Append(val.GetValue<uint32_t>());
+        break;
+      case DataTypeId::kUInt64:
+        st = static_cast<arrow::UInt64Builder*>(builder.get())
+                 ->Append(val.GetValue<uint64_t>());
+        break;
+      case DataTypeId::kFloat:
+        st = static_cast<arrow::FloatBuilder*>(builder.get())
+                 ->Append(val.GetValue<float>());
+        break;
+      case DataTypeId::kDouble:
+        st = static_cast<arrow::DoubleBuilder*>(builder.get())
+                 ->Append(val.GetValue<double>());
+        break;
+      case DataTypeId::kBoolean:
+        st = static_cast<arrow::BooleanBuilder*>(builder.get())
+                 ->Append(val.GetValue<bool>());
+        break;
+      case DataTypeId::kVarchar: {
+        auto sv = val.GetValue<std::string_view>();
+        st = static_cast<arrow::LargeStringBuilder*>(builder.get())
+                 ->Append(sv.data(), static_cast<int64_t>(sv.size()));
+        break;
+      }
+      case DataTypeId::kDate:
+        st = static_cast<arrow::Date32Builder*>(builder.get())
+                 ->Append(val.GetValue<date_t>().to_num_days());
+        break;
+      case DataTypeId::kTimestampMs:
+        st = static_cast<arrow::TimestampBuilder*>(builder.get())
+                 ->Append(val.GetValue<timestamp_ms_t>().milli_second);
+        break;
+      default:
+        THROW_RUNTIME_ERROR(
+            "Unsupported DataTypeId in value-to-Arrow conversion: " +
+            std::to_string(static_cast<int>(type_id)));
+      }
+    }
+    if (!st.ok()) {
+      THROW_RUNTIME_ERROR("Arrow builder append failed: " + st.ToString());
+    }
+  }
+
+  auto finish_res = builder->Finish();
+  if (!finish_res.ok()) {
+    THROW_RUNTIME_ERROR("Arrow builder finish failed: " +
+                        finish_res.status().ToString());
+  }
+  return *finish_res;
+}
+
+// Create record batch suppliers from kValue columns by converting them to
+// Arrow arrays.  Used when the data source is a Cypher query (MATCH/RETURN)
+// rather than a file scan.
+static std::vector<std::shared_ptr<IRecordBatchSupplier>>
+create_record_batch_supplier_from_value_column(
+    const DataChunk& chunk,
+    const std::vector<std::pair<int32_t, std::string>>& prop_mappings) {
+  std::vector<std::shared_ptr<IRecordBatchSupplier>> suppliers;
+  std::vector<std::vector<std::shared_ptr<arrow::Array>>> arrays;
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+
+  arrays.resize(prop_mappings.size());
+  for (size_t i = 0; i < prop_mappings.size(); ++i) {
+    auto tag_id = prop_mappings[i].first;
+    auto prop_name = prop_mappings[i].second;
+    auto column = chunk.get(tag_id);
+    if (column == nullptr) {
+      THROW_RUNTIME_ERROR("Column not found for tag id: " +
+                          std::to_string(tag_id));
+    }
+    auto arrow_array = build_arrow_array_from_value_column(column);
+    arrays[i].emplace_back(arrow_array);
+    fields.emplace_back(std::make_shared<arrow::Field>(
+        prop_name, arrow_array->type(), true));
+  }
+  auto schema = std::make_shared<arrow::Schema>(fields);
+  suppliers.emplace_back(
+      std::make_shared<ArrowRecordBatchArraySupplier>(arrays, schema));
+  return suppliers;
+}
+
 std::vector<std::shared_ptr<IRecordBatchSupplier>> create_record_batch_supplier(
     const DataChunk& chunk,
     const std::vector<std::pair<int32_t, std::string>>& prop_mappings) {
@@ -432,6 +581,8 @@ std::vector<std::shared_ptr<IRecordBatchSupplier>> create_record_batch_supplier(
   } else if (column_type == ContextColumnType::kArrowStream) {
     return create_record_batch_supplier_from_arrow_stream_column(chunk,
                                                                  prop_mappings);
+  } else if (column_type == ContextColumnType::kValue) {
+    return create_record_batch_supplier_from_value_column(chunk, prop_mappings);
   } else {
     LOG(ERROR) << "Unsupported column type: " << static_cast<int>(column_type);
     THROW_RUNTIME_ERROR("Unsupported column type: " +

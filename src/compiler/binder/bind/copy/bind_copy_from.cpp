@@ -25,6 +25,7 @@
 #include "neug/compiler/binder/ddl/bound_create_table_info.h"
 #include "neug/compiler/binder/ddl/property_definition.h"
 #include "neug/compiler/binder/expression_binder.h"
+#include "neug/compiler/binder/query/bound_regular_query.h"
 #include "neug/compiler/catalog/catalog.h"
 #include "neug/compiler/catalog/catalog_entry/node_table_catalog_entry.h"
 #include "neug/compiler/catalog/catalog_entry/rel_group_catalog_entry.h"
@@ -54,6 +55,28 @@ using namespace neug::function;
 namespace neug {
 namespace binder {
 
+// Reject COPY TEMP source queries that contain write operations (INSERT,
+// DELETE, SET, MERGE).  Only read-only Cypher queries are valid sources.
+static void validateQuerySourceIsReadOnly(
+    const BoundBaseScanSource& boundSource) {
+  if (boundSource.type != ScanSourceType::QUERY) return;
+  auto& qs = boundSource.constCast<BoundQueryScanSource>();
+  auto* stmt = qs.statement.get();
+  if (stmt->getStatementType() != StatementType::QUERY) return;
+  auto* query = dynamic_cast<const BoundRegularQuery*>(stmt);
+  if (!query) return;
+  for (uint64_t i = 0; i < query->getNumSingleQueries(); ++i) {
+    auto* sq = query->getSingleQuery(i);
+    for (idx_t j = 0; j < sq->getNumQueryParts(); ++j) {
+      if (sq->getQueryPart(j)->hasUpdatingClause()) {
+        THROW_BINDER_EXCEPTION(
+            "COPY TEMP source query must be read-only. "
+            "Write operations (INSERT, DELETE, SET, MERGE) are not allowed.");
+      }
+    }
+  }
+}
+
 DDLVertexInfo::DDLVertexInfo(const std::string& vertexLabelName,
                              const std::string& primaryKeyName,
                              const expression_vector& columns,
@@ -62,7 +85,9 @@ DDLVertexInfo::DDLVertexInfo(const std::string& vertexLabelName,
       std::make_unique<NodeTableCatalogEntry>(vertexLabelName, primaryKeyName);
   bool primaryKeyFound = false;
   for (const auto& col : columns) {
-    const auto& colName = col->rawName();
+    // Use toString() which respects RETURN aliases (e.g., "p.id AS id" → "id")
+    // rather than rawName() which returns the underlying expression ("p.id").
+    const auto& colName = col->toString();
     if (colName == primaryKeyName) {
       primaryKeyFound = true;
     }
@@ -120,7 +145,8 @@ DDLEdgeInfo::DDLEdgeInfo(const std::string& edgeLabelName,
   std::vector<PropertyDefinition> relProps;
   for (size_t i = 2; i < columns.size(); ++i) {
     const auto& column = columns[i];
-    const auto& colName = column->rawName();
+    // Use toString() to respect RETURN aliases from Cypher subqueries.
+    const auto& colName = column->toString();
     auto defaultExpr = std::make_unique<ParsedLiteralExpression>(
         Value::createDefaultValue(column->getDataType()), "NULL");
     auto boundExpr = binder.bindExpression(*defaultExpr);
@@ -405,7 +431,7 @@ std::unique_ptr<BoundStatement> Binder::bindCopyNodeFromNoSchema(
     THROW_BINDER_EXCEPTION(stringFormat(
         "No columns found for table {}, cannot set primary key", labelName));
   }
-  const auto& primaryKey = columns[0]->rawName();
+  const auto& primaryKey = columns[0]->toString();
   auto ddlTableInfo = std::make_unique<DDLVertexInfo>(
       labelName, primaryKey, columns, expressionBinder);
   auto boundCopyFromInfo =
@@ -488,6 +514,7 @@ std::unique_ptr<BoundStatement> Binder::bindCopyTempNodeFrom(
   auto& copyStatement = neug_dynamic_cast<const CopyFrom&>(statement);
   auto boundSource = bindScanSource(copyStatement.getSource(),
                                     copyStatement.getParsingOptions(), {}, {});
+  validateQuerySourceIsReadOnly(*boundSource);
   expression_vector columns = boundSource->getColumns();
   std::vector<ColumnEvaluateType> evaluateTypes(columns.size(),
                                                 ColumnEvaluateType::REFERENCE);
@@ -498,7 +525,8 @@ std::unique_ptr<BoundStatement> Binder::bindCopyTempNodeFrom(
     THROW_BINDER_EXCEPTION(stringFormat(
         "No columns found for table {}, cannot set primary key", labelName));
   }
-  const auto& primaryKey = columns[0]->rawName();
+  // Use toString() to respect RETURN aliases from Cypher subqueries.
+  const auto& primaryKey = columns[0]->toString();
   auto ddlTableInfo = std::make_unique<DDLVertexInfo>(
       labelName, primaryKey, columns, expressionBinder, /*temporary=*/true);
   auto boundCopyFromInfo =
@@ -530,6 +558,7 @@ std::unique_ptr<BoundStatement> Binder::bindCopyTempRelFrom(
 
   auto boundSource = bindScanSource(
       copyStatement.getSource(), getScanSourceOptions(copyStatement), {}, {});
+  validateQuerySourceIsReadOnly(*boundSource);
   expression_vector warningDataExprs;
   auto offset = createInvisibleVariable(
       std::string(InternalKeyword::ROW_OFFSET), DataType(DataTypeId::kInt64));
