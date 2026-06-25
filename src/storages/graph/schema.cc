@@ -28,7 +28,6 @@
 #include <ostream>
 #include <stdexcept>
 #include <type_traits>
-#include <unordered_set>
 #include "neug/storages/module/module_factory.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/id_indexer.h"
@@ -2357,10 +2356,10 @@ Schema Schema::StripTemporary() const {
         std::make_shared<VertexSchema>(*v_schemas_[v_label]);
   }
 
-  // Copy non-temporary edge labels.
+  // Copy non-temporary edge labels in original label ID order.
   // An edge label should be copied only if it's used by at least one
   // non-temporary edge triplet.
-  std::unordered_set<label_t> non_temp_edge_labels;
+  std::vector<bool> is_non_temp_edge_label(elabel_indexer_.num_slots(), false);
   for (const auto& [key, es] : e_schemas_) {
     if (!es || es->temporary) {
       continue;
@@ -2371,10 +2370,16 @@ Schema Schema::StripTemporary() const {
     if (is_vertex_label_temporary(src_v) || is_vertex_label_temporary(dst_v)) {
       continue;
     }
-    non_temp_edge_labels.insert(e_label);
+    is_non_temp_edge_label[e_label] = true;
   }
 
-  for (label_t e_label : non_temp_edge_labels) {
+  // Iterate in sequential label ID order to preserve deterministic ordering.
+  for (label_t e_label = 0;
+       e_label < static_cast<label_t>(is_non_temp_edge_label.size());
+       ++e_label) {
+    if (!is_non_temp_edge_label[e_label]) {
+      continue;
+    }
     if (elabel_tomb_.get(e_label)) {
       continue;
     }
