@@ -827,3 +827,235 @@ class TestCopyTempReadOnlyRejection:
                 f'COPY TEMP TempEdgeFail FROM "{self.people_csv}" '
                 f"(header = true, from = 'Person', to = 'Person')"
             )
+
+
+# ======================================================================
+# COPY TEMP from Cypher query source
+# ======================================================================
+class TestCopyTempQuerySource:
+    """Tests for COPY TEMP ... FROM (Cypher MATCH query)."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        self.db_dir = str(tmp_path / "test_copy_temp_qsrc_db")
+        self.csv_dir = str(tmp_path / "csv")
+        shutil.rmtree(self.db_dir, ignore_errors=True)
+        os.makedirs(self.csv_dir, exist_ok=True)
+        self.db = Database(db_path=self.db_dir, mode="w")
+        self.conn = self.db.connect()
+        # Create persistent Person table
+        self.conn.execute(
+            "CREATE NODE TABLE Person("
+            "id INT64, name STRING, age INT64, PRIMARY KEY(id))"
+        )
+        for vid, name, age in [
+            (1, "Alice", 30),
+            (2, "Bob", 25),
+            (3, "Carol", 35),
+            (4, "Dave", 20),
+        ]:
+            self.conn.execute(
+                f"CREATE (p:Person {{id: {vid}, name: '{name}', age: {age}}});"
+            )
+        # Create persistent KNOWS rel table via CSV
+        edges_csv = _write_csv(
+            self.csv_dir,
+            "edges.csv",
+            "src_id|dst_id|weight\n1|2|0.5\n2|3|1.0\n3|4|0.8\n",
+        )
+        self.conn.execute(
+            "CREATE REL TABLE KNOWS(FROM Person TO Person, weight DOUBLE)"
+        )
+        self.conn.execute(
+            f'COPY KNOWS FROM "{edges_csv}" (header=true)'
+        )
+        yield
+        self.conn.close()
+        self.db.close()
+        shutil.rmtree(self.db_dir, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # Node table from query
+    # ------------------------------------------------------------------
+
+    def test_query_source_node_basic(self):
+        """Basic node table materialized from MATCH query."""
+        self.conn.execute(
+            "COPY TEMP TempAll FROM "
+            "(MATCH (p:Person) RETURN p.id AS id, p.name AS name)"
+        )
+        rows = list(
+            self.conn.execute(
+                "MATCH (t:TempAll) RETURN t.id, t.name ORDER BY t.id"
+            )
+        )
+        assert len(rows) == 4
+        assert rows[0] == [1, "Alice"]
+        assert rows[3] == [4, "Dave"]
+
+    def test_query_source_node_with_filter(self):
+        """Node table from query with WHERE filter."""
+        self.conn.execute(
+            "COPY TEMP TempOld FROM "
+            "(MATCH (p:Person) WHERE p.age >= 30 "
+            "RETURN p.id AS id, p.name AS name, p.age AS age)"
+        )
+        rows = list(
+            self.conn.execute(
+                "MATCH (t:TempOld) RETURN t.id, t.name, t.age ORDER BY t.id"
+            )
+        )
+        assert len(rows) == 2
+        assert rows[0] == [1, "Alice", 30]
+        assert rows[1] == [3, "Carol", 35]
+
+    def test_query_source_node_with_aggregation(self):
+        """Node table from query with WITH/aggregation."""
+        self.conn.execute(
+            "COPY TEMP TempDeg FROM "
+            "(MATCH (p:Person)-[:KNOWS]->(f:Person) "
+            "WITH p, count(f) AS degree "
+            "RETURN p.id AS id, degree)"
+        )
+        rows = list(
+            self.conn.execute(
+                "MATCH (t:TempDeg) RETURN t.id, t.degree ORDER BY t.id"
+            )
+        )
+        assert len(rows) == 3  # persons 1,2,3 have outgoing KNOWS
+
+    # ------------------------------------------------------------------
+    # Edge table from query
+    # ------------------------------------------------------------------
+
+    def test_query_source_edge_basic(self):
+        """Edge table materialized from MATCH query."""
+        self.conn.execute(
+            "COPY TEMP TempE FROM "
+            "(MATCH (a:Person)-[k:KNOWS]->(b:Person) "
+            "RETURN a.id AS src, b.id AS dst, k.weight AS w) "
+            "(from='Person', to='Person')"
+        )
+        rows = list(
+            self.conn.execute(
+                "MATCH (a:Person)-[e:TempE]->(b:Person) "
+                "RETURN a.id, b.id, e.w ORDER BY a.id, b.id"
+            )
+        )
+        assert len(rows) == 3
+        assert rows[0] == [1, 2, 0.5]
+
+    # ------------------------------------------------------------------
+    # Chained materialization
+    # ------------------------------------------------------------------
+
+    def test_query_source_chained(self):
+        """COPY TEMP A -> query A -> COPY TEMP B."""
+        # Step 1: materialize all persons
+        self.conn.execute(
+            "COPY TEMP TempPeople FROM "
+            "(MATCH (p:Person) RETURN p.id AS id, p.name AS name, p.age AS age)"
+        )
+        # Step 2: materialize older people from TempPeople
+        self.conn.execute(
+            "COPY TEMP TempSenior FROM "
+            "(MATCH (t:TempPeople) WHERE t.age >= 30 "
+            "RETURN t.id AS id, t.name AS name)"
+        )
+        rows = list(
+            self.conn.execute(
+                "MATCH (s:TempSenior) RETURN s.id, s.name ORDER BY s.id"
+            )
+        )
+        assert len(rows) == 2
+        assert rows[0] == [1, "Alice"]
+        assert rows[1] == [3, "Carol"]
+
+    # ------------------------------------------------------------------
+    # Mixed query: query-sourced temp + persistent
+    # ------------------------------------------------------------------
+
+    def test_query_source_mixed_match(self):
+        """Query-sourced temp table can be queried alongside persistent data."""
+        self.conn.execute(
+            "COPY TEMP TempYoung FROM "
+            "(MATCH (p:Person) WHERE p.age < 30 "
+            "RETURN p.id AS id, p.name AS name)"
+        )
+        # Both persistent Person and temp TempYoung can be queried
+        rows_persistent = list(
+            self.conn.execute(
+                "MATCH (p:Person) RETURN p.name ORDER BY p.id"
+            )
+        )
+        rows_temp = list(
+            self.conn.execute(
+                "MATCH (t:TempYoung) RETURN t.name ORDER BY t.id"
+            )
+        )
+        assert len(rows_persistent) == 4  # all persistent persons
+        assert len(rows_temp) == 2  # Bob(25) and Dave(20)
+        assert rows_temp[0] == ["Bob"]
+        assert rows_temp[1] == ["Dave"]
+
+    # ------------------------------------------------------------------
+    # Error handling
+    # ------------------------------------------------------------------
+
+    def test_query_source_write_rejected(self):
+        """Subquery with write operation must be rejected."""
+        with pytest.raises(Exception, match="read-only"):
+            self.conn.execute(
+                "COPY TEMP TempBad FROM "
+                "(MATCH (p:Person) "
+                "CREATE (:Person {id: 999, name: 'Evil', age: 0}) "
+                "RETURN p.id AS id)"
+            )
+
+    def test_query_source_empty_result(self):
+        """Query returning 0 rows creates an empty temp table."""
+        self.conn.execute(
+            "COPY TEMP TempEmpty FROM "
+            "(MATCH (p:Person) WHERE p.age > 100 "
+            "RETURN p.id AS id, p.name AS name)"
+        )
+        rows = list(
+            self.conn.execute(
+                "MATCH (t:TempEmpty) RETURN t.id, t.name"
+            )
+        )
+        assert len(rows) == 0
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def test_query_source_drop(self):
+        """DROP TABLE works for query-sourced temp tables."""
+        self.conn.execute(
+            "COPY TEMP TempDrop FROM "
+            "(MATCH (p:Person) RETURN p.id AS id, p.name AS name)"
+        )
+        rows = list(
+            self.conn.execute("MATCH (t:TempDrop) RETURN t.id")
+        )
+        assert len(rows) == 4
+        self.conn.execute("DROP TABLE TempDrop")
+        with pytest.raises(Exception):
+            self.conn.execute("MATCH (t:TempDrop) RETURN t.id")
+
+    def test_query_source_lifecycle_connection_close(self):
+        """Query-sourced temp tables are cleaned up on connection close."""
+        self.conn.execute(
+            "COPY TEMP TempLife FROM "
+            "(MATCH (p:Person) RETURN p.id AS id, p.name AS name)"
+        )
+        rows = list(
+            self.conn.execute("MATCH (t:TempLife) RETURN t.id")
+        )
+        assert len(rows) == 4
+        self.conn.close()
+        # Reconnect
+        self.conn = self.db.connect()
+        with pytest.raises(Exception):
+            self.conn.execute("MATCH (t:TempLife) RETURN t.id")

@@ -580,5 +580,110 @@ TEST_F(CopyTempTest, DropThenRecreate) {
   conn->Close();
 }
 
+// ============================================================================
+// Query source tests (COPY TEMP FROM (Cypher query))
+// ============================================================================
+
+TEST_F(CopyTempTest, QuerySourceNodeBasic) {
+  auto conn = db_->Connect();
+  setupPersistentPersonTable(conn);
+  auto res = conn->Query(
+      "COPY TEMP TempAll FROM "
+      "(MATCH (p:Person) RETURN p.id AS id, p.name AS name)");
+  EXPECT_TRUE(res) << res.error().ToString();
+  auto q = conn->Query(
+      "MATCH (t:TempAll) RETURN t.id, t.name ORDER BY t.id;");
+  EXPECT_TRUE(q) << q.error().ToString();
+  EXPECT_EQ(q.value().response().row_count(), 4);
+  conn->Close();
+}
+
+TEST_F(CopyTempTest, QuerySourceNodeWithFilter) {
+  auto conn = db_->Connect();
+  setupPersistentPersonTable(conn);
+  auto res = conn->Query(
+      "COPY TEMP TempOld FROM "
+      "(MATCH (p:Person) WHERE p.age >= 30 "
+      "RETURN p.id AS id, p.name AS name, p.age AS age)");
+  EXPECT_TRUE(res) << res.error().ToString();
+  auto q = conn->Query(
+      "MATCH (t:TempOld) RETURN t.id ORDER BY t.id;");
+  EXPECT_TRUE(q) << q.error().ToString();
+  EXPECT_EQ(q.value().response().row_count(), 2);
+  conn->Close();
+}
+
+TEST_F(CopyTempTest, QuerySourceEdge) {
+  auto conn = db_->Connect();
+  setupPersistentPersonTable(conn);
+  std::string csv = std::string(CSV_DIR) + "/edges.csv";
+  auto rk = conn->Query(
+      "CREATE REL TABLE KNOWS(FROM Person TO Person, weight DOUBLE)");
+  EXPECT_TRUE(rk) << rk.error().ToString();
+  auto rc = conn->Query(
+      "COPY KNOWS FROM \"" + csv + "\" (header=true)");
+  EXPECT_TRUE(rc) << rc.error().ToString();
+  auto res = conn->Query(
+      "COPY TEMP TempE FROM "
+      "(MATCH (a:Person)-[k:KNOWS]->(b:Person) "
+      "RETURN a.id AS src, b.id AS dst, k.weight AS w) "
+      "(from='Person', to='Person')");
+  EXPECT_TRUE(res) << res.error().ToString();
+  auto q = conn->Query(
+      "MATCH (a:Person)-[e:TempE]->(b:Person) "
+      "RETURN a.id, b.id, e.w ORDER BY a.id, b.id;");
+  EXPECT_TRUE(q) << q.error().ToString();
+  EXPECT_EQ(q.value().response().row_count(), 3);
+  conn->Close();
+}
+
+TEST_F(CopyTempTest, QuerySourceChained) {
+  auto conn = db_->Connect();
+  setupPersistentPersonTable(conn);
+  // Step 1: materialize all
+  auto r1 = conn->Query(
+      "COPY TEMP TempPeople FROM "
+      "(MATCH (p:Person) RETURN p.id AS id, p.name AS name, p.age AS age)");
+  EXPECT_TRUE(r1) << r1.error().ToString();
+  // Step 2: materialize from TempPeople
+  auto r2 = conn->Query(
+      "COPY TEMP TempSenior FROM "
+      "(MATCH (t:TempPeople) WHERE t.age >= 30 "
+      "RETURN t.id AS id, t.name AS name)");
+  EXPECT_TRUE(r2) << r2.error().ToString();
+  auto q = conn->Query(
+      "MATCH (s:TempSenior) RETURN s.id ORDER BY s.id;");
+  EXPECT_TRUE(q) << q.error().ToString();
+  EXPECT_EQ(q.value().response().row_count(), 2);
+  conn->Close();
+}
+
+TEST_F(CopyTempTest, QuerySourceWriteRejection) {
+  auto conn = db_->Connect();
+  setupPersistentPersonTable(conn);
+  auto res = conn->Query(
+      "COPY TEMP TempBad FROM "
+      "(MATCH (p:Person) "
+      "CREATE (:Person {id: 999, name: 'Evil', age: 0}) "
+      "RETURN p.id AS id)");
+  EXPECT_FALSE(res);
+  conn->Close();
+}
+
+TEST_F(CopyTempTest, QuerySourceEmptyResult) {
+  auto conn = db_->Connect();
+  setupPersistentPersonTable(conn);
+  auto res = conn->Query(
+      "COPY TEMP TempEmpty FROM "
+      "(MATCH (p:Person) WHERE p.age > 100 "
+      "RETURN p.id AS id, p.name AS name)");
+  EXPECT_TRUE(res) << res.error().ToString();
+  auto q = conn->Query(
+      "MATCH (t:TempEmpty) RETURN t.id;");
+  EXPECT_TRUE(q) << q.error().ToString();
+  EXPECT_EQ(q.value().response().row_count(), 0);
+  conn->Close();
+}
+
 }  // namespace test
 }  // namespace neug
