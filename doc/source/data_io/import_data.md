@@ -2,11 +2,15 @@
 
 `COPY FROM` persists external data into NeuG's graph storage. It builds on top of [`LOAD FROM`](load_data) — internally, `COPY FROM` uses `LOAD FROM` to read and parse external files, then writes the result into node or relationship tables.
 
+A variant — **`COPY TEMP`** — imports external data as a **temporary graph** whose lifetime is bound to the current connection. Temporary tables are automatically removed when the connection closes, making `COPY TEMP` ideal for ad-hoc analytics without polluting the persistent schema.
+
 ## Schema Requirement
 
 You can create a **predefined schema** — that is, define node/relationship tables before importing data — where the columns in the external file must match the table properties.
 
 Since v0.1.2, NeuG supports schema-flexible persistent import — allowing `COPY FROM` to leverage the capability of type inference of `LOAD FROM`, without requiring a predefined schema. This will make it much easier to quickly onboard new datasets. See [Import without a predefined schema](#import-without-a-predefined-schema) for more usages.
+
+> **COPY TEMP** always infers the schema automatically — no predefined table or `auto_detect` option is needed. The first column becomes the primary key for nodes; for relationships, the first two columns are source/destination keys.
 
 ---
 
@@ -17,6 +21,7 @@ Here is a complete example of importing a social network dataset from CSV.
 ### Step 1: Prepare Data Files
 
 **users.csv:**
+
 ```csv
 id,name,age,email
 1,Alice Johnson,30,alice@example.com
@@ -25,6 +30,7 @@ id,name,age,email
 ```
 
 **friendships.csv:**
+
 ```csv
 from_user_id,to_user_id,since_year
 1,2,2020
@@ -33,6 +39,7 @@ from_user_id,to_user_id,since_year
 ```
 
 ### Step 2: Create Schema
+
 ```cypher
 CREATE NODE TABLE User(
     id INT64 PRIMARY KEY,
@@ -48,6 +55,7 @@ CREATE REL TABLE FRIENDS(
 ```
 
 ### Step 3: Import Data
+
 ```cypher
 -- Import nodes first (order matters — nodes must exist before relationships)
 COPY User FROM "users.csv" (header=true, delimiter=",");
@@ -62,6 +70,7 @@ COPY FRIENDS FROM "friendships.csv" (
 ```
 
 ### Step 4: Verify
+
 ```cypher
 MATCH (u:User) RETURN count(u) AS user_count;
 
@@ -69,6 +78,27 @@ MATCH (u1:User)-[f:FRIENDS]->(u2:User)
 RETURN u1.name, u2.name, f.since_year
 LIMIT 5;
 ```
+
+### Temporary Graph
+
+To import the same data as a **temporary** graph (no DDL, no persistence):
+
+-- Temporary node table (auto-inferred schema, first column = primary key)
+COPY TEMP TempUser FROM "users.csv" (header=true, delimiter=",");
+
+-- Temporary relationship table (from/to specify endpoint labels)
+COPY TEMP TempFriends FROM "friendships.csv" (
+header=true,
+delimiter=",",
+from='TempUser',
+to='TempUser'
+);
+
+-- Query works the same way
+MATCH (u1:TempUser)-[f:TempFriends]->(u2:TempUser)
+RETURN u1.name, u2.name, f.since_year;
+
+-- Temporary tables dropped when the connection closes.
 
 ---
 
@@ -92,6 +122,19 @@ COPY Person FROM "person*.csv" (header=true);
 
 > **Note:** The number and order of columns in the CSV file must match the properties defined in the node table exactly.
 
+**Temporary node table** — no DDL needed, schema is auto-inferred:
+
+```cypher
+COPY TEMP TempPerson FROM "person.csv" (primary_key='id', header=true);
+
+-- With filter/projection via LOAD FROM subquery:
+COPY TEMP TempAdults FROM (
+    LOAD FROM "person.csv" (primary_key='id', header=true)
+    WHERE age >= 18
+    RETURN id, name
+);
+```
+
 ## Import into Relationship Table
 
 Create a relationship table and import data:
@@ -106,13 +149,28 @@ COPY KNOWS FROM "person_knows_person.csv" (from="Person", to="Person", header=tr
 
 > **Note:** NeuG assumes the first two columns are the primary keys of the `FROM` and `TO` nodes. The remaining columns correspond to relationship properties. The `from` and `to` parameters must be specified to identify the endpoint node tables.
 
+**Temporary relationship table:**
+
+```cypher
+-- Simple: first two columns are src/dst keys
+COPY TEMP TempKnows FROM "edges.csv" (
+    header=true,
+    from='Person',
+    to='Person'
+);
+
+-- With column reordering (when keys are NOT at positions [0/1]):
+COPY TEMP TempKnows FROM (
+    LOAD FROM "edges_shuffled.csv" (header=true)
+    RETURN src_id, dst_id, weight
+) (from='Person', to='Person');
+```
+
+> **Note:** `from`/`to` are graph-semantic options at the `COPY TEMP` level — they are not placed inside `LOAD FROM`. 
+
 ## Import without a predefined schema
 
 When **`auto_detect`** is enabled (the default), a `COPY ... FROM` into a **new** label skips manual `CREATE NODE TABLE` / `CREATE REL TABLE` for that label. The compiler builds a plan that applies DDL for the inferred type, then runs the same bulk insert path as a normal `COPY`.
-
-| Option        | Type | Default | Description                                                                                                                                       |
-| ------------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auto_detect` | bool | `true`  | If the target table does not exist, infer schema from the scan/sniff result and create it before insert. If `false`, a missing table is an error. |
 
 You can set it explicitly when needed:
 
@@ -120,6 +178,8 @@ You can set it explicitly when needed:
 COPY User FROM "users.csv" (header=true, auto_detect=true);
 COPY User FROM "users.csv" (header=true, auto_detect=false);  -- require table to exist
 ```
+
+> **COPY TEMP** always operates in this mode — it always infers schema and creates a temporary table. The `auto_detect` option is irrelevant for `COPY TEMP`.
 
 ### Nodes (new label)
 
@@ -208,6 +268,7 @@ Since `COPY FROM` builds on `LOAD FROM`, you can use a `LOAD FROM` subquery to *
 When the file columns are in a different order from the table schema:
 
 **person_remap.csv:**
+
 ```
 age,name,id
 39,marko,1
@@ -226,6 +287,7 @@ COPY Person FROM (
 ### Remapping Relationship Endpoints
 
 **knows_remap.csv:**
+
 ```
 dst_name,src_name,weight
 josh,marko,1.0
