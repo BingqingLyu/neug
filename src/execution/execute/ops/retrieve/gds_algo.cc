@@ -17,6 +17,8 @@
 #include "neug/common/types.h"
 #include "neug/compiler/function/gds/gds_algo_function.h"
 #include "neug/compiler/main/metadata_registry.h"
+#include "neug/execution/common/columns/vertex_columns.h"
+#include "neug/execution/common/context.h"
 #include "neug/storages/graph/graph_interface.h"
 #include "neug/storages/graph/merged_storage_view.h"
 #include "neug/utils/exception/exception.h"
@@ -56,7 +58,36 @@ neug::result<neug::execution::Context> GDSAlgoOpr::Eval(
     auto& base_graph =
         dynamic_cast<StorageReadInterface&>(graph_interface);
     MergedStorageView merged(base_graph, vertex_labels_, edge_triplets_);
-    return algo_func_->execFunc(*algo_input_, merged);
+    auto result = algo_func_->execFunc(*algo_input_, merged);
+
+    // Unmap global vids back to (label, local_vid) in vertex columns.
+    const auto& offset_table = merged.offset_table();
+    execution::Context unmapped_ctx;
+    unmapped_ctx.tag_ids = result.tag_ids;
+    for (size_t ci = 0; ci < result.chunk_num(); ++ci) {
+      auto& chunk = result.chunk(ci);
+      execution::ContextChunk new_chunk;
+      for (int tag : result.tag_ids) {
+        auto col = chunk.get(tag);
+        if (col && col->column_type() == execution::ContextColumnType::kVertex) {
+          // Rebuild vertex column with correct (label, local_vid).
+          auto* vcol = dynamic_cast<const execution::IVertexColumn*>(col.get());
+          execution::MLVertexColumnBuilder builder;
+          builder.reserve(vcol->size());
+          for (size_t i = 0; i < vcol->size(); ++i) {
+            auto vr = vcol->get_vertex(i);
+            auto [label_idx, local_vid] = offset_table.global_to_local(vr.vid_);
+            label_t real_label = offset_table.range(label_idx).label;
+            builder.push_back_vertex(execution::VertexRecord(real_label, local_vid));
+          }
+          new_chunk.set(tag, builder.finish());
+        } else if (col) {
+          new_chunk.set(tag, col);
+        }
+      }
+      unmapped_ctx.append_chunk(std::move(new_chunk));
+    }
+    return unmapped_ctx;
   }
   return algo_func_->execFunc(*algo_input_, graph_interface);
 }
