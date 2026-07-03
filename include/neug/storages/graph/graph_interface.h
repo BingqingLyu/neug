@@ -350,6 +350,9 @@ class StorageReadInterface : virtual public IStorageInterface {
 
   const Schema& schema() const override { return view_.schema(); }
 
+  const GraphView& view() const { return view_; }
+  timestamp_t read_ts() const { return read_ts_; }
+
  protected:
   const GraphView& view_;
   timestamp_t read_ts_;

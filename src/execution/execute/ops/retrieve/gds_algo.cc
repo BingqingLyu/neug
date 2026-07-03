@@ -18,6 +18,7 @@
 #include "neug/compiler/function/gds/gds_algo_function.h"
 #include "neug/compiler/main/metadata_registry.h"
 #include "neug/storages/graph/graph_interface.h"
+#include "neug/storages/graph/merged_storage_view.h"
 #include "neug/utils/exception/exception.h"
 
 namespace neug {
@@ -25,8 +26,15 @@ namespace execution {
 namespace ops {
 
 GDSAlgoOpr::GDSAlgoOpr(std::unique_ptr<function::CallFuncInputBase> algo_input,
-                       function::GDSAlgoFunction* algo_func)
-    : algo_input_(std::move(algo_input)), algo_func_(algo_func) {}
+                       function::GDSAlgoFunction* algo_func,
+                       std::vector<label_t> vertex_labels,
+                       std::vector<execution::LabelTriplet> edge_triplets,
+                       bool is_multi_label)
+    : algo_input_(std::move(algo_input)),
+      algo_func_(algo_func),
+      vertex_labels_(std::move(vertex_labels)),
+      edge_triplets_(std::move(edge_triplets)),
+      is_multi_label_(is_multi_label) {}
 
 neug::result<neug::execution::Context> GDSAlgoOpr::Eval(
     IStorageInterface& graph_interface, const ParamsMap& params,
@@ -42,6 +50,13 @@ neug::result<neug::execution::Context> GDSAlgoOpr::Eval(
   }
   if (algo_input_ == nullptr) {
     THROW_RUNTIME_ERROR("GDSAlgoOpr: algo input is null");
+  }
+
+  if (is_multi_label_) {
+    auto& base_graph =
+        dynamic_cast<StorageReadInterface&>(graph_interface);
+    MergedStorageView merged(base_graph, vertex_labels_, edge_triplets_);
+    return algo_func_->execFunc(*algo_input_, merged);
   }
   return algo_func_->execFunc(*algo_input_, graph_interface);
 }
@@ -73,13 +88,33 @@ neug::result<OpBuildResultT> GDSAlgoOprBuilder::Build(
     THROW_RUNTIME_ERROR("GDSAlgoOprBuilder: algo input is null");
   }
 
+  // Detect multi-label subgraph.
+  const auto& subgraph = gds_pb.sub_graph();
+  std::vector<label_t> vertex_labels;
+  std::vector<execution::LabelTriplet> edge_triplets;
+  bool is_multi_label = subgraph.vertex_entries_size() > 1 ||
+                        subgraph.edge_entries_size() > 1;
+  if (is_multi_label) {
+    for (const auto& ve : subgraph.vertex_entries()) {
+      vertex_labels.push_back(static_cast<label_t>(ve.label_id()));
+    }
+    for (const auto& ee : subgraph.edge_entries()) {
+      edge_triplets.emplace_back(static_cast<label_t>(ee.src_label_id()),
+                                 static_cast<label_t>(ee.dst_label_id()),
+                                 static_cast<label_t>(ee.edge_label_id()));
+    }
+  }
+
   ContextMeta ret_meta = ctx_meta;
   for (int i = 0; i < plan.plan(op_idx).meta_data_size(); ++i) {
     const auto& meta = plan.plan(op_idx).meta_data(i);
     ret_meta.set(meta.alias(), parse_from_ir_data_type(meta.type()));
   }
   return std::make_pair(
-      std::make_unique<GDSAlgoOpr>(std::move(algo_input), algo_func), ret_meta);
+      std::make_unique<GDSAlgoOpr>(std::move(algo_input), algo_func,
+                                   std::move(vertex_labels),
+                                   std::move(edge_triplets), is_multi_label),
+      ret_meta);
 }
 
 }  // namespace ops

@@ -13,8 +13,11 @@
  */
 #pragma once
 
+#include <vector>
+
 #include "neug/compiler/function/gds/gds_algo_function.h"
 #include "neug/compiler/function/neug_call_function.h"
+#include "neug/execution/common/types/graph_types.h"
 #include "neug/execution/execute/operator.h"
 
 namespace neug {
@@ -26,7 +29,10 @@ namespace ops {
 class GDSAlgoOpr : public IOperator {
  public:
   GDSAlgoOpr(std::unique_ptr<function::CallFuncInputBase> algo_input,
-             function::GDSAlgoFunction* algo_func);
+             function::GDSAlgoFunction* algo_func,
+             std::vector<label_t> vertex_labels = {},
+             std::vector<execution::LabelTriplet> edge_triplets = {},
+             bool is_multi_label = false);
 
   ~GDSAlgoOpr() override = default;
 
@@ -40,6 +46,9 @@ class GDSAlgoOpr : public IOperator {
  private:
   std::unique_ptr<function::CallFuncInputBase> algo_input_;
   function::GDSAlgoFunction* algo_func_;
+  std::vector<label_t> vertex_labels_;
+  std::vector<execution::LabelTriplet> edge_triplets_;
+  bool is_multi_label_ = false;
 };
 
 class GDSAlgoOprBuilder : public IOperatorBuilder {
