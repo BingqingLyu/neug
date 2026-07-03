@@ -36,7 +36,7 @@ struct SSSPInput : public function::CallFuncInputBase {
     if (!parse_subgraph_entries(subgraph, ctx_meta, parsed)) {
       return false;
     }
-    if (!check_simple_graph_subgraph(parsed, "SSSP")) {
+    if (!check_homogeneous_subgraph(parsed, "SSSP")) {
       return false;
     }
 

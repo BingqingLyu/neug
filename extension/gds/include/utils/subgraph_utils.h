@@ -18,6 +18,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "neug/execution/expression/expr.h"
@@ -47,6 +48,12 @@ bool parse_subgraph_entries(const ::physical::Subgraph& subgraph,
 
 bool check_simple_graph_subgraph(const ParsedSubgraph& parsed,
                                  const std::string& algo_name);
+
+// Accepts multi-label subgraphs as long as all edge triplet endpoints
+// (src_label, dst_label) are within the declared vertex label set.
+// Rejects predicates in multi-label projections (first version limitation).
+bool check_homogeneous_subgraph(const ParsedSubgraph& parsed,
+                                const std::string& algo_name);
 
 // Resolve a source vertex given its primary-key value (as a string) to its
 // internal vertex id. On success returns true and writes the internal vertex

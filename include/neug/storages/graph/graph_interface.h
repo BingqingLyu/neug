@@ -156,7 +156,7 @@ class StorageReadInterface : virtual public IStorageInterface {
   StorageReadInterface(const GraphView& view, timestamp_t read_ts)
       : view_(view), read_ts_(read_ts) {}
 
-  ~StorageReadInterface() {}
+  virtual ~StorageReadInterface() {}
   bool readable() const override { return true; }
   bool writable() const override { return false; }
 
@@ -196,7 +196,7 @@ class StorageReadInterface : virtual public IStorageInterface {
    *
    * @since v0.1.0
    */
-  VertexSet GetVertexSet(label_t label) const {
+  virtual VertexSet GetVertexSet(label_t label) const {
     return view_.GetVertexSet(label, read_ts_);
   }
 
@@ -277,8 +277,9 @@ class StorageReadInterface : virtual public IStorageInterface {
    *
    * @since v0.1.0
    */
-  CsrView GetGenericOutgoingGraphView(label_t v_label, label_t neighbor_label,
-                                      label_t edge_label) const {
+  virtual CsrView GetGenericOutgoingGraphView(label_t v_label,
+                                               label_t neighbor_label,
+                                               label_t edge_label) const {
     return view_.GetGenericOutgoingView(v_label, neighbor_label, edge_label,
                                         read_ts_);
   }
@@ -293,8 +294,9 @@ class StorageReadInterface : virtual public IStorageInterface {
    *
    * @since v0.1.0
    */
-  CsrView GetGenericIncomingGraphView(label_t v_label, label_t neighbor_label,
-                                      label_t edge_label) const {
+  virtual CsrView GetGenericIncomingGraphView(label_t v_label,
+                                               label_t neighbor_label,
+                                               label_t edge_label) const {
     return view_.GetGenericIncomingView(neighbor_label, v_label, edge_label,
                                         read_ts_);
   }

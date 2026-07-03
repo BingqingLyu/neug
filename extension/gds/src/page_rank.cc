@@ -34,7 +34,7 @@ struct PageRankInput : public function::CallFuncInputBase {
     if (!parse_subgraph_entries(subgraph, ctx_meta, parsed)) {
       return false;
     }
-    if (!check_simple_graph_subgraph(parsed, "PageRank")) {
+    if (!check_homogeneous_subgraph(parsed, "PageRank")) {
       return false;
     }
 

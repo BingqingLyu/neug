@@ -33,7 +33,7 @@ struct LeidenInput : public function::CallFuncInputBase {
     if (!parse_subgraph_entries(subgraph, ctx_meta, parsed)) {
       return false;
     }
-    if (!check_simple_graph_subgraph(parsed, "leiden")) {
+    if (!check_homogeneous_subgraph(parsed, "leiden")) {
       return false;
     }
     if (parsed.vertex_entries[0].predicate != nullptr) {

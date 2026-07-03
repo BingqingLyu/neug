@@ -93,6 +93,65 @@ bool check_simple_graph_subgraph(const ParsedSubgraph& parsed,
   return true;
 }
 
+bool check_homogeneous_subgraph(const ParsedSubgraph& parsed,
+                                const std::string& algo_name) {
+  if (parsed.vertex_entries.empty()) {
+    LOG(ERROR) << algo_name << " requires at least one vertex label.";
+    return false;
+  }
+  if (parsed.edge_entries.empty()) {
+    LOG(ERROR) << algo_name << " requires at least one edge label.";
+    return false;
+  }
+
+  // Build set of declared vertex labels.
+  std::unordered_set<label_t> vertex_label_set;
+  for (const auto& entry : parsed.vertex_entries) {
+    vertex_label_set.insert(entry.label);
+  }
+
+  // Check all edge triplet endpoints are within the vertex label set.
+  for (const auto& edge_entry : parsed.edge_entries) {
+    const auto& triplet = edge_entry.triplet;
+    if (vertex_label_set.find(triplet.src_label) == vertex_label_set.end()) {
+      LOG(ERROR) << "Edge source label " << triplet.src_label
+                 << " is not in the declared vertex label set for "
+                 << algo_name << ".";
+      return false;
+    }
+    if (vertex_label_set.find(triplet.dst_label) == vertex_label_set.end()) {
+      LOG(ERROR) << "Edge destination label " << triplet.dst_label
+                 << " is not in the declared vertex label set for "
+                 << algo_name << ".";
+      return false;
+    }
+  }
+
+  // Reject predicates in multi-label projections (first version limitation).
+  bool is_multi_label = parsed.vertex_entries.size() > 1 ||
+                        parsed.edge_entries.size() > 1;
+  if (is_multi_label) {
+    for (const auto& entry : parsed.vertex_entries) {
+      if (entry.predicate != nullptr) {
+        LOG(ERROR) << "Predicates are not supported in multi-label "
+                      "projections for "
+                   << algo_name << ".";
+        return false;
+      }
+    }
+    for (const auto& edge_entry : parsed.edge_entries) {
+      if (edge_entry.predicate != nullptr) {
+        LOG(ERROR) << "Predicates are not supported in multi-label "
+                      "projections for "
+                   << algo_name << ".";
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 bool try_parse_source_vertex(const StorageReadInterface& graph,
                              label_t vertex_label,
                              const std::string& source_str, vid_t& out) {

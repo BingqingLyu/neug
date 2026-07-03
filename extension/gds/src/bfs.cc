@@ -35,7 +35,7 @@ struct BFSInput : public function::CallFuncInputBase {
     if (!parse_subgraph_entries(subgraph, ctx_meta, parsed)) {
       return false;
     }
-    if (!check_simple_graph_subgraph(parsed, "BFS")) {
+    if (!check_homogeneous_subgraph(parsed, "BFS")) {
       return false;
     }
 
