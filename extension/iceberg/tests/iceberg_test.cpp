@@ -1184,5 +1184,76 @@ TEST_F(IcebergMetadataTest, ParsePartitionSpec) {
   EXPECT_EQ(metadata.partition_spec[0].transform, "identity");
 }
 
+// =============================================================================
+// Test Suite 9: Path Resolution with S3/OSS URIs
+// =============================================================================
+
+class IcebergPathResolutionTest : public ::testing::Test {
+ protected:
+  // Helper: same logic as stripS3Scheme in iceberg_read_function.cpp
+  static std::string stripS3Scheme(const std::string& path) {
+    if (path.size() > 5 && path.substr(0, 5) == "s3://") return path.substr(5);
+    if (path.size() > 6 && path.substr(0, 6) == "oss://") return path.substr(6);
+    return path;
+  }
+};
+
+TEST_F(IcebergPathResolutionTest, StripS3Scheme) {
+  EXPECT_EQ(stripS3Scheme("s3://bucket/key/file.parquet"),
+            "bucket/key/file.parquet");
+  EXPECT_EQ(stripS3Scheme("oss://bucket/key/file.parquet"),
+            "bucket/key/file.parquet");
+  EXPECT_EQ(stripS3Scheme("/local/path/file.parquet"),
+            "/local/path/file.parquet");
+  EXPECT_EQ(stripS3Scheme("relative/path/file.parquet"),
+            "relative/path/file.parquet");
+  EXPECT_EQ(stripS3Scheme("file.parquet"), "file.parquet");
+}
+
+TEST_F(IcebergPathResolutionTest, ResolveDataFileWithS3TablePath) {
+  // When table_path is "s3://bucket/table" and data_file is relative
+  // "data/file.parquet", the resolved path should be
+  // "s3://bucket/table/data/file.parquet".
+  // stripS3Scheme should convert it to "bucket/table/data/file.parquet".
+  std::string table_path = "s3://my-bucket/warehouse/db/table";
+  std::string relative_path = "data/00001-data.parquet";
+  std::string resolved = table_path + "/" + relative_path;
+  EXPECT_EQ(resolved,
+            "s3://my-bucket/warehouse/db/table/data/00001-data.parquet");
+  EXPECT_EQ(stripS3Scheme(resolved),
+            "my-bucket/warehouse/db/table/data/00001-data.parquet");
+}
+
+TEST_F(IcebergPathResolutionTest, ResolveDataFileWithOSSTablePath) {
+  std::string table_path = "oss://graphscope/neug/test_data/iceberg/partitioned";
+  std::string relative_path = "data/00000-0-data-A1.parquet";
+  std::string resolved = table_path + "/" + relative_path;
+  EXPECT_EQ(resolved,
+            "oss://graphscope/neug/test_data/iceberg/partitioned/"
+            "data/00000-0-data-A1.parquet");
+  EXPECT_EQ(stripS3Scheme(resolved),
+            "graphscope/neug/test_data/iceberg/partitioned/"
+            "data/00000-0-data-A1.parquet");
+}
+
+TEST_F(IcebergPathResolutionTest, LocalPathUnchanged) {
+  std::string table_path = "/tmp/iceberg_table";
+  std::string relative_path = "data/00001-data.parquet";
+  std::string resolved = table_path + "/" + relative_path;
+  EXPECT_EQ(resolved, "/tmp/iceberg_table/data/00001-data.parquet");
+  EXPECT_EQ(stripS3Scheme(resolved),
+            "/tmp/iceberg_table/data/00001-data.parquet");
+}
+
+TEST_F(IcebergPathResolutionTest, AbsoluteDataFilePathNotResolved) {
+  // If data_file.file_path is already an absolute S3 URI, the resolution
+  // in iceberg_snapshot.cpp skips it (find("://") != npos).
+  // But stripS3Scheme still strips the prefix.
+  std::string absolute_path =
+      "s3://my-bucket/warehouse/db/table/data/00001.parquet";
+  EXPECT_EQ(stripS3Scheme(absolute_path),
+            "my-bucket/warehouse/db/table/data/00001.parquet");
+}
+
 }  // namespace test
 }  // namespace neug

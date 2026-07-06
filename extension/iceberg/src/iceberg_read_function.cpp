@@ -31,6 +31,16 @@
 namespace neug {
 namespace function {
 
+// Strip s3:// or oss:// URI scheme prefix, returning the "bucket/key" format
+// that Arrow's S3FileSystem expects.  Local paths are returned unchanged.
+// This is needed because Arrow's Dataset API has internal code paths that
+// validate paths before reaching our S3FileSystemWrapper overrides.
+static std::string stripS3Scheme(const std::string& path) {
+  if (path.size() > 5 && path.substr(0, 5) == "s3://") return path.substr(5);
+  if (path.size() > 6 && path.substr(0, 6) == "oss://") return path.substr(6);
+  return path;
+}
+
 bool IcebergReadFunction::probe(const std::string& path,
                                 fsys::FileSystem* fs) {
   try {
@@ -67,11 +77,11 @@ std::shared_ptr<reader::EntrySchema> IcebergReadFunction::sniffFunc(
         "' has no data files. Cannot infer schema from empty table.");
   }
 
-  // Collect data file paths
+  // Collect data file paths (strip URI scheme for Arrow Dataset API compat)
   std::vector<std::string> data_file_paths;
   data_file_paths.reserve(resolved.data_files.size());
   for (const auto& df : resolved.data_files) {
-    data_file_paths.push_back(df.file_path);
+    data_file_paths.push_back(stripS3Scheme(df.file_path));
   }
 
   // Set up ReadSharedState pointing at the Parquet data files
@@ -167,7 +177,7 @@ execution::Context IcebergReadFunction::execFunc(
   std::vector<std::string> data_file_paths;
   data_file_paths.reserve(resolved.data_files.size());
   for (const auto& df : resolved.data_files) {
-    data_file_paths.push_back(df.file_path);
+    data_file_paths.push_back(stripS3Scheme(df.file_path));
   }
 
   // Update state to point at the resolved Parquet data files
@@ -204,11 +214,12 @@ execution::Context IcebergReadFunction::execWithDeletes(
   bool first_file = true;
 
   for (const auto& data_file : resolved.data_files) {
+    std::string arrow_path = stripS3Scheme(data_file.file_path);
     // Read this single data file as an Arrow Table
-    auto file_result = arrow_fs->OpenInputFile(data_file.file_path);
+    auto file_result = arrow_fs->OpenInputFile(arrow_path);
     if (!file_result.ok()) {
       THROW_IO_EXCEPTION("[iceberg] Failed to open data file '" +
-                         data_file.file_path +
+                         arrow_path +
                          "': " + file_result.status().ToString());
     }
 
