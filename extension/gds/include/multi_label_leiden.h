@@ -16,22 +16,24 @@
 
 #pragma once
 
-#include <vector>
-
 #include "neug/compiler/function/gds/gds_algo_function.h"
-
-#include "bfs.h"
-#include "cdlp.h"
-#include "kcore.h"
-#include "lcc.h"
-#include "leiden.h"
-#include "louvain.h"
-#include "multi_label_leiden.h"
-#include "multi_label_louvain.h"
-#include "page_rank.h"
-#include "sssp.h"
-#include "wcc.h"
+#include "neug/compiler/function/neug_call_function.h"
 
 namespace neug {
-namespace gds {}  // namespace gds
+namespace gds {
+
+struct NEUG_API MultiLabelLeidenFunction {
+  static constexpr const char* name = "multi_label_leiden";
+
+  static std::unique_ptr<function::CallFuncInputBase> bind(
+      const Schema& schema, const execution::ContextMeta& ctx_meta,
+      const ::physical::PhysicalPlan& plan, int op_idx);
+
+  static execution::Context exec(const function::CallFuncInputBase& input_base,
+                                 neug::IStorageInterface& g);
+
+  static function::function_set getFunctionSet();
+};
+
+}  // namespace gds
 }  // namespace neug

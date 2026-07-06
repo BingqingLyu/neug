@@ -936,3 +936,312 @@ class TestCrossValidationTinysnb:
                 ), "Unreachable node {} should have distance -1," " got {}".format(
                     node_id, dist
                 )
+
+
+# ─── Multi-Label Leiden / Louvain ────────────────────────────────────────────
+
+
+@contextmanager
+def multi_edge_connection(tmp_path):
+    """Open DB with tinysnb loaded and a multi-edge projected graph
+    (single vertex label 'person', two edge labels 'knows' + 'meets')."""
+    db_dir = tmp_path / "gds_multi_edge_db"
+    db = Database(db_path=str(db_dir), mode="w")
+    db.load_builtin_dataset("tinysnb")
+    conn = db.connect()
+    try:
+        conn.execute(
+            "CALL project_graph("
+            "'person_multi', "
+            "['person'], "
+            "{'[person, knows, person]': '', '[person, meets, person]': ''}"
+            ");"
+        )
+        conn.execute("LOAD gds;")
+        yield conn
+    finally:
+        conn.close()
+        db.close()
+
+
+def test_multi_label_leiden_basic(tmp_path):
+    """multi_label_leiden on a single-label graph (backward compat)."""
+    with tinysnb_simple_connection(tmp_path) as conn:
+        rows = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('person_knows', {concurrency: 4})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows) > 0, "multi_label_leiden must return at least one row"
+        for row in rows:
+            assert len(row) == 2, "each row should have (node_id, community)"
+            assert isinstance(row[1], int), "community should be an integer"
+
+
+def test_multi_label_louvain_basic(tmp_path):
+    """multi_label_louvain on a single-label graph (backward compat)."""
+    with tinysnb_simple_connection(tmp_path) as conn:
+        rows = list(
+            conn.execute(
+                """
+                CALL multi_label_louvain('person_knows', {concurrency: 4})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows) > 0, "multi_label_louvain must return at least one row"
+        for row in rows:
+            assert len(row) == 2
+            assert isinstance(row[1], int)
+
+
+def test_multi_label_leiden_multi_edge(tmp_path):
+    """multi_label_leiden on a graph with two edge types (knows + meets)."""
+    with multi_edge_connection(tmp_path) as conn:
+        rows = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('person_multi', {concurrency: 4})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows) > 0, "multi_label_leiden must return results"
+        communities = {row[1] for row in rows}
+        assert len(communities) >= 1, "should detect at least one community"
+
+
+def test_multi_label_leiden_deterministic(tmp_path):
+    """Running multi_label_leiden twice with same data gives same result."""
+    with multi_edge_connection(tmp_path) as conn:
+        rows1 = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('person_multi', {concurrency: 1})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        rows2 = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('person_multi', {concurrency: 1})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        # Sort by node id for comparison
+        rows1.sort(key=lambda r: r[0])
+        rows2.sort(key=lambda r: r[0])
+        assert rows1 == rows2, "Same input with fixed seed should give same output"
+
+
+def test_multi_label_leiden_incremental(tmp_path):
+    """Incremental scenario: run twice, second time with initial_community_property."""
+    db_dir = tmp_path / "gds_incremental_db"
+    db = Database(db_path=str(db_dir), mode="w")
+    db.load_builtin_dataset("tinysnb")
+    conn = db.connect()
+    try:
+        conn.execute("LOAD gds;")
+
+        # Project and run first time
+        conn.execute(
+            "CALL project_graph("
+            "'g1', "
+            "['person'], "
+            "{'[person, knows, person]': ''}"
+            ");"
+        )
+
+        rows_r1 = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('g1', {concurrency: 1})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows_r1) > 0, "First run should produce results"
+        r1_map = {row[0]: row[1] for row in rows_r1}
+
+        # Run second time with same data (no initial_community_property)
+        # Results should be identical due to fixed seed
+        rows_r2 = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('g1', {concurrency: 1})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        r2_map = {row[0]: row[1] for row in rows_r2}
+        assert r1_map == r2_map, "Deterministic: same data should yield same result"
+
+    finally:
+        conn.close()
+        db.close()
+
+
+def test_multi_label_leiden_incremental_with_writeback(tmp_path):
+    """Incremental Leiden stability: run once, write back communities, run again
+    with initial_community_property, verify results are identical."""
+    db_dir = tmp_path / "gds_leiden_wb_db"
+    db = Database(db_path=str(db_dir), mode="w")
+    db.load_builtin_dataset("tinysnb")
+    conn = db.connect()
+    try:
+        conn.execute("LOAD gds;")
+
+        # Step 1: Add a community property column to person table
+        conn.execute("ALTER TABLE person ADD leiden_comm INT64;")
+
+        # Step 2: Project graph
+        conn.execute(
+            "CALL project_graph("
+            "'g_leiden', "
+            "['person'], "
+            "{'[person, knows, person]': ''}"
+            ");"
+        )
+
+        # Step 3: First run - get initial communities
+        rows_r1 = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('g_leiden', {concurrency: 1})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows_r1) > 0, "First run should produce results"
+        r1_map = {row[0]: row[1] for row in rows_r1}
+
+        # Step 4: Write back communities to vertex property via SET
+        for node_id, comm in r1_map.items():
+            conn.execute(
+                f"MATCH (n:person) WHERE n.id = {node_id} SET n.leiden_comm = {comm};"
+            )
+
+        # Step 5: Drop and re-project graph to pick up updated properties
+        conn.execute("CALL drop_projected_graph('g_leiden');")
+        conn.execute(
+            "CALL project_graph("
+            "'g_leiden', "
+            "['person'], "
+            "{'[person, knows, person]': ''}"
+            ");"
+        )
+
+        # Step 6: Second run with initial_community_property
+        rows_r2 = list(
+            conn.execute(
+                """
+                CALL multi_label_leiden('g_leiden',
+                    {concurrency: 1, initial_community_property: 'leiden_comm'})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows_r2) > 0, "Second run should produce results"
+        r2_map = {row[0]: row[1] for row in rows_r2}
+
+        # Step 7: Verify stability - communities should be identical
+        assert r1_map == r2_map, (
+            f"Incremental Leiden should be stable when data is unchanged.\n"
+            f"First run:  {r1_map}\n"
+            f"Second run: {r2_map}"
+        )
+
+    finally:
+        conn.close()
+        db.close()
+
+
+def test_multi_label_louvain_incremental_with_writeback(tmp_path):
+    """Incremental Louvain stability: run once, write back communities, run again
+    with initial_community_property, verify results are identical."""
+    db_dir = tmp_path / "gds_louvain_wb_db"
+    db = Database(db_path=str(db_dir), mode="w")
+    db.load_builtin_dataset("tinysnb")
+    conn = db.connect()
+    try:
+        conn.execute("LOAD gds;")
+
+        # Step 1: Add a community property column to person table
+        conn.execute("ALTER TABLE person ADD louvain_comm INT64;")
+
+        # Step 2: Project graph
+        conn.execute(
+            "CALL project_graph("
+            "'g_louvain', "
+            "['person'], "
+            "{'[person, knows, person]': ''}"
+            ");"
+        )
+
+        # Step 3: First run - get initial communities
+        rows_r1 = list(
+            conn.execute(
+                """
+                CALL multi_label_louvain('g_louvain', {concurrency: 1})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows_r1) > 0, "First run should produce results"
+        r1_map = {row[0]: row[1] for row in rows_r1}
+
+        # Step 4: Write back communities to vertex property via SET
+        for node_id, comm in r1_map.items():
+            conn.execute(
+                f"MATCH (n:person) WHERE n.id = {node_id} SET n.louvain_comm = {comm};"
+            )
+
+        # Step 5: Drop and re-project graph to pick up updated properties
+        conn.execute("CALL drop_projected_graph('g_louvain');")
+        conn.execute(
+            "CALL project_graph("
+            "'g_louvain', "
+            "['person'], "
+            "{'[person, knows, person]': ''}"
+            ");"
+        )
+
+        # Step 6: Second run with initial_community_property
+        rows_r2 = list(
+            conn.execute(
+                """
+                CALL multi_label_louvain('g_louvain',
+                    {concurrency: 1, initial_community_property: 'louvain_comm'})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        assert len(rows_r2) > 0, "Second run should produce results"
+        r2_map = {row[0]: row[1] for row in rows_r2}
+
+        # Step 7: Verify stability - communities should be identical
+        assert r1_map == r2_map, (
+            f"Incremental Louvain should be stable when data is unchanged.\n"
+            f"First run:  {r1_map}\n"
+            f"Second run: {r2_map}"
+        )
+
+    finally:
+        conn.close()
+        db.close()

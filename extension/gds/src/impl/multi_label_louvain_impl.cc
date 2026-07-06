@@ -1,0 +1,108 @@
+#include "impl/multi_label_louvain_impl.h"
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <random>
+#include <unordered_map>
+#include "neug/execution/common/columns/value_columns.h"
+#include "neug/execution/common/columns/vertex_columns.h"
+#include "utils/parallel_utils.h"
+namespace neug { namespace gds { namespace community {
+MultiLabelLouvain::MultiLabelLouvain(
+    const StorageReadInterface& graph, std::vector<label_t> vertex_labels,
+    std::vector<execution::LabelTriplet> edge_triplets, double resolution,
+    double threshold, int concurrency, const std::string& initial_community_property)
+    : graph_(graph), vertex_labels_(std::move(vertex_labels)),
+      edge_triplets_(std::move(edge_triplets)), resolution_(resolution),
+      threshold_(threshold), concurrency_(concurrency),
+      initial_community_property_(initial_community_property) {
+  for (size_t i = 0; i < vertex_labels_.size(); ++i) label_to_index_[vertex_labels_[i]] = i;
+  label_base_offsets_.resize(vertex_labels_.size(), 0);
+  label_local_sizes_.resize(vertex_labels_.size(), 0);
+  size_t total_array_size = 0;
+  for (size_t li = 0; li < vertex_labels_.size(); ++li) {
+    label_base_offsets_[li] = total_array_size;
+    const auto& vs = graph_.GetVertexSet(vertex_labels_[li]);
+    vid_t max_vid = 0; for (const auto& v : vs) { if (v > max_vid) max_vid = v; }
+    label_local_sizes_[li] = (vs.size() > 0) ? (static_cast<size_t>(max_vid) + 1) : 0;
+    total_array_size += label_local_sizes_[li];
+  }
+  array_size_ = total_array_size;
+  global_to_label_.resize(array_size_, 0); global_to_vid_.resize(array_size_, 0);
+  for (size_t li = 0; li < vertex_labels_.size(); ++li) {
+    const auto& vs = graph_.GetVertexSet(vertex_labels_[li]); size_t base = label_base_offsets_[li];
+    for (const auto& v : vs) { uint32_t gid = static_cast<uint32_t>(base+v); valid_vertices_.push_back(gid); global_to_label_[gid] = vertex_labels_[li]; global_to_vid_[gid] = v; }
+  }
+  vertex_count_ = valid_vertices_.size();
+  community_ = std::make_unique<uint32_t[]>(array_size_);
+  degree_ = std::make_unique<double[]>(array_size_);
+  stot_ = std::make_unique<double[]>(array_size_);
+  num_threads_ = concurrency_ > 0 ? concurrency_ : static_cast<int>(std::thread::hardware_concurrency());
+  if (num_threads_ < 1) num_threads_ = 1;
+  size_t total_scratch = static_cast<size_t>(num_threads_) * array_size_;
+  thread_comm_weight_ = std::make_unique<double[]>(total_scratch);
+  thread_gen_ = std::make_unique<uint32_t[]>(total_scratch);
+  std::fill_n(thread_comm_weight_.get(), total_scratch, 0.0);
+  std::fill_n(thread_gen_.get(), total_scratch, 0);
+  if (!initial_community_property_.empty()) {
+    for (size_t li = 0; li < vertex_labels_.size(); ++li) {
+      label_t label = vertex_labels_[li];
+      auto prop_col = graph_.GetVertexPropColumn(label, initial_community_property_);
+      const auto& vs = graph_.GetVertexSet(label); size_t base = label_base_offsets_[li];
+      for (const auto& v : vs) { uint32_t gid = static_cast<uint32_t>(base+v);
+        if (prop_col) { auto val = prop_col->get_any(v); if (!val.IsNull()) community_[gid] = static_cast<uint32_t>(val.GetValue<int64_t>()); else community_[gid] = gid; } else community_[gid] = gid;
+        stot_[gid] = 0; degree_[gid] = 0; }
+    }
+  } else { for (uint32_t gid : valid_vertices_) { community_[gid] = gid; stot_[gid] = 0; degree_[gid] = 0; } }
+  label_out_triplets_.resize(vertex_labels_.size()); label_in_triplets_.resize(vertex_labels_.size());
+  for (size_t ti = 0; ti < edge_triplets_.size(); ++ti) {
+    auto si = label_to_index_.find(edge_triplets_[ti].src_label); auto di = label_to_index_.find(edge_triplets_[ti].dst_label);
+    if (si != label_to_index_.end()) label_out_triplets_[si->second].push_back(ti);
+    if (di != label_to_index_.end()) label_in_triplets_[di->second].push_back(ti);
+  }
+}
+void MultiLabelLouvain::compute() {
+  for (uint32_t gid : valid_vertices_) { size_t li = label_to_index_[global_to_label_[gid]]; vid_t lv = global_to_vid_[gid]; double deg = 0;
+    for (size_t ti : label_out_triplets_[li]) { const auto& t = edge_triplets_[ti]; auto v = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label); auto e = v.get_edges(lv); for (auto it = e.begin(); it != e.end(); ++it) deg += 1.0; }
+    for (size_t ti : label_in_triplets_[li]) { const auto& t = edge_triplets_[ti]; auto v = graph_.GetGenericIncomingGraphView(t.dst_label, t.src_label, t.edge_label); auto e = v.get_edges(lv); for (auto it = e.begin(); it != e.end(); ++it) deg += 1.0; }
+    degree_[gid] = deg; }
+  m_ = 0;
+  for (uint32_t gid : valid_vertices_) { size_t li = label_to_index_[global_to_label_[gid]]; vid_t lv = global_to_vid_[gid];
+    for (size_t ti : label_out_triplets_[li]) { const auto& t = edge_triplets_[ti]; auto v = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label); auto e = v.get_edges(lv); for (auto it = e.begin(); it != e.end(); ++it) m_ += 1.0; } }
+  if (m_ == 0) { modularity_ = 0; return; }
+  for (uint32_t gid : valid_vertices_) stot_[community_[gid]] += degree_[gid];
+  double prev_mod = -1.0;
+  for (int level = 0; level < 100; ++level) { bool improved = one_level(); if (!improved) break;
+    double new_mod = 0;
+    for (uint32_t gid : valid_vertices_) { size_t li = label_to_index_[global_to_label_[gid]]; vid_t lv = global_to_vid_[gid];
+      for (size_t ti : label_out_triplets_[li]) { const auto& t = edge_triplets_[ti]; auto ov = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label); auto di = label_to_index_.find(t.dst_label); if (di == label_to_index_.end()) continue; size_t db = label_base_offsets_[di->second]; auto oes = ov.get_edges(lv); for (auto it = oes.begin(); it != oes.end(); ++it) { uint32_t ug = static_cast<uint32_t>(db+(*it)); if (community_[gid] == community_[ug]) new_mod += 1.0/(2.0*m_) - degree_[gid]*degree_[ug]/(4.0*m_*m_); } } }
+    modularity_ = new_mod; if (prev_mod >= 0 && std::abs(modularity_ - prev_mod) < threshold_) break; prev_mod = modularity_; }
+}
+bool MultiLabelLouvain::one_level() {
+  std::vector<uint32_t> order = valid_vertices_; std::mt19937 rng(42); std::shuffle(order.begin(), order.end(), rng);
+  bool improved = false; const size_t n = order.size(), chunk = 4096, num_batches = (n+chunk-1)/chunk; const int nt = num_threads_;
+  std::vector<uint32_t> best_com(n); std::vector<std::vector<uint32_t>> touched(nt); for (int t = 0; t < nt; ++t) touched[t].reserve(256);
+  for (int pass = 0; pass < 10; ++pass) { bool moved = false;
+    for (size_t batch = 0; batch < num_batches; ++batch) { size_t bs = batch*chunk, be = std::min(bs+chunk, n);
+      { std::atomic<size_t> cursor(bs); std::vector<std::thread> threads; threads.reserve(nt-1);
+        auto worker = [&](int tid) { uint32_t* mg = thread_gen_.get()+static_cast<size_t>(tid)*array_size_; double* mc = thread_comm_weight_.get()+static_cast<size_t>(tid)*array_size_; uint32_t gv = 0; auto& mt = touched[tid];
+          while (true) { size_t s = cursor.fetch_add(64); if (s >= be) break; size_t e = std::min(s+size_t(64), be);
+            for (size_t i = s; i < e; ++i) { uint32_t ug = order[i]; uint32_t cc = community_[ug]; double du = degree_[ug]; size_t ul = label_to_index_[global_to_label_[ug]]; vid_t uv = global_to_vid_[ug]; ++gv; mt.clear();
+              auto pn = [&](uint32_t vg) { if (vg == ug) return; uint32_t cm = community_[vg]; if (mg[cm] != gv) { mg[cm] = gv; mc[cm] = 0.0; mt.push_back(cm); } mc[cm] += 1.0; };
+              for (size_t ti : label_out_triplets_[ul]) { const auto& t = edge_triplets_[ti]; auto ov = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label); auto di = label_to_index_.find(t.dst_label); if (di == label_to_index_.end()) continue; size_t db = label_base_offsets_[di->second]; auto oes = ov.get_edges(uv); for (auto it = oes.begin(); it != oes.end(); ++it) pn(static_cast<uint32_t>(db+(*it))); }
+              for (size_t ti : label_in_triplets_[ul]) { const auto& t = edge_triplets_[ti]; auto iv = graph_.GetGenericIncomingGraphView(t.dst_label, t.src_label, t.edge_label); auto si = label_to_index_.find(t.src_label); if (si == label_to_index_.end()) continue; size_t sb = label_base_offsets_[si->second]; auto ies = iv.get_edges(uv); for (auto it = ies.begin(); it != ies.end(); ++it) pn(static_cast<uint32_t>(sb+(*it))); }
+              double ws = (mg[cc] == gv) ? mc[cc] : 0.0; double sm = stot_[cc] - du; uint32_t best = cc; double bg = 0.0;
+              for (uint32_t cm : mt) { if (cm == cc) continue; double wc = mc[cm]; double g = (wc-ws)/m_ - resolution_*stot_[cm]*du/(2.0*m_*m_) + resolution_*sm*du/(2.0*m_*m_); if (g > bg) { bg = g; best = cm; } }
+              best_com[i] = best; } } };
+        for (int t = 1; t < nt; ++t) threads.emplace_back(worker, t); worker(0); for (auto& th : threads) th.join(); }
+      for (size_t i = bs; i < be; ++i) { uint32_t ug = order[i], cc = community_[ug], nc = best_com[i]; if (nc != cc) { stot_[cc] -= degree_[ug]; stot_[nc] += degree_[ug]; community_[ug] = nc; moved = true; improved = true; } }
+    } if (!moved) break; } return improved; }
+void MultiLabelLouvain::sink(execution::Context& ctx, int node_alias, int community_alias) {
+  std::unordered_map<uint32_t,uint32_t> cr; uint32_t ni = 0;
+  for (uint32_t gid : valid_vertices_) { uint32_t c = community_[gid]; if (cr.find(c) == cr.end()) cr[c] = ni++; }
+  for (size_t li = 0; li < vertex_labels_.size(); ++li) { label_t label = vertex_labels_[li]; size_t base = label_base_offsets_[li]; const auto& vs = graph_.GetVertexSet(label);
+    execution::MSVertexColumnBuilder b(label); execution::ValueColumnBuilder<int64_t> cb; size_t cnt = 0; for (const auto& v : vs) { (void)v; cnt++; } b.reserve(cnt); cb.reserve(cnt);
+    for (const auto& v : vs) { uint32_t gid = static_cast<uint32_t>(base+v); b.push_back_opt(v); cb.push_back_opt(static_cast<int64_t>(cr[community_[gid]])); }
+    execution::ContextChunk chunk; chunk.set(node_alias, b.finish()); chunk.set(community_alias, cb.finish()); ctx.append_chunk(std::move(chunk)); }
+}
+}}}  // namespace neug::gds::community
