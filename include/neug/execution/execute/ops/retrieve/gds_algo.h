@@ -32,7 +32,8 @@ class GDSAlgoOpr : public IOperator {
              function::GDSAlgoFunction* algo_func,
              std::vector<label_t> vertex_labels = {},
              std::vector<execution::LabelTriplet> edge_triplets = {},
-             bool is_multi_label = false);
+             bool is_multi_label = false,
+             std::vector<int> output_aliases = {});
 
   ~GDSAlgoOpr() override = default;
 
@@ -49,6 +50,7 @@ class GDSAlgoOpr : public IOperator {
   std::vector<label_t> vertex_labels_;
   std::vector<execution::LabelTriplet> edge_triplets_;
   bool is_multi_label_ = false;
+  std::vector<int> output_aliases_;
 };
 
 class GDSAlgoOprBuilder : public IOperatorBuilder {

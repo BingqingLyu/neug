@@ -31,12 +31,14 @@ GDSAlgoOpr::GDSAlgoOpr(std::unique_ptr<function::CallFuncInputBase> algo_input,
                        function::GDSAlgoFunction* algo_func,
                        std::vector<label_t> vertex_labels,
                        std::vector<execution::LabelTriplet> edge_triplets,
-                       bool is_multi_label)
+                       bool is_multi_label,
+                       std::vector<int> output_aliases)
     : algo_input_(std::move(algo_input)),
       algo_func_(algo_func),
       vertex_labels_(std::move(vertex_labels)),
       edge_triplets_(std::move(edge_triplets)),
-      is_multi_label_(is_multi_label) {}
+      is_multi_label_(is_multi_label),
+      output_aliases_(std::move(output_aliases)) {}
 
 neug::result<neug::execution::Context> GDSAlgoOpr::Eval(
     IStorageInterface& graph_interface, const ParamsMap& params,
@@ -63,11 +65,11 @@ neug::result<neug::execution::Context> GDSAlgoOpr::Eval(
     // Unmap global vids back to (label, local_vid) in vertex columns.
     const auto& offset_table = merged.offset_table();
     execution::Context unmapped_ctx;
-    unmapped_ctx.tag_ids = result.tag_ids;
+    unmapped_ctx.tag_ids = output_aliases_;
     for (size_t ci = 0; ci < result.chunk_num(); ++ci) {
       auto& chunk = result.chunk(ci);
       execution::ContextChunk new_chunk;
-      for (int tag : result.tag_ids) {
+      for (int tag : output_aliases_) {
         auto col = chunk.get(tag);
         if (col && col->column_type() == execution::ContextColumnType::kVertex) {
           // Rebuild vertex column with correct (label, local_vid).
@@ -137,14 +139,17 @@ neug::result<OpBuildResultT> GDSAlgoOprBuilder::Build(
   }
 
   ContextMeta ret_meta = ctx_meta;
+  std::vector<int> output_aliases;
   for (int i = 0; i < plan.plan(op_idx).meta_data_size(); ++i) {
     const auto& meta = plan.plan(op_idx).meta_data(i);
     ret_meta.set(meta.alias(), parse_from_ir_data_type(meta.type()));
+    output_aliases.push_back(meta.alias());
   }
   return std::make_pair(
       std::make_unique<GDSAlgoOpr>(std::move(algo_input), algo_func,
                                    std::move(vertex_labels),
-                                   std::move(edge_triplets), is_multi_label),
+                                   std::move(edge_triplets), is_multi_label,
+                                   std::move(output_aliases)),
       ret_meta);
 }
 

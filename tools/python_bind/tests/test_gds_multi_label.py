@@ -162,24 +162,15 @@ def test_wcc_single_label_still_works(tmp_path):
 def test_reject_heterogeneous_subgraph(tmp_path):
     """Reject subgraph where edge endpoints are not in vertex label set."""
     with multi_label_connection(tmp_path) as conn:
-        conn.execute(
-            "CALL project_graph("
-            "'bad_g', "
-            "['person'], "
-            "{'[person, workAt, organisation]': ''}"
-            ");"
-        )
         with pytest.raises(Exception) as exc_info:
             conn.execute(
-                """
-                CALL wcc('bad_g', {concurrency: 1})
-                YIELD node, comp
-                RETURN node, comp;
-                """
+                "CALL project_graph("
+                "'bad_g', "
+                "['person'], "
+                "{'[person, workAt, organisation]': ''}"
+                ");"
             )
-        assert "not in the declared vertex label set" in str(exc_info.value) or \
-               "Invalid subgraph" in str(exc_info.value) or \
-               "not projected" in str(exc_info.value)
+        assert "not projected" in str(exc_info.value)
 
 
 def test_reject_predicate_in_multi_label(tmp_path):
