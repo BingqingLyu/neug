@@ -16,7 +16,7 @@
 
 #include "leiden.h"
 
-#include "impl/multi_label_leiden_impl.h"
+#include "impl/leiden_impl.h"
 #include "utils/option_utils.h"
 #include "utils/subgraph_utils.h"
 
@@ -117,7 +117,7 @@ execution::Context LeidenFunction::exec(
 
   // directed is accepted for interface compatibility but ignored (same as
   // the original leiden implementation).
-  community::MultiLabelLeiden leiden(
+  community::Leiden leiden(
       graph, input.vertex_labels, input.edge_triplets, input.resolution,
       input.threshold, input.concurrency, input.initial_community_property);
   leiden.compute();

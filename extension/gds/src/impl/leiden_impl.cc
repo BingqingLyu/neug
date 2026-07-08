@@ -1,4 +1,4 @@
-#include "impl/multi_label_leiden_impl.h"
+#include "impl/leiden_impl.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -10,7 +10,7 @@
 #include "neug/execution/common/columns/vertex_columns.h"
 #include "utils/parallel_utils.h"
 namespace neug { namespace gds { namespace community {
-MultiLabelLeiden::MultiLabelLeiden(
+Leiden::Leiden(
     const StorageReadInterface& graph, std::vector<label_t> vertex_labels,
     std::vector<execution::LabelTriplet> edge_triplets, double resolution,
     double threshold, int concurrency,
@@ -99,7 +99,7 @@ MultiLabelLeiden::MultiLabelLeiden(
     simple_edge_label_ = edge_triplets_[0].edge_label;
   }
 }
-void MultiLabelLeiden::compute() {
+void Leiden::compute() {
   if (is_simple_graph_) {
     // Fast path: single label + single triplet - parallel preprocessing
     auto oe_view = graph_.GetGenericOutgoingGraphView(
@@ -206,7 +206,7 @@ void MultiLabelLeiden::compute() {
     }
   }
 }
-bool MultiLabelLeiden::local_moving_phase() {
+bool Leiden::local_moving_phase() {
   std::vector<uint32_t> order = valid_vertices_;
   std::mt19937 rng(42); std::shuffle(order.begin(), order.end(), rng);
   bool improved = false;
@@ -327,7 +327,7 @@ bool MultiLabelLeiden::local_moving_phase() {
   }
   return improved;
 }
-void MultiLabelLeiden::refine() {
+void Leiden::refine() {
   std::vector<std::pair<uint32_t,uint32_t>> com_vertex_pairs;
   com_vertex_pairs.reserve(valid_vertices_.size());
   for (uint32_t gid : valid_vertices_) com_vertex_pairs.emplace_back(community_[gid], gid);
@@ -435,7 +435,7 @@ void MultiLabelLeiden::refine() {
     worker(0); for (auto& th : threads) th.join();
   }
 }
-void MultiLabelLeiden::sink(execution::Context& ctx, int node_alias, int community_alias) {
+void Leiden::sink(execution::Context& ctx, int node_alias, int community_alias) {
   std::unordered_map<uint32_t,uint32_t> com_remap;
   if (initial_community_) {
     // Stable ID: inherit old community IDs via majority vote

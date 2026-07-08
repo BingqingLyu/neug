@@ -9,13 +9,13 @@
 #include "neug/storages/graph/graph_interface.h"
 #include "neug/utils/property/types.h"
 namespace neug { namespace gds { namespace community {
-class MultiLabelLouvain {
+class Louvain {
  public:
-  MultiLabelLouvain(const StorageReadInterface& graph,
-                    std::vector<label_t> vertex_labels,
-                    std::vector<execution::LabelTriplet> edge_triplets,
-                    double resolution, double threshold, int concurrency,
-                    const std::string& initial_community_property = "");
+  Louvain(const StorageReadInterface& graph,
+          std::vector<label_t> vertex_labels,
+          std::vector<execution::LabelTriplet> edge_triplets,
+          double resolution, double threshold, int concurrency,
+          const std::string& initial_community_property = "");
   void compute();
   void sink(execution::Context& ctx, int node_alias, int community_alias);
  private:

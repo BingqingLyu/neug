@@ -26,8 +26,6 @@
 #include "lcc.h"
 #include "leiden.h"
 #include "louvain.h"
-#include "multi_label_leiden.h"
-#include "multi_label_louvain.h"
 #include "page_rank.h"
 #include "sssp.h"
 #include "wcc.h"

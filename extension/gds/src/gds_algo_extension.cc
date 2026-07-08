@@ -44,12 +44,6 @@ void Init() {
         neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
     neug::extension::ExtensionAPI::registerFunction<neug::gds::LeidenFunction>(
         neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
-    neug::extension::ExtensionAPI::registerFunction<
-        neug::gds::MultiLabelLeidenFunction>(
-        neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
-    neug::extension::ExtensionAPI::registerFunction<
-        neug::gds::MultiLabelLouvainFunction>(
-        neug::catalog::CatalogEntryType::TABLE_FUNCTION_ENTRY);
 
     neug::extension::ExtensionAPI::registerExtension(
         neug::extension::ExtensionInfo{

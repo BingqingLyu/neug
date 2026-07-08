@@ -1,4 +1,4 @@
-#include "impl/multi_label_louvain_impl.h"
+#include "impl/louvain_impl.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -9,7 +9,7 @@
 #include "neug/execution/common/columns/vertex_columns.h"
 #include "utils/parallel_utils.h"
 namespace neug { namespace gds { namespace community {
-MultiLabelLouvain::MultiLabelLouvain(
+Louvain::Louvain(
     const StorageReadInterface& graph, std::vector<label_t> vertex_labels,
     std::vector<execution::LabelTriplet> edge_triplets, double resolution,
     double threshold, int concurrency, const std::string& initial_community_property)
@@ -73,7 +73,7 @@ MultiLabelLouvain::MultiLabelLouvain(
     simple_edge_label_ = edge_triplets_[0].edge_label;
   }
 }
-void MultiLabelLouvain::compute() {
+void Louvain::compute() {
   if (is_simple_graph_) {
     // Fast path: parallel preprocessing
     auto oe_view = graph_.GetGenericOutgoingGraphView(simple_vertex_label_, simple_vertex_label_, simple_edge_label_);
@@ -137,7 +137,7 @@ void MultiLabelLouvain::compute() {
       modularity_ = new_mod; if (prev_mod >= 0 && std::abs(modularity_ - prev_mod) < threshold_) break; prev_mod = modularity_; }
   }
 }
-bool MultiLabelLouvain::one_level() {
+bool Louvain::one_level() {
   std::vector<uint32_t> order = valid_vertices_; std::mt19937 rng(42); std::shuffle(order.begin(), order.end(), rng);
   bool improved = false; const size_t n = order.size(), chunk = 4096, num_batches = (n+chunk-1)/chunk; const int nt = num_threads_;
   std::vector<uint32_t> best_com(n); std::vector<std::vector<uint32_t>> touched(nt); for (int t = 0; t < nt; ++t) touched[t].reserve(256);
@@ -178,7 +178,7 @@ bool MultiLabelLouvain::one_level() {
   }
   return improved;
 }
-void MultiLabelLouvain::sink(execution::Context& ctx, int node_alias, int community_alias) {
+void Louvain::sink(execution::Context& ctx, int node_alias, int community_alias) {
   std::unordered_map<uint32_t,uint32_t> cr;
   if (initial_community_) {
     // Stable ID: inherit old community IDs via majority vote

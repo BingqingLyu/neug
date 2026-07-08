@@ -970,7 +970,7 @@ def test_multi_label_leiden_basic(tmp_path):
         rows = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('person_knows', {concurrency: 4})
+                CALL leiden('person_knows', {concurrency: 4})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -988,7 +988,7 @@ def test_multi_label_louvain_basic(tmp_path):
         rows = list(
             conn.execute(
                 """
-                CALL multi_label_louvain('person_knows', {concurrency: 4})
+                CALL louvain('person_knows', {concurrency: 4})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1006,7 +1006,7 @@ def test_multi_label_leiden_multi_edge(tmp_path):
         rows = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('person_multi', {concurrency: 4})
+                CALL leiden('person_multi', {concurrency: 4})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1023,7 +1023,7 @@ def test_multi_label_leiden_deterministic(tmp_path):
         rows1 = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('person_multi', {concurrency: 1})
+                CALL leiden('person_multi', {concurrency: 1})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1032,7 +1032,7 @@ def test_multi_label_leiden_deterministic(tmp_path):
         rows2 = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('person_multi', {concurrency: 1})
+                CALL leiden('person_multi', {concurrency: 1})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1065,7 +1065,7 @@ def test_multi_label_leiden_incremental(tmp_path):
         rows_r1 = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('g1', {concurrency: 1})
+                CALL leiden('g1', {concurrency: 1})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1079,7 +1079,7 @@ def test_multi_label_leiden_incremental(tmp_path):
         rows_r2 = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('g1', {concurrency: 1})
+                CALL leiden('g1', {concurrency: 1})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1119,7 +1119,7 @@ def test_multi_label_leiden_incremental_with_writeback(tmp_path):
         rows_r1 = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('g_leiden', {concurrency: 1})
+                CALL leiden('g_leiden', {concurrency: 1})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1148,7 +1148,7 @@ def test_multi_label_leiden_incremental_with_writeback(tmp_path):
         rows_r2 = list(
             conn.execute(
                 """
-                CALL multi_label_leiden('g_leiden',
+                CALL leiden('g_leiden',
                     {concurrency: 1, initial_community_property: 'leiden_comm'})
                 YIELD node, community
                 RETURN node.id, community;
@@ -1196,7 +1196,7 @@ def test_multi_label_louvain_incremental_with_writeback(tmp_path):
         rows_r1 = list(
             conn.execute(
                 """
-                CALL multi_label_louvain('g_louvain', {concurrency: 1})
+                CALL louvain('g_louvain', {concurrency: 1})
                 YIELD node, community
                 RETURN node.id, community;
                 """
@@ -1225,7 +1225,7 @@ def test_multi_label_louvain_incremental_with_writeback(tmp_path):
         rows_r2 = list(
             conn.execute(
                 """
-                CALL multi_label_louvain('g_louvain',
+                CALL louvain('g_louvain',
                     {concurrency: 1, initial_community_property: 'louvain_comm'})
                 YIELD node, community
                 RETURN node.id, community;

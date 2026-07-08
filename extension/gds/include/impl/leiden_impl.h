@@ -30,17 +30,17 @@ namespace neug {
 namespace gds {
 namespace community {
 
-/// Multi-label Leiden community detection.
+/// Leiden community detection.
 /// Supports multiple vertex labels and edge triplets (heterogeneous subgraphs).
 /// Optionally accepts initial community assignments from a vertex property
 /// for incremental/warm-start community detection.
-class MultiLabelLeiden {
+class Leiden {
  public:
-  MultiLabelLeiden(const StorageReadInterface& graph,
-                   std::vector<label_t> vertex_labels,
-                   std::vector<execution::LabelTriplet> edge_triplets,
-                   double resolution, double threshold, int concurrency,
-                   const std::string& initial_community_property = "");
+  Leiden(const StorageReadInterface& graph,
+         std::vector<label_t> vertex_labels,
+         std::vector<execution::LabelTriplet> edge_triplets,
+         double resolution, double threshold, int concurrency,
+         const std::string& initial_community_property = "");
 
   void compute();
 

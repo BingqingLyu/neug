@@ -16,7 +16,7 @@
 
 #include "louvain.h"
 
-#include "impl/multi_label_louvain_impl.h"
+#include "impl/louvain_impl.h"
 #include "utils/option_utils.h"
 #include "utils/subgraph_utils.h"
 
@@ -117,7 +117,7 @@ execution::Context LouvainFunction::exec(
 
   // directed is accepted for interface compatibility but ignored (same as
   // the original louvain implementation).
-  community::MultiLabelLouvain louvain(
+  community::Louvain louvain(
       graph, input.vertex_labels, input.edge_triplets, input.resolution,
       input.threshold, input.concurrency, input.initial_community_property);
   louvain.compute();
