@@ -108,9 +108,10 @@ Every algorithm returns a `node` column (the matched nodes) plus one or more
 result columns. The `node` column is of type `NODE`, so you can access node
 properties via `node.<property>` in the `RETURN` clause.
 
-> **Note:** Most algorithms (except Label Propagation) require a **homogeneous graph**
-> subgraph — exactly one node label and one edge triplet where the source and
-> destination labels match the node label.
+> **Note:** Most algorithms (except Label Propagation, Leiden, and Louvain) require
+> a **homogeneous graph** subgraph — exactly one node label and one edge triplet where
+> the source and destination labels match the node label. Leiden and Louvain support
+> multi-label graphs (multiple vertex labels and edge triplets).
 
 ---
 
@@ -412,7 +413,8 @@ RETURN node.id, node.fName, node.name, label;
 
 **Predicate support:** Both node and edge predicates are supported.
 
-**Note:** CDLP currently requires a homogeneous graph like other algorithms.
+**Note:** CDLP currently requires a homogeneous graph like most other algorithms
+(except Leiden and Louvain, which support multi-label graphs).
 Multi-label support is planned for a future release.
 
 ---
@@ -421,6 +423,9 @@ Multi-label support is planned for a future release.
 
 A community detection algorithm that optimizes modularity by iteratively moving
 nodes between communities and aggregating the graph into super-nodes.
+
+Louvain supports **multi-label graphs** — a projected graph with multiple vertex
+labels and multiple edge triplets is treated as one unified graph.
 
 ```cypher
 CALL louvain('<graph_name>', {<options>})
@@ -435,6 +440,7 @@ RETURN node, community;
 | `directed` | BOOL | `false` | Whether to treat the graph as directed |
 | `threshold` | DOUBLE | `1e-7` | Modularity gain threshold for convergence |
 | `concurrency` | INT | CPU cores | Number of threads for parallel execution |
+| `initial_community_property` | STRING | `""` | Vertex property name to seed community IDs for incremental/stable updates. When set, unchanged communities inherit their original IDs across runs. |
 
 **Output columns:**
 
@@ -443,10 +449,39 @@ RETURN node, community;
 | `node` | NODE | The node |
 | `community` | INT64 | Community ID (0-based) |
 
-**Example:**
+**Example (single-label):**
 
 ```cypher
 CALL louvain('social', {resolution: 1.0, concurrency: 8})
+RETURN node.fName, community
+ORDER BY community;
+```
+
+**Example (multi-label graph):**
+
+```cypher
+CALL project_graph(
+    'social_multi',
+    ['person', 'organisation'],
+    {'[person, knows, person]': '', '[person, studyat, organisation]': ''}
+);
+
+CALL louvain('social_multi', {concurrency: 8})
+RETURN node.fName, community
+ORDER BY community;
+```
+
+**Incremental warm-start:** To preserve community IDs across runs, write back the
+results and re-run with `initial_community_property`:
+
+```cypher
+-- First run
+CALL louvain('social', {concurrency: 8}) YIELD node, community
+RETURN node.id AS id, community;
+
+-- Write back community IDs to a vertex property (via SET)
+-- ... then re-project and re-run with warm-start
+CALL louvain('social', {initial_community_property: 'comm', concurrency: 8})
 RETURN node.fName, community
 ORDER BY community;
 ```
@@ -461,6 +496,9 @@ A community detection algorithm that improves upon Louvain by adding a refinemen
 phase. This refinement allows communities to be split during execution, leading
 to better detection of small communities and higher-quality partitions.
 
+Leiden supports **multi-label graphs** — a projected graph with multiple vertex
+labels and multiple edge triplets is treated as one unified graph.
+
 ```cypher
 CALL leiden('<graph_name>', {<options>})
 RETURN node, community;
@@ -474,6 +512,7 @@ RETURN node, community;
 | `directed` | BOOL | `false` | Whether to treat the graph as directed |
 | `threshold` | DOUBLE | `1e-7` | Modularity gain threshold for convergence |
 | `concurrency` | INT | CPU cores | Number of threads for parallel execution |
+| `initial_community_property` | STRING | `""` | Vertex property name to seed community IDs for incremental/stable updates. When set, unchanged communities inherit their original IDs across runs. |
 
 **Output columns:**
 
@@ -482,10 +521,39 @@ RETURN node, community;
 | `node` | NODE | The node |
 | `community` | INT64 | Community ID (0-based) |
 
-**Example:**
+**Example (single-label):**
 
 ```cypher
 CALL leiden('social', {resolution: 1.5, concurrency: 8})
+RETURN node.fName, community
+ORDER BY community;
+```
+
+**Example (multi-label graph):**
+
+```cypher
+CALL project_graph(
+    'social_multi',
+    ['person', 'organisation'],
+    {'[person, knows, person]': '', '[person, studyat, organisation]': ''}
+);
+
+CALL leiden('social_multi', {concurrency: 8})
+RETURN node.fName, community
+ORDER BY community;
+```
+
+**Incremental warm-start:** To preserve community IDs across runs, write back the
+results and re-run with `initial_community_property`:
+
+```cypher
+-- First run
+CALL leiden('social', {concurrency: 8}) YIELD node, community
+RETURN node.id AS id, community;
+
+-- Write back community IDs to a vertex property (via SET)
+-- ... then re-project and re-run with warm-start
+CALL leiden('social', {initial_community_property: 'comm', concurrency: 8})
 RETURN node.fName, community
 ORDER BY community;
 ```
@@ -564,8 +632,8 @@ RETURN distance, path;
 | LCC | `lcc` | `node`, `lcc` | `directed`, `degree_threshold` |
 | K-Core | `kcore` | `node`, `core` | `k` |
 | CDLP | `cdlp` | `node`, `label` | `max_iterations` |
-| Louvain | `louvain` | `node`, `community` | `resolution`, `directed`, `threshold`, `concurrency` |
-| Leiden | `leiden` | `node`, `community` | `resolution`, `directed`, `threshold`, `concurrency` |
+| Louvain | `louvain` | `node`, `community` | `resolution`, `directed`, `threshold`, `concurrency`, `initial_community_property` |
+| Leiden | `leiden` | `node`, `community` | `resolution`, `directed`, `threshold`, `concurrency`, `initial_community_property` |
 
 **Note:** The `path` column for BFS and SSSP is optional and only returned when explicitly YIELDed. See the individual algorithm sections for details.
 
@@ -579,9 +647,11 @@ threads used for parallel computation. The default depends on the algorithm:
 
 ## Limitations
 
-- All algorithms require a **homogeneous graph** subgraph (exactly one node
-  label and one edge triplet `[A, edge, A]`). Support for heterogeneous graphs
-  is planned for a future release.
+- Most algorithms require a **homogeneous graph** subgraph (exactly one node
+  label and one edge triplet `[A, edge, A]`). **Leiden and Louvain** are the
+  exception — they support multi-label graphs with multiple vertex labels and
+  edge triplets. Support for heterogeneous graphs in other algorithms is planned
+  for a future release.
 - Node and edge predicates are supported by all algorithms except Louvain and
   Leiden. 
 - CDLP does not actually support heterogeneous graphs yet — it only processes
