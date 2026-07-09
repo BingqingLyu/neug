@@ -110,8 +110,7 @@ properties via `node.<property>` in the `RETURN` clause.
 
 > **Note:** Most algorithms (except Label Propagation, Leiden, and Louvain) require
 > a **homogeneous graph** subgraph — exactly one node label and one edge triplet where
-> the source and destination labels match the node label. Leiden and Louvain support
-> multi-label graphs (multiple vertex labels and edge triplets).
+> the source and destination labels match the node label. 
 
 ---
 
@@ -413,8 +412,7 @@ RETURN node.id, node.fName, node.name, label;
 
 **Predicate support:** Both node and edge predicates are supported.
 
-**Note:** CDLP currently requires a homogeneous graph like most other algorithms
-(except Leiden and Louvain, which support multi-label graphs).
+**Note:** CDLP currently requires a homogeneous graph like most other algorithms.
 Multi-label support is planned for a future release.
 
 ---
@@ -475,12 +473,15 @@ ORDER BY community;
 results and re-run with `initial_community_property`:
 
 ```cypher
--- First run
-CALL louvain('social', {concurrency: 8}) YIELD node, community
-RETURN node.id AS id, community;
+-- 1. Add a property column to store community IDs
+ALTER TABLE person ADD COLUMN comm INT64 DEFAULT -1;
 
--- Write back community IDs to a vertex property (via SET)
--- ... then re-project and re-run with warm-start
+-- 2. First run: compute communities and write back to vertex property
+CALL louvain('social', {concurrency: 8}) YIELD node, community
+MATCH (n:person) WHERE n.id = node.id
+SET n.comm = community;
+
+-- 3. Re-run with warm-start using the written-back property
 CALL louvain('social', {initial_community_property: 'comm', concurrency: 8})
 RETURN node.fName, community
 ORDER BY community;
@@ -547,12 +548,15 @@ ORDER BY community;
 results and re-run with `initial_community_property`:
 
 ```cypher
--- First run
-CALL leiden('social', {concurrency: 8}) YIELD node, community
-RETURN node.id AS id, community;
+-- 1. Add a property column to store community IDs
+ALTER TABLE person ADD COLUMN comm INT64 DEFAULT -1;
 
--- Write back community IDs to a vertex property (via SET)
--- ... then re-project and re-run with warm-start
+-- 2. First run: compute communities and write back to vertex property
+CALL leiden('social', {concurrency: 8}) YIELD node, community
+MATCH (n:person) WHERE n.id = node.id
+SET n.comm = community;
+
+-- 3. Re-run with warm-start using the written-back property
 CALL leiden('social', {initial_community_property: 'comm', concurrency: 8})
 RETURN node.fName, community
 ORDER BY community;
