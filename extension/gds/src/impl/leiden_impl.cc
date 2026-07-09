@@ -1,3 +1,18 @@
+/** Copyright 2020 Alibaba Group Holding Limited.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * 	http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "impl/leiden_impl.h"
 #include <algorithm>
 #include <atomic>
@@ -36,6 +51,7 @@ Leiden::Leiden(
   array_size_ = total_array_size;
   global_to_label_.resize(array_size_, 0);
   global_to_vid_.resize(array_size_, 0);
+  global_to_label_idx_.resize(array_size_, 0);
   for (size_t li = 0; li < vertex_labels_.size(); ++li) {
     const auto& vertex_set = graph_.GetVertexSet(vertex_labels_[li]);
     size_t base = label_base_offsets_[li];
@@ -44,6 +60,7 @@ Leiden::Leiden(
       valid_vertices_.push_back(gid);
       global_to_label_[gid] = vertex_labels_[li];
       global_to_vid_[gid] = v;
+      global_to_label_idx_[gid] = li;
     }
   }
   vertex_count_ = valid_vertices_.size();
@@ -72,9 +89,15 @@ Leiden::Leiden(
         if (prop_col) {
           auto val = prop_col->get_any(v);
           if (!val.IsNull()) {
-            uint32_t cval = static_cast<uint32_t>(val.GetValue<int64_t>());
-            community_[gid] = cval;
-            initial_community_[gid] = cval;
+            int64_t raw = val.GetValue<int64_t>();
+            // Validate: community ID must be non-negative and within array bounds
+            if (raw >= 0 && static_cast<uint64_t>(raw) < array_size_) {
+              uint32_t cval = static_cast<uint32_t>(raw);
+              community_[gid] = cval;
+              initial_community_[gid] = cval;
+            } else {
+              community_[gid] = gid;  // fallback to singleton
+            }
           } else { community_[gid] = gid; }
         } else { community_[gid] = gid; }
         stot_[gid] = 0; degree_[gid] = 0;
@@ -92,8 +115,20 @@ Leiden::Leiden(
     if (src_it != label_to_index_.end()) label_out_triplets_[src_it->second].push_back(ti);
     if (dst_it != label_to_index_.end()) label_in_triplets_[dst_it->second].push_back(ti);
   }
-  // Detect simple graph for fast path
-  is_simple_graph_ = (vertex_labels_.size() == 1 && edge_triplets_.size() == 1);
+  // Pre-compute base offsets per triplet (avoids map lookup in hot loops)
+  triplet_src_base_.resize(edge_triplets_.size(), SIZE_MAX);
+  triplet_dst_base_.resize(edge_triplets_.size(), SIZE_MAX);
+  for (size_t ti = 0; ti < edge_triplets_.size(); ++ti) {
+    const auto& triplet = edge_triplets_[ti];
+    auto src_it = label_to_index_.find(triplet.src_label);
+    auto dst_it = label_to_index_.find(triplet.dst_label);
+    if (src_it != label_to_index_.end()) triplet_src_base_[ti] = label_base_offsets_[src_it->second];
+    if (dst_it != label_to_index_.end()) triplet_dst_base_[ti] = label_base_offsets_[dst_it->second];
+  }
+  // Detect simple graph for fast path (with defensive label consistency check)
+  is_simple_graph_ = (vertex_labels_.size() == 1 && edge_triplets_.size() == 1
+      && edge_triplets_[0].src_label == vertex_labels_[0]
+      && edge_triplets_[0].dst_label == vertex_labels_[0]);
   if (is_simple_graph_) {
     simple_vertex_label_ = vertex_labels_[0];
     simple_edge_label_ = edge_triplets_[0].edge_label;
@@ -130,7 +165,14 @@ void Leiden::compute() {
     m_ = 0;
     for (int i = 0; i < num_threads_; ++i) m_ += local_m[i];
     if (m_ == 0) { modularity_ = 0; return; }
-    for (uint32_t gid : valid_vertices_) stot_[community_[gid]] += degree_[gid];
+    // Parallel stot_ init for non-warm-start; serial accumulate for warm-start
+    if (!initial_community_) {
+      ParallelUtils::parallel_for(
+          valid_vertices_.data(), valid_vertices_.size(),
+          [&](vid_t v, int /*tid*/) { stot_[v] = degree_[v]; }, num_threads_);
+    } else {
+      for (uint32_t gid : valid_vertices_) stot_[community_[gid]] += degree_[gid];
+    }
     for (int level = 0; level < 100; ++level) {
       bool improved = local_moving_phase();
       if (!improved) break;
@@ -154,28 +196,28 @@ void Leiden::compute() {
     }
   } else {
     // Generic path: multi-label / multi-triplet
+    // Pre-fetch all views once (avoids repeated construction in hot loops)
+    std::vector<CsrView> out_views(edge_triplets_.size()), in_views(edge_triplets_.size());
+    for (size_t ti = 0; ti < edge_triplets_.size(); ++ti) {
+      const auto& t = edge_triplets_[ti];
+      out_views[ti] = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
+      in_views[ti] = graph_.GetGenericIncomingGraphView(t.dst_label, t.src_label, t.edge_label);
+    }
     for (uint32_t gid : valid_vertices_) {
-      label_t v_label = global_to_label_[gid]; vid_t local_vid = global_to_vid_[gid];
-      size_t li = label_to_index_[v_label]; double deg = 0;
+      size_t li = global_to_label_idx_[gid]; vid_t local_vid = global_to_vid_[gid]; double deg = 0;
       for (size_t ti : label_out_triplets_[li]) {
-        const auto& t = edge_triplets_[ti];
-        auto v = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
-        auto oes = v.get_edges(local_vid); for (auto it = oes.begin(); it != oes.end(); ++it) deg += 1.0;
+        auto oes = out_views[ti].get_edges(local_vid); for (auto it = oes.begin(); it != oes.end(); ++it) deg += 1.0;
       }
       for (size_t ti : label_in_triplets_[li]) {
-        const auto& t = edge_triplets_[ti];
-        auto v = graph_.GetGenericIncomingGraphView(t.dst_label, t.src_label, t.edge_label);
-        auto ies = v.get_edges(local_vid); for (auto it = ies.begin(); it != ies.end(); ++it) deg += 1.0;
+        auto ies = in_views[ti].get_edges(local_vid); for (auto it = ies.begin(); it != ies.end(); ++it) deg += 1.0;
       }
       degree_[gid] = deg;
     }
     m_ = 0;
     for (uint32_t gid : valid_vertices_) {
-      size_t li = label_to_index_[global_to_label_[gid]]; vid_t lv = global_to_vid_[gid];
+      size_t li = global_to_label_idx_[gid]; vid_t lv = global_to_vid_[gid];
       for (size_t ti : label_out_triplets_[li]) {
-        const auto& t = edge_triplets_[ti];
-        auto v = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
-        auto oes = v.get_edges(lv); for (auto it = oes.begin(); it != oes.end(); ++it) m_ += 1.0;
+        auto oes = out_views[ti].get_edges(lv); for (auto it = oes.begin(); it != oes.end(); ++it) m_ += 1.0;
       }
     }
     if (m_ == 0) { modularity_ = 0; return; }
@@ -186,14 +228,11 @@ void Leiden::compute() {
       refine();
       double new_mod = 0;
       for (uint32_t gid : valid_vertices_) {
-        size_t li = label_to_index_[global_to_label_[gid]]; vid_t lv = global_to_vid_[gid];
+        size_t li = global_to_label_idx_[gid]; vid_t lv = global_to_vid_[gid];
         for (size_t ti : label_out_triplets_[li]) {
-          const auto& t = edge_triplets_[ti];
-          auto oe_view = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
-          auto dst_it = label_to_index_.find(t.dst_label);
-          if (dst_it == label_to_index_.end()) continue;
-          size_t dst_base = label_base_offsets_[dst_it->second];
-          auto oes = oe_view.get_edges(lv);
+          if (triplet_dst_base_[ti] == SIZE_MAX) continue;
+          size_t dst_base = triplet_dst_base_[ti];
+          auto oes = out_views[ti].get_edges(lv);
           for (auto it = oes.begin(); it != oes.end(); ++it) {
             uint32_t u_gid = static_cast<uint32_t>(dst_base + (*it));
             if (community_[gid] == community_[u_gid])
@@ -264,6 +303,13 @@ bool Leiden::local_moving_phase() {
       if (!moved) break;
     }
   } else {
+    // Pre-fetch all views once (shared by all threads, read-only)
+    std::vector<CsrView> out_views(edge_triplets_.size()), in_views(edge_triplets_.size());
+    for (size_t ti = 0; ti < edge_triplets_.size(); ++ti) {
+      const auto& t = edge_triplets_[ti];
+      out_views[ti] = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
+      in_views[ti] = graph_.GetGenericIncomingGraphView(t.dst_label, t.src_label, t.edge_label);
+    }
     for (int pass = 0; pass < 10; ++pass) {
       bool moved = false;
       for (size_t batch = 0; batch < num_batches; ++batch) {
@@ -278,8 +324,8 @@ bool Leiden::local_moving_phase() {
               size_t end = std::min(start + size_t(64), batch_end);
               for (size_t i = start; i < end; ++i) {
                 uint32_t u_gid = order[i]; uint32_t cur_com = community_[u_gid];
-                double deg_u = degree_[u_gid]; label_t u_label = global_to_label_[u_gid];
-                vid_t u_local = global_to_vid_[u_gid]; size_t u_li = label_to_index_[u_label];
+                double deg_u = degree_[u_gid];
+                vid_t u_local = global_to_vid_[u_gid]; size_t u_li = global_to_label_idx_[u_gid];
                 ++gen_val; my_touched.clear();
                 auto process_nbr = [&](uint32_t v_gid) {
                   if (v_gid == u_gid) return; uint32_t com = community_[v_gid];
@@ -287,19 +333,15 @@ bool Leiden::local_moving_phase() {
                   my_cw[com] += 1.0;
                 };
                 for (size_t ti : label_out_triplets_[u_li]) {
-                  const auto& t = edge_triplets_[ti];
-                  auto oe_v = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
-                  auto dst_it = label_to_index_.find(t.dst_label); if (dst_it == label_to_index_.end()) continue;
-                  size_t dst_base = label_base_offsets_[dst_it->second];
-                  auto oes = oe_v.get_edges(u_local);
+                  if (triplet_dst_base_[ti] == SIZE_MAX) continue;
+                  size_t dst_base = triplet_dst_base_[ti];
+                  auto oes = out_views[ti].get_edges(u_local);
                   for (auto it = oes.begin(); it != oes.end(); ++it) process_nbr(static_cast<uint32_t>(dst_base+(*it)));
                 }
                 for (size_t ti : label_in_triplets_[u_li]) {
-                  const auto& t = edge_triplets_[ti];
-                  auto ie_v = graph_.GetGenericIncomingGraphView(t.dst_label, t.src_label, t.edge_label);
-                  auto src_it = label_to_index_.find(t.src_label); if (src_it == label_to_index_.end()) continue;
-                  size_t src_base = label_base_offsets_[src_it->second];
-                  auto ies = ie_v.get_edges(u_local);
+                  if (triplet_src_base_[ti] == SIZE_MAX) continue;
+                  size_t src_base = triplet_src_base_[ti];
+                  auto ies = in_views[ti].get_edges(u_local);
                   for (auto it = ies.begin(); it != ies.end(); ++it) process_nbr(static_cast<uint32_t>(src_base+(*it)));
                 }
                 double w_self = (my_gen[cur_com] == gen_val) ? my_cw[cur_com] : 0.0;
@@ -350,7 +392,7 @@ void Leiden::refine() {
     auto worker = [&](int tid) {
       uint32_t* r_gen = thread_gen_.get() + static_cast<size_t>(tid)*array_size_;
       double* r_cw = thread_comm_weight_.get() + static_cast<size_t>(tid)*array_size_;
-      std::vector<uint32_t> touched_scs; touched_scs.reserve(64); uint32_t sc_to_new[64];
+      std::vector<uint32_t> touched_scs; touched_scs.reserve(64);
       while (true) {
         size_t idx = cursor.fetch_add(1); if (idx >= multi_comms.size()) break;
         auto& range = multi_comms[idx];
@@ -379,6 +421,8 @@ void Leiden::refine() {
             if (best_sc != cur_sc) { sub_com_flat_[u] = best_sc; if (best_sc == next_sub) next_sub++; sub_improved = true; }
           }
         }
+        // Use unordered_map instead of fixed-size stack array to prevent overflow
+        std::unordered_map<uint32_t, uint32_t> sc_to_new;
         for (uint32_t gid : nodes) sc_to_new[sub_com_flat_[gid]] = UINT32_MAX;
         for (uint32_t gid : nodes) { uint32_t sc = sub_com_flat_[gid]; if (sc_to_new[sc] == UINT32_MAX) sc_to_new[sc] = atomic_next_com.fetch_add(1); community_[gid] = sc_to_new[sc]; }
         for (uint32_t gid : nodes) sub_com_flat_[gid] = kInvalidSubCom;
@@ -387,10 +431,17 @@ void Leiden::refine() {
     for (int t = 1; t < num_threads_; ++t) threads.emplace_back(worker, t);
     worker(0); for (auto& th : threads) th.join();
   } else {
+    // Pre-fetch all views once (shared by all threads, read-only)
+    std::vector<CsrView> out_views(edge_triplets_.size()), in_views(edge_triplets_.size());
+    for (size_t ti = 0; ti < edge_triplets_.size(); ++ti) {
+      const auto& t = edge_triplets_[ti];
+      out_views[ti] = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
+      in_views[ti] = graph_.GetGenericIncomingGraphView(t.dst_label, t.src_label, t.edge_label);
+    }
     auto worker = [&](int tid) {
       uint32_t* r_gen = thread_gen_.get() + static_cast<size_t>(tid)*array_size_;
       double* r_cw = thread_comm_weight_.get() + static_cast<size_t>(tid)*array_size_;
-      std::vector<uint32_t> touched_scs; touched_scs.reserve(64); uint32_t sc_to_new[64];
+      std::vector<uint32_t> touched_scs; touched_scs.reserve(64);
       while (true) {
         size_t idx = cursor.fetch_add(1); if (idx >= multi_comms.size()) break;
         auto& range = multi_comms[idx];
@@ -403,14 +454,12 @@ void Leiden::refine() {
         while (sub_improved && next_sub < 50) {
           sub_improved = false;
           for (uint32_t u_gid : order) {
-            uint32_t cur_sc = sub_com_flat_[u_gid]; size_t u_li = label_to_index_[global_to_label_[u_gid]];
+            uint32_t cur_sc = sub_com_flat_[u_gid]; size_t u_li = global_to_label_idx_[u_gid];
             vid_t u_local = global_to_vid_[u_gid]; ++refine_gen; touched_scs.clear();
             for (size_t ti : label_out_triplets_[u_li]) {
-              const auto& t = edge_triplets_[ti];
-              auto oe_v = graph_.GetGenericOutgoingGraphView(t.src_label, t.dst_label, t.edge_label);
-              auto dst_it = label_to_index_.find(t.dst_label); if (dst_it == label_to_index_.end()) continue;
-              size_t dst_base = label_base_offsets_[dst_it->second];
-              auto oes = oe_v.get_edges(u_local);
+              if (triplet_dst_base_[ti] == SIZE_MAX) continue;
+              size_t dst_base = triplet_dst_base_[ti];
+              auto oes = out_views[ti].get_edges(u_local);
               for (auto it = oes.begin(); it != oes.end(); ++it) {
                 uint32_t v_gid = static_cast<uint32_t>(dst_base+(*it));
                 if (v_gid == u_gid || sub_com_flat_[v_gid] == kInvalidSubCom) continue;
@@ -426,6 +475,8 @@ void Leiden::refine() {
             if (best_sc != cur_sc) { sub_com_flat_[u_gid] = best_sc; if (best_sc == next_sub) next_sub++; sub_improved = true; }
           }
         }
+        // Use unordered_map instead of fixed-size stack array to prevent overflow
+        std::unordered_map<uint32_t, uint32_t> sc_to_new;
         for (uint32_t gid : nodes) sc_to_new[sub_com_flat_[gid]] = UINT32_MAX;
         for (uint32_t gid : nodes) { uint32_t sc = sub_com_flat_[gid]; if (sc_to_new[sc] == UINT32_MAX) sc_to_new[sc] = atomic_next_com.fetch_add(1); community_[gid] = sc_to_new[sc]; }
         for (uint32_t gid : nodes) sub_com_flat_[gid] = kInvalidSubCom;
@@ -442,12 +493,13 @@ void Leiden::sink(execution::Context& ctx, int node_alias, int community_alias) 
     // Step 1: collect members per new community, count votes from old communities
     std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint32_t>> new_to_old_counts;
     uint32_t max_old_id = 0;
+    bool has_valid_old = false;
     for (uint32_t gid : valid_vertices_) {
       uint32_t new_com = community_[gid];
       uint32_t old_com = initial_community_[gid];
       if (old_com != UINT32_MAX) {
         new_to_old_counts[new_com][old_com]++;
-        if (old_com > max_old_id) max_old_id = old_com;
+        if (!has_valid_old || old_com > max_old_id) { max_old_id = old_com; has_valid_old = true; }
       } else {
         new_to_old_counts[new_com]; // ensure entry exists
       }
@@ -477,7 +529,7 @@ void Leiden::sink(execution::Context& ctx, int node_alias, int community_alias) 
       }
     }
     // Step 3: assign fresh IDs for unmatched new communities
-    uint32_t next_fresh = max_old_id + 1;
+    uint32_t next_fresh = has_valid_old ? (max_old_id + 1) : 0;
     for (auto& [nc, _] : com_sizes) {
       if (com_remap.find(nc) == com_remap.end()) {
         while (used_ids.find(next_fresh) != used_ids.end()) next_fresh++;
