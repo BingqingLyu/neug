@@ -527,8 +527,8 @@ bool Louvain::one_level() {
   }
   return improved;
 }
-void Louvain::sink(execution::Context& ctx, int node_alias,
-                   int community_alias, int previous_community_alias) {
+void Louvain::sink(execution::Context& ctx, int node_alias, int community_alias,
+                   int previous_community_alias) {
   std::unordered_map<uint32_t, uint32_t> cr;
   if (initial_community_) {
     // Stable ID: inherit old community IDs via majority vote
@@ -629,7 +629,8 @@ void Louvain::sink(execution::Context& ctx, int node_alias,
     execution::ContextChunk chunk;
     chunk.set(node_alias, b.finish());
     chunk.set(community_alias, cb.finish());
-    if (prev_col) chunk.set(previous_community_alias, prev_col);
+    if (prev_col)
+      chunk.set(previous_community_alias, prev_col);
     ctx.append_chunk(std::move(chunk));
   }
 }

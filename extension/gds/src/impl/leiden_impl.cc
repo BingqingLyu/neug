@@ -762,8 +762,8 @@ void Leiden::refine() {
       th.join();
   }
 }
-void Leiden::sink(execution::Context& ctx, int node_alias,
-                  int community_alias, int previous_community_alias) {
+void Leiden::sink(execution::Context& ctx, int node_alias, int community_alias,
+                  int previous_community_alias) {
   std::unordered_map<uint32_t, uint32_t> com_remap;
   if (initial_community_) {
     // Stable ID: inherit old community IDs via majority vote
@@ -871,7 +871,8 @@ void Leiden::sink(execution::Context& ctx, int node_alias,
     execution::ContextChunk chunk;
     chunk.set(node_alias, builder.finish());
     chunk.set(community_alias, community_builder.finish());
-    if (prev_col) chunk.set(previous_community_alias, prev_col);
+    if (prev_col)
+      chunk.set(previous_community_alias, prev_col);
     ctx.append_chunk(std::move(chunk));
   }
 }
