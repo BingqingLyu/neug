@@ -446,6 +446,7 @@ RETURN node, community;
 |---|---|---|
 | `node` | NODE | The node |
 | `community` | INT64 | Community ID (0-based) |
+| `previous_community` | INT64 | *(optional)* Previous community ID. Only available when `initial_community_property` is set. NULL for vertices that had no previous community assignment. |
 
 **Example (single-label):**
 
@@ -487,6 +488,25 @@ RETURN node.fName, community
 ORDER BY community;
 ```
 
+**Incremental delta analysis:** When running with `initial_community_property`,
+you can YIELD the optional `previous_community` column to analyze community
+changes at the vertex level. Community-level changes (split, merge, stable) can
+be computed via Cypher aggregation:
+
+```cypher
+-- Migration matrix: how vertices moved between communities
+CALL louvain('social', {initial_community_property: 'comm', concurrency: 8})
+YIELD node, community, previous_community
+RETURN previous_community, community, count(*) AS members
+ORDER BY previous_community, community;
+
+-- Vertices that changed community
+CALL louvain('social', {initial_community_property: 'comm', concurrency: 8})
+YIELD node, community, previous_community
+WHERE previous_community <> community
+RETURN node.id, previous_community, community;
+```
+
 **Predicate support:** Neither node nor edge predicates are supported.
 
 ---
@@ -521,6 +541,7 @@ RETURN node, community;
 |---|---|---|
 | `node` | NODE | The node |
 | `community` | INT64 | Community ID (0-based) |
+| `previous_community` | INT64 | *(optional)* Previous community ID. Only available when `initial_community_property` is set. NULL for vertices that had no previous community assignment. |
 
 **Example (single-label):**
 
@@ -560,6 +581,25 @@ SET n.comm = community;
 CALL leiden('social', {initial_community_property: 'comm', concurrency: 8})
 RETURN node.fName, community
 ORDER BY community;
+```
+
+**Incremental delta analysis:** When running with `initial_community_property`,
+you can YIELD the optional `previous_community` column to analyze community
+changes at the vertex level. Community-level changes (split, merge, stable) can
+be computed via Cypher aggregation:
+
+```cypher
+-- Migration matrix: how vertices moved between communities
+CALL leiden('social', {initial_community_property: 'comm', concurrency: 8})
+YIELD node, community, previous_community
+RETURN previous_community, community, count(*) AS members
+ORDER BY previous_community, community;
+
+-- Vertices that changed community
+CALL leiden('social', {initial_community_property: 'comm', concurrency: 8})
+YIELD node, community, previous_community
+WHERE previous_community <> community
+RETURN node.id, previous_community, community;
 ```
 
 **Predicate support:** Neither node nor edge predicates are supported.
@@ -636,10 +676,10 @@ RETURN distance, path;
 | LCC | `lcc` | `node`, `lcc` | `directed`, `degree_threshold` |
 | K-Core | `kcore` | `node`, `core` | `k` |
 | CDLP | `cdlp` | `node`, `label` | `max_iterations` |
-| Louvain | `louvain` | `node`, `community` | `resolution`, `directed`, `threshold`, `concurrency`, `initial_community_property` |
-| Leiden | `leiden` | `node`, `community` | `resolution`, `directed`, `threshold`, `concurrency`, `initial_community_property` |
+| Louvain | `louvain` | `node`, `community`, `previous_community` *(optional)* | `resolution`, `directed`, `threshold`, `concurrency`, `initial_community_property` |
+| Leiden | `leiden` | `node`, `community`, `previous_community` *(optional)* | `resolution`, `directed`, `threshold`, `concurrency`, `initial_community_property` |
 
-**Note:** The `path` column for BFS and SSSP is optional and only returned when explicitly YIELDed. See the individual algorithm sections for details.
+**Note:** The `path` column for BFS and SSSP is optional and only returned when explicitly YIELDed. The `previous_community` column for Louvain and Leiden is optional and only available when `initial_community_property` is set. See the individual algorithm sections for details.
 
 ## Common Options
 

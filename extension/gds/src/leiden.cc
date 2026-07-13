@@ -71,6 +71,7 @@ struct LeidenInput : public function::CallFuncInputBase {
   std::string initial_community_property;
   int32_t node_alias;
   int32_t community_alias;
+  int32_t previous_community_alias = -1;
 };
 
 std::unique_ptr<function::CallFuncInputBase> LeidenFunction::bind(
@@ -96,6 +97,8 @@ std::unique_ptr<function::CallFuncInputBase> LeidenFunction::bind(
 
   input->node_alias = -1;
   input->community_alias = -1;
+  input->previous_community_alias = -1;
+  int int64_count = 0;
   const auto& meta_data = plan.plan(op_idx);
   for (int i = 0; i < meta_data.meta_data_size(); i++) {
     const auto& meta = meta_data.meta_data(i);
@@ -103,7 +106,11 @@ std::unique_ptr<function::CallFuncInputBase> LeidenFunction::bind(
     if (type.id() == common::DataTypeId::kVertex) {
       input->node_alias = meta.alias();
     } else if (type.id() == common::DataTypeId::kInt64) {
-      input->community_alias = meta.alias();
+      if (int64_count == 0)
+        input->community_alias = meta.alias();
+      else
+        input->previous_community_alias = meta.alias();
+      ++int64_count;
     }
   }
 
@@ -123,7 +130,8 @@ execution::Context LeidenFunction::exec(
   leiden.compute();
 
   execution::Context ctx;
-  leiden.sink(ctx, input.node_alias, input.community_alias);
+  leiden.sink(ctx, input.node_alias, input.community_alias,
+              input.previous_community_alias);
   return ctx;
 }
 
@@ -133,7 +141,8 @@ function::function_set LeidenFunction::getFunctionSet() {
                                                 common::DataTypeId::kUnknown};
   function::call_output_columns outputColumns = {
       {"node", common::DataTypeId::kVertex},
-      {"community", common::DataTypeId::kInt64}};
+      {"community", common::DataTypeId::kInt64},
+      {"previous_community", common::DataTypeId::kInt64}};
   auto function = std::make_unique<function::GDSAlgoFunction>(name, inputTypes,
                                                               outputColumns);
   function->bindFunc = bind;

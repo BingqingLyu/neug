@@ -43,7 +43,8 @@ class Leiden {
 
   void compute();
 
-  void sink(execution::Context& ctx, int node_alias, int community_alias);
+  void sink(execution::Context& ctx, int node_alias, int community_alias,
+            int previous_community_alias = -1);
 
  private:
   const StorageReadInterface& graph_;

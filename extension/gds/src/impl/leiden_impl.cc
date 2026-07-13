@@ -763,7 +763,7 @@ void Leiden::refine() {
   }
 }
 void Leiden::sink(execution::Context& ctx, int node_alias,
-                  int community_alias) {
+                  int community_alias, int previous_community_alias) {
   std::unordered_map<uint32_t, uint32_t> com_remap;
   if (initial_community_) {
     // Stable ID: inherit old community IDs via majority vote
@@ -833,6 +833,7 @@ void Leiden::sink(execution::Context& ctx, int node_alias,
         com_remap[c] = next_id++;
     }
   }
+  bool need_prev = (previous_community_alias >= 0);
   for (size_t li = 0; li < vertex_labels_.size(); ++li) {
     label_t label = vertex_labels_[li];
     size_t base = label_base_offsets_[li];
@@ -846,6 +847,21 @@ void Leiden::sink(execution::Context& ctx, int node_alias,
     }
     builder.reserve(count);
     community_builder.reserve(count);
+    std::shared_ptr<IContextColumn> prev_col;
+    if (need_prev) {
+      ValueColumnBuilder<int64_t> prev_builder(/*is_optional=*/true);
+      prev_builder.reserve(count);
+      for (const auto& v : vertex_set) {
+        uint32_t gid = static_cast<uint32_t>(base + v);
+        if (initial_community_ && initial_community_[gid] != UINT32_MAX) {
+          prev_builder.push_back_opt(
+              static_cast<int64_t>(initial_community_[gid]));
+        } else {
+          prev_builder.push_back_null();
+        }
+      }
+      prev_col = prev_builder.finish();
+    }
     for (const auto& v : vertex_set) {
       uint32_t gid = static_cast<uint32_t>(base + v);
       builder.push_back_opt(v);
@@ -855,6 +871,7 @@ void Leiden::sink(execution::Context& ctx, int node_alias,
     execution::ContextChunk chunk;
     chunk.set(node_alias, builder.finish());
     chunk.set(community_alias, community_builder.finish());
+    if (prev_col) chunk.set(previous_community_alias, prev_col);
     ctx.append_chunk(std::move(chunk));
   }
 }
