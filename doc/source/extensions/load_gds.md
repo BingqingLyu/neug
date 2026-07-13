@@ -63,7 +63,7 @@ for no predicate):
 
 ```cypher
 {'[person, knows, person]': ''}
-{'[person, studyat, organisation]': 'r.year > 2010'}
+{'[person, studyAt, organisation]': 'r.year > 2010'}
 ```
 
 ### `drop_projected_graph`
@@ -402,7 +402,7 @@ RETURN node, label;
 CALL project_graph(
     'study_net',
     {'person': 'n.age > 20', 'organisation': 'n.name = "MIT"'},
-    {'[person, studyat, organisation]': 'r.year > 2010'}
+    {'[person, studyAt, organisation]': 'r.year > 2010'}
 );
 LOAD gds;
 
@@ -461,7 +461,7 @@ ORDER BY community;
 CALL project_graph(
     'social_multi',
     ['person', 'organisation'],
-    {'[person, knows, person]': '', '[person, studyat, organisation]': ''}
+    {'[person, knows, person]': '', '[person, studyAt, organisation]': ''}
 );
 
 CALL louvain('social_multi', {concurrency: 8})
@@ -536,7 +536,7 @@ ORDER BY community;
 CALL project_graph(
     'social_multi',
     ['person', 'organisation'],
-    {'[person, knows, person]': '', '[person, studyat, organisation]': ''}
+    {'[person, knows, person]': '', '[person, studyAt, organisation]': ''}
 );
 
 CALL leiden('social_multi', {concurrency: 8})

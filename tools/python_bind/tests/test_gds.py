@@ -938,7 +938,21 @@ class TestCrossValidationTinysnb:
                 )
 
 
-# ─── Multi-Label Leiden / Louvain ────────────────────────────────────────────
+# ─── Multi-Edge & Multi-Label Leiden / Louvain ─────────────────────────────────
+
+
+def _batch_writeback(conn, prop_name, comm_map):
+    """Batch-write community IDs to vertex property using a single CASE WHEN query."""
+    if not comm_map:
+        return
+    when_clauses = " ".join(
+        f"WHEN n.id = {nid} THEN {comm}"
+        for nid, comm in comm_map.items()
+    )
+    conn.execute(
+        f"MATCH (n:person) "
+        f"SET n.{prop_name} = CASE {when_clauses} ELSE n.{prop_name} END;"
+    )
 
 
 @contextmanager
@@ -964,8 +978,8 @@ def multi_edge_connection(tmp_path):
         db.close()
 
 
-def test_multi_label_leiden_basic(tmp_path):
-    """multi_label_leiden on a single-label graph (backward compat)."""
+def test_leiden_basic(tmp_path):
+    """leiden on a single-label graph (backward compat)."""
     with tinysnb_simple_connection(tmp_path) as conn:
         rows = list(
             conn.execute(
@@ -976,14 +990,14 @@ def test_multi_label_leiden_basic(tmp_path):
                 """
             )
         )
-        assert len(rows) > 0, "multi_label_leiden must return at least one row"
+        assert len(rows) > 0, "leiden must return at least one row"
         for row in rows:
             assert len(row) == 2, "each row should have (node_id, community)"
             assert isinstance(row[1], int), "community should be an integer"
 
 
-def test_multi_label_louvain_basic(tmp_path):
-    """multi_label_louvain on a single-label graph (backward compat)."""
+def test_louvain_basic(tmp_path):
+    """louvain on a single-label graph (backward compat)."""
     with tinysnb_simple_connection(tmp_path) as conn:
         rows = list(
             conn.execute(
@@ -994,14 +1008,17 @@ def test_multi_label_louvain_basic(tmp_path):
                 """
             )
         )
-        assert len(rows) > 0, "multi_label_louvain must return at least one row"
+        assert len(rows) > 0, "louvain must return at least one row"
         for row in rows:
             assert len(row) == 2
             assert isinstance(row[1], int)
 
 
-def test_multi_label_leiden_multi_edge(tmp_path):
-    """multi_label_leiden on a graph with two edge types (knows + meets)."""
+def test_leiden_multi_edge(tmp_path):
+    """leiden on a graph with two edge types (knows + meets).
+    tinysnb person vertices: 0,2,3,5,7,8,9,10.
+    knows forms a K4 on {0,2,3,5} + star 7→{8,9};
+    meets adds 0→2,2→5,3↔7,8→3,9→3,10→2."""
     with multi_edge_connection(tmp_path) as conn:
         rows = list(
             conn.execute(
@@ -1012,13 +1029,19 @@ def test_multi_label_leiden_multi_edge(tmp_path):
                 """
             )
         )
-        assert len(rows) > 0, "multi_label_leiden must return results"
-        communities = {row[1] for row in rows}
-        assert len(communities) >= 1, "should detect at least one community"
+        comm = {row[0]: row[1] for row in rows}
+        # All 8 person vertices present
+        assert set(comm.keys()) == {0, 2, 3, 5, 7, 8, 9, 10}, f"comm={comm}"
+        # All community IDs non-negative
+        assert all(c >= 0 for c in comm.values()), f"comm={comm}"
+        # >= 2 communities (graph has two clearly separated clusters)
+        assert len(set(comm.values())) >= 2, f"comm={comm}"
+        # Not all singletons — at least one community has >= 2 members
+        assert len(comm) > len(set(comm.values())), f"All singletons: {comm}"
 
 
-def test_multi_label_leiden_deterministic(tmp_path):
-    """Running multi_label_leiden twice with same data gives same result."""
+def test_leiden_multi_edge_deterministic(tmp_path):
+    """Running leiden twice with same multi-edge data gives same result."""
     with multi_edge_connection(tmp_path) as conn:
         rows1 = list(
             conn.execute(
@@ -1093,7 +1116,7 @@ def test_leiden_deterministic_simple(tmp_path):
         db.close()
 
 
-def test_multi_label_leiden_incremental_with_writeback(tmp_path):
+def test_leiden_incremental_with_writeback(tmp_path):
     """Incremental Leiden stability: run once, write back communities, run again
     with initial_community_property, verify results are identical."""
     db_dir = tmp_path / "gds_leiden_wb_db"
@@ -1128,11 +1151,8 @@ def test_multi_label_leiden_incremental_with_writeback(tmp_path):
         assert len(rows_r1) > 0, "First run should produce results"
         r1_map = {row[0]: row[1] for row in rows_r1}
 
-        # Step 4: Write back communities to vertex property via SET
-        for node_id, comm in r1_map.items():
-            conn.execute(
-                f"MATCH (n:person) WHERE n.id = {node_id} SET n.leiden_comm = {comm};"
-            )
+        # Step 4: Write back communities to vertex property (batch UNWIND)
+        _batch_writeback(conn, "leiden_comm", r1_map)
 
         # Step 5: Drop and re-project graph to pick up updated properties
         conn.execute("CALL drop_projected_graph('g_leiden');")
@@ -1170,7 +1190,7 @@ def test_multi_label_leiden_incremental_with_writeback(tmp_path):
         db.close()
 
 
-def test_multi_label_louvain_incremental_with_writeback(tmp_path):
+def test_louvain_incremental_with_writeback(tmp_path):
     """Incremental Louvain stability: run once, write back communities, run again
     with initial_community_property, verify results are identical."""
     db_dir = tmp_path / "gds_louvain_wb_db"
@@ -1205,11 +1225,8 @@ def test_multi_label_louvain_incremental_with_writeback(tmp_path):
         assert len(rows_r1) > 0, "First run should produce results"
         r1_map = {row[0]: row[1] for row in rows_r1}
 
-        # Step 4: Write back communities to vertex property via SET
-        for node_id, comm in r1_map.items():
-            conn.execute(
-                f"MATCH (n:person) WHERE n.id = {node_id} SET n.louvain_comm = {comm};"
-            )
+        # Step 4: Write back communities to vertex property (batch UNWIND)
+        _batch_writeback(conn, "louvain_comm", r1_map)
 
         # Step 5: Drop and re-project graph to pick up updated properties
         conn.execute("CALL drop_projected_graph('g_louvain');")
@@ -1248,8 +1265,8 @@ def test_multi_label_louvain_incremental_with_writeback(tmp_path):
 
 
 def test_leiden_multi_edge_alias(tmp_path):
-    """leiden (now aliased to multi_label impl) runs on a multi-edge graph,
-    confirming the simple-graph restriction has been lifted."""
+    """leiden on a multi-edge graph (knows + meets) — same as test_leiden_multi_edge
+    but kept as a separate test entry point for regression tracking."""
     with multi_edge_connection(tmp_path) as conn:
         rows = list(
             conn.execute(
@@ -1260,14 +1277,16 @@ def test_leiden_multi_edge_alias(tmp_path):
                 """
             )
         )
-        assert len(rows) > 0, "leiden must return results on a multi-edge graph"
-        communities = {row[1] for row in rows}
-        assert len(communities) >= 1, "should detect at least one community"
+        comm = {row[0]: row[1] for row in rows}
+        assert set(comm.keys()) == {0, 2, 3, 5, 7, 8, 9, 10}, f"comm={comm}"
+        assert all(c >= 0 for c in comm.values()), f"comm={comm}"
+        assert len(set(comm.values())) >= 2, f"comm={comm}"
+        assert len(comm) > len(set(comm.values())), f"All singletons: {comm}"
 
 
 def test_louvain_multi_edge_alias(tmp_path):
-    """louvain (now aliased to multi_label impl) runs on a multi-edge graph,
-    confirming the simple-graph restriction has been lifted."""
+    """louvain on a multi-edge graph (knows + meets).
+    Same graph as test_leiden_multi_edge but using louvain algorithm."""
     with multi_edge_connection(tmp_path) as conn:
         rows = list(
             conn.execute(
@@ -1278,9 +1297,11 @@ def test_louvain_multi_edge_alias(tmp_path):
                 """
             )
         )
-        assert len(rows) > 0, "louvain must return results on a multi-edge graph"
-        communities = {row[1] for row in rows}
-        assert len(communities) >= 1, "should detect at least one community"
+        comm = {row[0]: row[1] for row in rows}
+        assert set(comm.keys()) == {0, 2, 3, 5, 7, 8, 9, 10}, f"comm={comm}"
+        assert all(c >= 0 for c in comm.values()), f"comm={comm}"
+        assert len(set(comm.values())) >= 2, f"comm={comm}"
+        assert len(comm) > len(set(comm.values())), f"All singletons: {comm}"
 
 
 def test_leiden_incremental_alias(tmp_path):
@@ -1311,10 +1332,7 @@ def test_leiden_incremental_alias(tmp_path):
         )
         assert len(rows_r1) > 0, "First run should produce results"
         r1_map = {row[0]: row[1] for row in rows_r1}
-        for node_id, comm in r1_map.items():
-            conn.execute(
-                f"MATCH (n:person) WHERE n.id = {node_id} SET n.leiden_comm = {comm};"
-            )
+        _batch_writeback(conn, "leiden_comm", r1_map)
         conn.execute("CALL drop_projected_graph('g_leiden_alias');")
         conn.execute(
             "CALL project_graph("
@@ -1373,10 +1391,7 @@ def test_louvain_incremental_alias(tmp_path):
         )
         assert len(rows_r1) > 0, "First run should produce results"
         r1_map = {row[0]: row[1] for row in rows_r1}
-        for node_id, comm in r1_map.items():
-            conn.execute(
-                f"MATCH (n:person) WHERE n.id = {node_id} SET n.louvain_comm = {comm};"
-            )
+        _batch_writeback(conn, "louvain_comm", r1_map)
         conn.execute("CALL drop_projected_graph('g_louvain_alias');")
         conn.execute(
             "CALL project_graph("
@@ -1434,8 +1449,9 @@ def multi_vertex_label_connection(tmp_path):
 
 
 def test_leiden_two_vertex_labels(tmp_path):
-    """Leiden runs on a graph with two vertex labels and two edge triplets,
-    verifying multi-label clustering works correctly."""
+    """Leiden on person+organisation graph (knows+studyAt edges).
+    11 vertices: person 0,2,3,5,7,8,9,10 + organisation 1,4,6.
+    studyAt: 0→1, 2→1, 8→1 (all to org #1)."""
     with multi_vertex_label_connection(tmp_path) as conn:
         rows = list(
             conn.execute(
@@ -1446,13 +1462,23 @@ def test_leiden_two_vertex_labels(tmp_path):
                 """
             )
         )
-        assert len(rows) > 0, "leiden must return results on multi-vertex-label graph"
-        communities = {row[1] for row in rows}
-        assert len(communities) >= 1, "should detect at least one community"
+        comm = {row[0]: row[1] for row in rows}
+        # All 11 vertices present (8 person + 3 organisation)
+        assert set(comm.keys()) == {0, 2, 3, 5, 7, 8, 9, 10, 1, 4, 6}, f"comm={comm}"
+        assert all(c >= 0 for c in comm.values()), f"comm={comm}"
+        assert len(set(comm.values())) >= 2, f"comm={comm}"
+        assert len(comm) > len(set(comm.values())), f"All singletons: {comm}"
+        # Vertex 0, 2, 8 all studyAt org 1 — at least two should share a community
+        study_vertices = [0, 2, 8, 1]
+        study_comms = [comm.get(v) for v in study_vertices if v in comm]
+        assert len(set(study_comms)) < len(study_comms), (
+            f"studyAt-connected vertices should share a community: {comm}"
+        )
 
 
 def test_louvain_two_vertex_labels(tmp_path):
-    """Louvain runs on a graph with two vertex labels and two edge triplets."""
+    """Louvain on person+organisation graph (knows+studyAt edges).
+    Same graph as test_leiden_two_vertex_labels but using louvain."""
     with multi_vertex_label_connection(tmp_path) as conn:
         rows = list(
             conn.execute(
@@ -1463,9 +1489,17 @@ def test_louvain_two_vertex_labels(tmp_path):
                 """
             )
         )
-        assert len(rows) > 0, "louvain must return results on multi-vertex-label graph"
-        communities = {row[1] for row in rows}
-        assert len(communities) >= 1, "should detect at least one community"
+        comm = {row[0]: row[1] for row in rows}
+        assert set(comm.keys()) == {0, 2, 3, 5, 7, 8, 9, 10, 1, 4, 6}, f"comm={comm}"
+        assert all(c >= 0 for c in comm.values()), f"comm={comm}"
+        assert len(set(comm.values())) >= 2, f"comm={comm}"
+        assert len(comm) > len(set(comm.values())), f"All singletons: {comm}"
+        # Vertex 0, 2, 8 all studyAt org 1 — at least two should share a community
+        study_vertices = [0, 2, 8, 1]
+        study_comms = [comm.get(v) for v in study_vertices if v in comm]
+        assert len(set(study_comms)) < len(study_comms), (
+            f"studyAt-connected vertices should share a community: {comm}"
+        )
 
 
 def test_leiden_incremental_data_changed(tmp_path):
@@ -1488,11 +1522,7 @@ def test_leiden_incremental_data_changed(tmp_path):
             )
         )
         r1_map = {row[0]: row[1] for row in rows_r1}
-        for node_id, comm in r1_map.items():
-            conn.execute(
-                f"MATCH (n:person) WHERE n.id = {node_id} "
-                f"SET n.leiden_comm = {comm};"
-            )
+        _batch_writeback(conn, "leiden_comm", r1_map)
         conn.execute(
             "MATCH (a:person {id: 0}), (b:person {id: 3}) " "CREATE (a)-[:knows]->(b);"
         )
@@ -1541,11 +1571,7 @@ def test_leiden_warmstart_multi_edge(tmp_path):
             )
         )
         r1_map = {row[0]: row[1] for row in rows_r1}
-        for node_id, comm in r1_map.items():
-            conn.execute(
-                f"MATCH (n:person) WHERE n.id = {node_id} "
-                f"SET n.leiden_comm = {comm};"
-            )
+        _batch_writeback(conn, "leiden_comm", r1_map)
         conn.execute("CALL drop_projected_graph('g');")
         conn.execute(
             "CALL project_graph('g', ['person'], "
@@ -1569,6 +1595,73 @@ def test_leiden_warmstart_multi_edge(tmp_path):
             f"Warm-start should preserve most community assignments.\n"
             f"r1: {r1_map}\nr2: {r2_map}\n"
             f"unchanged: {unchanged}/{total}"
+        )
+    finally:
+        conn.close()
+        db.close()
+
+
+def test_leiden_multi_label_completeness(tmp_path):
+    """Leiden on multi-vertex-label graph with concurrency: 4.
+    Same graph as test_leiden_two_vertex_labels but with higher concurrency
+    to exercise the parallel generic path."""
+    with multi_vertex_label_connection(tmp_path) as conn:
+        rows = list(
+            conn.execute(
+                """
+                CALL leiden('person_org', {concurrency: 4})
+                YIELD node, community
+                RETURN node.id, community;
+                """
+            )
+        )
+        comm = {row[0]: row[1] for row in rows}
+        assert set(comm.keys()) == {0, 2, 3, 5, 7, 8, 9, 10, 1, 4, 6}, f"comm={comm}"
+        assert all(c >= 0 for c in comm.values()), f"comm={comm}"
+        assert len(set(comm.values())) >= 2, f"comm={comm}"
+        assert len(comm) > len(set(comm.values())), f"All singletons: {comm}"
+
+
+def test_leiden_warmstart_stability_strict(tmp_path):
+    """Warm-start correctness: when data is unchanged, the partition should be
+    identical (not just similar). This verifies warm-start reproduces the same
+    community structure."""
+    db_dir = tmp_path / "gds_leiden_warmstart_strict_db"
+    db = Database(db_path=str(db_dir), mode="w")
+    db.load_builtin_dataset("tinysnb")
+    conn = db.connect()
+    try:
+        conn.execute("LOAD gds;")
+        conn.execute("ALTER TABLE person ADD leiden_comm INT64;")
+        conn.execute(
+            "CALL project_graph('g', ['person'], "
+            "{'[person, knows, person]': ''});"
+        )
+        rows_r1 = list(
+            conn.execute(
+                "CALL leiden('g', {concurrency: 1}) "
+                "YIELD node, community RETURN node.id, community;"
+            )
+        )
+        r1_map = {row[0]: row[1] for row in rows_r1}
+        _batch_writeback(conn, "leiden_comm", r1_map)
+        conn.execute("CALL drop_projected_graph('g');")
+        conn.execute(
+            "CALL project_graph('g', ['person'], "
+            "{'[person, knows, person]': ''});"
+        )
+        rows_r2 = list(
+            conn.execute(
+                "CALL leiden('g', "
+                "{concurrency: 1, initial_community_property: 'leiden_comm'}) "
+                "YIELD node, community RETURN node.id, community;"
+            )
+        )
+        r2_map = {row[0]: row[1] for row in rows_r2}
+        # With unchanged data and warm-start, partition should be identical
+        assert r1_map == r2_map, (
+            f"Warm-start with unchanged data should be identical.\n"
+            f"r1: {r1_map}\nr2: {r2_map}"
         )
     finally:
         conn.close()

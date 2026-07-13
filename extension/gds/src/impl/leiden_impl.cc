@@ -201,7 +201,8 @@ void Leiden::compute() {
       modularity_ = 0;
       return;
     }
-    // Parallel stot_ init for non-warm-start; serial accumulate for warm-start
+    // Zero stot_ before accumulation (community IDs may differ from GIDs)
+    std::fill_n(stot_.get(), array_size_, 0.0);
     if (!initial_community_) {
       ParallelUtils::parallel_for(
           valid_vertices_.data(), valid_vertices_.size(),
@@ -247,36 +248,51 @@ void Leiden::compute() {
       in_views[ti] = graph_.GetGenericIncomingGraphView(
           t.dst_label, t.src_label, t.edge_label);
     }
-    for (uint32_t gid : valid_vertices_) {
-      size_t li = global_to_label_idx_[gid];
-      vid_t local_vid = global_to_vid_[gid];
-      double deg = 0;
-      for (size_t ti : label_out_triplets_[li]) {
-        auto oes = out_views[ti].get_edges(local_vid);
-        for (auto it = oes.begin(); it != oes.end(); ++it)
-          deg += 1.0;
-      }
-      for (size_t ti : label_in_triplets_[li]) {
-        auto ies = in_views[ti].get_edges(local_vid);
-        for (auto it = ies.begin(); it != ies.end(); ++it)
-          deg += 1.0;
-      }
-      degree_[gid] = deg;
-    }
+    // Parallel degree computation
+    ParallelUtils::parallel_for(
+        valid_vertices_.data(), valid_vertices_.size(),
+        [&](vid_t gid, int /*tid*/) {
+          size_t li = global_to_label_idx_[gid];
+          vid_t lv = global_to_vid_[gid];
+          double deg = 0;
+          for (size_t ti : label_out_triplets_[li]) {
+            auto oes = out_views[ti].get_edges(lv);
+            for (auto it = oes.begin(); it != oes.end(); ++it)
+              deg += 1.0;
+          }
+          for (size_t ti : label_in_triplets_[li]) {
+            auto ies = in_views[ti].get_edges(lv);
+            for (auto it = ies.begin(); it != ies.end(); ++it)
+              deg += 1.0;
+          }
+          degree_[gid] = deg;
+        },
+        num_threads_);
+    // Parallel m_ computation with per-thread local accumulators
+    std::vector<double> local_m(num_threads_, 0.0);
+    ParallelUtils::parallel_for(
+        valid_vertices_.data(), valid_vertices_.size(),
+        [&](vid_t gid, int tid) {
+          size_t li = global_to_label_idx_[gid];
+          vid_t lv = global_to_vid_[gid];
+          double cnt = 0;
+          for (size_t ti : label_out_triplets_[li]) {
+            auto oes = out_views[ti].get_edges(lv);
+            for (auto it = oes.begin(); it != oes.end(); ++it)
+              cnt += 1.0;
+          }
+          local_m[tid] += cnt;
+        },
+        num_threads_);
     m_ = 0;
-    for (uint32_t gid : valid_vertices_) {
-      size_t li = global_to_label_idx_[gid];
-      vid_t lv = global_to_vid_[gid];
-      for (size_t ti : label_out_triplets_[li]) {
-        auto oes = out_views[ti].get_edges(lv);
-        for (auto it = oes.begin(); it != oes.end(); ++it)
-          m_ += 1.0;
-      }
-    }
+    for (int i = 0; i < num_threads_; ++i)
+      m_ += local_m[i];
     if (m_ == 0) {
       modularity_ = 0;
       return;
     }
+    // Zero stot_ before accumulation (community IDs may differ from GIDs)
+    std::fill_n(stot_.get(), array_size_, 0.0);
     for (uint32_t gid : valid_vertices_)
       stot_[community_[gid]] += degree_[gid];
     for (int level = 0; level < 100; ++level) {
