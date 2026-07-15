@@ -30,14 +30,16 @@ Louvain::Louvain(const StorageReadInterface& graph,
                  std::vector<label_t> vertex_labels,
                  std::vector<LabelTriplet> edge_triplets, double resolution,
                  double threshold, int concurrency,
-                 const std::string& initial_community_property)
+                 const std::string& initial_community_property,
+                 bool allow_relocation)
     : graph_(graph),
       vertex_labels_(std::move(vertex_labels)),
       edge_triplets_(std::move(edge_triplets)),
       resolution_(resolution),
       threshold_(threshold),
       concurrency_(concurrency),
-      initial_community_property_(initial_community_property) {
+      initial_community_property_(initial_community_property),
+      allow_relocation_(allow_relocation) {
   for (size_t i = 0; i < vertex_labels_.size(); ++i)
     label_to_index_[vertex_labels_[i]] = i;
   label_base_offsets_.resize(vertex_labels_.size(), 0);
@@ -356,6 +358,11 @@ bool Louvain::one_level() {
               size_t e = std::min(s + size_t(64), be);
               for (size_t i = s; i < e; ++i) {
                 vid_t u = order[i];
+                if (initial_community_ && !allow_relocation_ &&
+                    initial_community_[u] != UINT32_MAX) {
+                  best_com[i] = community_[u];
+                  continue;
+                }
                 uint32_t cc = community_[u];
                 double du = degree_[u];
                 ++gv;
@@ -451,6 +458,11 @@ bool Louvain::one_level() {
               size_t e = std::min(s + size_t(64), be);
               for (size_t i = s; i < e; ++i) {
                 uint32_t ug = order[i];
+                if (initial_community_ && !allow_relocation_ &&
+                    initial_community_[ug] != UINT32_MAX) {
+                  best_com[i] = community_[ug];
+                  continue;
+                }
                 uint32_t cc = community_[ug];
                 double du = degree_[ug];
                 size_t ul = global_to_label_idx_[ug];

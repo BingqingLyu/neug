@@ -31,7 +31,8 @@ class Louvain {
   Louvain(const StorageReadInterface& graph, std::vector<label_t> vertex_labels,
           std::vector<LabelTriplet> edge_triplets, double resolution,
           double threshold, int concurrency,
-          const std::string& initial_community_property = "");
+          const std::string& initial_community_property = "",
+          bool allow_relocation = false);
   void compute();
   void sink(execution::Context& ctx, int node_alias, int community_alias,
             int previous_community_alias = -1);
@@ -44,6 +45,7 @@ class Louvain {
   double threshold_;
   int concurrency_;
   std::string initial_community_property_;
+  bool allow_relocation_ = false;
   std::vector<size_t> label_base_offsets_;
   std::vector<size_t> label_local_sizes_;
   std::vector<std::vector<size_t>> label_out_triplets_;

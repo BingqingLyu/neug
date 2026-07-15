@@ -69,6 +69,7 @@ struct LouvainInput : public function::CallFuncInputBase {
   double threshold = 1e-7;
   int32_t concurrency;
   std::string initial_community_property;
+  bool allow_relocation = false;
   int32_t node_alias;
   int32_t community_alias;
   int32_t previous_community_alias = -1;
@@ -94,6 +95,8 @@ std::unique_ptr<function::CallFuncInputBase> LouvainFunction::bind(
       options, "concurrency", std::thread::hardware_concurrency());
   input->initial_community_property =
       get_option_value<std::string>(options, "initial_community_property", "");
+  input->allow_relocation =
+      get_option_value<bool>(options, "allow_relocation", false);
 
   input->node_alias = -1;
   input->community_alias = -1;
@@ -126,7 +129,8 @@ execution::Context LouvainFunction::exec(
   // the original louvain implementation).
   community::Louvain louvain(
       graph, input.vertex_labels, input.edge_triplets, input.resolution,
-      input.threshold, input.concurrency, input.initial_community_property);
+      input.threshold, input.concurrency, input.initial_community_property,
+      input.allow_relocation);
   louvain.compute();
 
   execution::Context ctx;

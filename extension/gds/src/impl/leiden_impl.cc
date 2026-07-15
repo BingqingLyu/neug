@@ -31,14 +31,16 @@ Leiden::Leiden(const StorageReadInterface& graph,
                std::vector<label_t> vertex_labels,
                std::vector<LabelTriplet> edge_triplets, double resolution,
                double threshold, int concurrency,
-               const std::string& initial_community_property)
+               const std::string& initial_community_property,
+               bool allow_relocation)
     : graph_(graph),
       vertex_labels_(std::move(vertex_labels)),
       edge_triplets_(std::move(edge_triplets)),
       resolution_(resolution),
       threshold_(threshold),
       concurrency_(concurrency),
-      initial_community_property_(initial_community_property) {
+      initial_community_property_(initial_community_property),
+      allow_relocation_(allow_relocation) {
   for (size_t i = 0; i < vertex_labels_.size(); ++i)
     label_to_index_[vertex_labels_[i]] = i;
   label_base_offsets_.resize(vertex_labels_.size(), 0);
@@ -215,7 +217,8 @@ void Leiden::compute() {
       bool improved = local_moving_phase();
       if (!improved)
         break;
-      refine();
+      if (allow_relocation_ || !initial_community_)
+        refine();
       std::vector<double> local_mod(num_threads_, 0.0);
       ParallelUtils::parallel_for(
           valid_vertices_.data(), valid_vertices_.size(),
@@ -299,7 +302,8 @@ void Leiden::compute() {
       bool improved = local_moving_phase();
       if (!improved)
         break;
-      refine();
+      if (allow_relocation_ || !initial_community_)
+        refine();
       double new_mod = 0;
       for (uint32_t gid : valid_vertices_) {
         size_t li = global_to_label_idx_[gid];
@@ -363,6 +367,11 @@ bool Leiden::local_moving_phase() {
               size_t end = std::min(start + size_t(64), batch_end);
               for (size_t i = start; i < end; ++i) {
                 vid_t u = order[i];
+                if (initial_community_ && !allow_relocation_ &&
+                    initial_community_[u] != UINT32_MAX) {
+                  best_com[i] = community_[u];
+                  continue;
+                }
                 uint32_t cur_com = community_[u];
                 double deg_u = degree_[u];
                 ++gen_val;
@@ -461,6 +470,11 @@ bool Leiden::local_moving_phase() {
               size_t end = std::min(start + size_t(64), batch_end);
               for (size_t i = start; i < end; ++i) {
                 uint32_t u_gid = order[i];
+                if (initial_community_ && !allow_relocation_ &&
+                    initial_community_[u_gid] != UINT32_MAX) {
+                  best_com[i] = community_[u_gid];
+                  continue;
+                }
                 uint32_t cur_com = community_[u_gid];
                 double deg_u = degree_[u_gid];
                 vid_t u_local = global_to_vid_[u_gid];
