@@ -32,8 +32,7 @@ Leiden::Leiden(const StorageReadInterface& graph,
                std::vector<LabelTriplet> edge_triplets, double resolution,
                double threshold, int concurrency,
                const std::string& initial_community_property,
-               bool allow_relocation,
-               const std::string& weight_property)
+               bool allow_relocation, const std::string& weight_property)
     : graph_(graph),
       vertex_labels_(std::move(vertex_labels)),
       edge_triplets_(std::move(edge_triplets)),
@@ -193,8 +192,8 @@ Leiden::Leiden(const StorageReadInterface& graph,
           triplet_has_weight_[ti] = true;
         } catch (const std::exception& e) {
           LOG(WARNING) << "Edge property '" << weight_property_
-                       << "' not found on edge triplet [" << t.src_label
-                       << ", " << t.dst_label << ", " << t.edge_label
+                       << "' not found on edge triplet [" << t.src_label << ", "
+                       << t.dst_label << ", " << t.edge_label
                        << "]; using default weight 1.0";
           triplet_has_weight_[ti] = false;
         }
@@ -215,14 +214,12 @@ void Leiden::compute() {
           double deg = 0;
           auto oes = oe_view.get_edges(v);
           for (auto it = oes.begin(); it != oes.end(); ++it)
-            deg += has_weight_
-                       ? weight_accessor_.get_typed_data<double>(it)
-                       : 1.0;
+            deg +=
+                has_weight_ ? weight_accessor_.get_typed_data<double>(it) : 1.0;
           auto ies = ie_view.get_edges(v);
           for (auto it = ies.begin(); it != ies.end(); ++it)
-            deg += has_weight_
-                       ? weight_accessor_.get_typed_data<double>(it)
-                       : 1.0;
+            deg +=
+                has_weight_ ? weight_accessor_.get_typed_data<double>(it) : 1.0;
           degree_[v] = deg;
         },
         num_threads_);
@@ -233,9 +230,8 @@ void Leiden::compute() {
           auto oes = oe_view.get_edges(v);
           double cnt = 0;
           for (auto it = oes.begin(); it != oes.end(); ++it)
-            cnt += has_weight_
-                       ? weight_accessor_.get_typed_data<double>(it)
-                       : 1.0;
+            cnt +=
+                has_weight_ ? weight_accessor_.get_typed_data<double>(it) : 1.0;
           local_m[tid] += cnt;
         },
         num_threads_);
@@ -273,8 +269,9 @@ void Leiden::compute() {
                 double w = has_weight_
                                ? weight_accessor_.get_typed_data<double>(it)
                                : 1.0;
-                local_mod[tid] += w / (2.0 * m_) -
-                                  degree_[v] * degree_[u] / (4.0 * m_ * m_);
+                local_mod[tid] += w / (2.0 * m_) - resolution_ * degree_[v] *
+                                                       degree_[u] /
+                                                       (4.0 * m_ * m_);
               }
             }
           },
@@ -308,18 +305,18 @@ void Leiden::compute() {
           for (size_t ti : label_out_triplets_[li]) {
             auto oes = out_views[ti].get_edges(lv);
             for (auto it = oes.begin(); it != oes.end(); ++it)
-              deg += triplet_has_weight_[ti]
-                         ? triplet_weight_accessors_[ti]
-                               .get_typed_data<double>(it)
-                         : 1.0;
+              deg +=
+                  triplet_has_weight_[ti]
+                      ? triplet_weight_accessors_[ti].get_typed_data<double>(it)
+                      : 1.0;
           }
           for (size_t ti : label_in_triplets_[li]) {
             auto ies = in_views[ti].get_edges(lv);
             for (auto it = ies.begin(); it != ies.end(); ++it)
-              deg += triplet_has_weight_[ti]
-                         ? triplet_weight_accessors_[ti]
-                               .get_typed_data<double>(it)
-                         : 1.0;
+              deg +=
+                  triplet_has_weight_[ti]
+                      ? triplet_weight_accessors_[ti].get_typed_data<double>(it)
+                      : 1.0;
           }
           degree_[gid] = deg;
         },
@@ -335,10 +332,10 @@ void Leiden::compute() {
           for (size_t ti : label_out_triplets_[li]) {
             auto oes = out_views[ti].get_edges(lv);
             for (auto it = oes.begin(); it != oes.end(); ++it)
-              cnt += triplet_has_weight_[ti]
-                         ? triplet_weight_accessors_[ti]
-                               .get_typed_data<double>(it)
-                         : 1.0;
+              cnt +=
+                  triplet_has_weight_[ti]
+                      ? triplet_weight_accessors_[ti].get_typed_data<double>(it)
+                      : 1.0;
           }
           local_m[tid] += cnt;
         },
@@ -372,12 +369,12 @@ void Leiden::compute() {
           for (auto it = oes.begin(); it != oes.end(); ++it) {
             uint32_t u_gid = static_cast<uint32_t>(dst_base + (*it));
             if (community_[gid] == community_[u_gid]) {
-              double w = triplet_has_weight_[ti]
-                             ? triplet_weight_accessors_[ti]
-                                   .get_typed_data<double>(it)
-                             : 1.0;
-              new_mod += w / (2.0 * m_) -
-                         degree_[gid] * degree_[u_gid] / (4.0 * m_ * m_);
+              double w =
+                  triplet_has_weight_[ti]
+                      ? triplet_weight_accessors_[ti].get_typed_data<double>(it)
+                      : 1.0;
+              new_mod += w / (2.0 * m_) - resolution_ * degree_[gid] *
+                                              degree_[u_gid] / (4.0 * m_ * m_);
             }
           }
         }
@@ -450,14 +447,16 @@ bool Leiden::local_moving_phase() {
                 };
                 auto oes = oe_view.get_edges(u);
                 for (auto it = oes.begin(); it != oes.end(); ++it)
-                  process_nbr(*it, has_weight_
-                                     ? weight_accessor_.get_typed_data<double>(it)
-                                     : 1.0);
+                  process_nbr(*it,
+                              has_weight_
+                                  ? weight_accessor_.get_typed_data<double>(it)
+                                  : 1.0);
                 auto ies = ie_view.get_edges(u);
                 for (auto it = ies.begin(); it != ies.end(); ++it)
-                  process_nbr(*it, has_weight_
-                                     ? weight_accessor_.get_typed_data<double>(it)
-                                     : 1.0);
+                  process_nbr(*it,
+                              has_weight_
+                                  ? weight_accessor_.get_typed_data<double>(it)
+                                  : 1.0);
                 double w_self =
                     (my_gen[cur_com] == gen_val) ? my_cw[cur_com] : 0.0;
                 double stot_cur_minus_u = stot_[cur_com] - deg_u;
@@ -564,10 +563,10 @@ bool Leiden::local_moving_phase() {
                   auto oes = out_views[ti].get_edges(u_local);
                   for (auto it = oes.begin(); it != oes.end(); ++it)
                     process_nbr(static_cast<uint32_t>(dst_base + (*it)),
-                               triplet_has_weight_[ti]
-                                   ? triplet_weight_accessors_[ti]
-                                         .get_typed_data<double>(it)
-                                   : 1.0);
+                                triplet_has_weight_[ti]
+                                    ? triplet_weight_accessors_[ti]
+                                          .get_typed_data<double>(it)
+                                    : 1.0);
                 }
                 for (size_t ti : label_in_triplets_[u_li]) {
                   if (triplet_src_base_[ti] == SIZE_MAX)
@@ -576,10 +575,10 @@ bool Leiden::local_moving_phase() {
                   auto ies = in_views[ti].get_edges(u_local);
                   for (auto it = ies.begin(); it != ies.end(); ++it)
                     process_nbr(static_cast<uint32_t>(src_base + (*it)),
-                               triplet_has_weight_[ti]
-                                   ? triplet_weight_accessors_[ti]
-                                         .get_typed_data<double>(it)
-                                   : 1.0);
+                                triplet_has_weight_[ti]
+                                    ? triplet_weight_accessors_[ti]
+                                          .get_typed_data<double>(it)
+                                    : 1.0);
                 }
                 double w_self =
                     (my_gen[cur_com] == gen_val) ? my_cw[cur_com] : 0.0;
@@ -804,10 +803,11 @@ void Leiden::refine() {
                   r_cw[sc] = 0.0;
                   touched_scs.push_back(sc);
                 }
-                r_cw[sc] += triplet_has_weight_[ti]
-                                ? triplet_weight_accessors_[ti]
-                                      .get_typed_data<double>(it)
-                                : 1.0;
+                r_cw[sc] +=
+                    triplet_has_weight_[ti]
+                        ? triplet_weight_accessors_[ti].get_typed_data<double>(
+                              it)
+                        : 1.0;
               }
             }
             double w_self = (r_gen[cur_sc] == refine_gen) ? r_cw[cur_sc] : 0.0;

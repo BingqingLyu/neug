@@ -533,3 +533,111 @@ def test_weighted_freeze_new_vertex_assignment(tmp_path):
     finally:
         conn.close()
         db.close()
+
+
+# -----------------------------------------------------------------------
+# Resolution convergence tests
+# Verifies that the modularity convergence check correctly uses the
+# resolution parameter, so that very high resolution produces more
+# communities than very low resolution.
+# -----------------------------------------------------------------------
+
+
+@contextmanager
+def resolution_test_connection(tmp_path):
+    """Create a graph for testing resolution sensitivity.
+
+    Two dense clusters (5 vertices each, K5) connected by a bridge edge.
+    With very high resolution (γ=100), vertices are penalized for joining
+    any community, producing many singletons.
+    With very low resolution (γ=0.001), vertices freely merge based on
+    connections, producing few communities.
+    """
+    db_dir = tmp_path / "gds_resolution_db"
+    db = Database(db_path=str(db_dir), mode="w")
+    conn = db.connect()
+    try:
+        conn.execute("CREATE NODE TABLE n(id INT64 PRIMARY KEY);")
+        conn.execute("CREATE REL TABLE e(FROM n TO n);")
+        for i in range(1, 11):
+            conn.execute(f"CREATE (:n {{id: {i}}});")
+        # Cluster A: 1-5 fully connected
+        for i in range(1, 6):
+            for j in range(i + 1, 6):
+                conn.execute(
+                    f"MATCH (a:n {{id: {i}}}), (b:n {{id: {j}}}) "
+                    f"CREATE (a)-[:e]->(b);"
+                )
+        # Cluster B: 6-10 fully connected
+        for i in range(6, 11):
+            for j in range(i + 1, 11):
+                conn.execute(
+                    f"MATCH (a:n {{id: {i}}}), (b:n {{id: {j}}}) "
+                    f"CREATE (a)-[:e]->(b);"
+                )
+        # Bridge: 1 -> 6
+        conn.execute("MATCH (a:n {id: 1}), (b:n {id: 6}) CREATE (a)-[:e]->(b);")
+        conn.execute("CALL project_graph('g', ['n'], {'[n, e, n]': ''});")
+        conn.execute("LOAD gds;")
+        yield conn
+    finally:
+        conn.close()
+        db.close()
+
+
+def test_leiden_resolution_sensitivity(tmp_path):
+    """Very high resolution should produce more communities than very low.
+
+    With γ=100, the penalty for joining any community is extreme, so many
+    vertices remain as singletons.
+    With γ=0.001, vertices freely merge, producing few communities.
+
+    Before the convergence-check fix, the modularity was computed with
+    γ=1.0 regardless of the resolution parameter, causing the algorithm
+    to stop prematurely. After the fix, the convergence check uses the
+    correct γ, allowing the algorithm to iterate properly.
+    """
+    with resolution_test_connection(tmp_path) as conn:
+        rows_low = list(
+            conn.execute(
+                "CALL leiden('g', {resolution: 0.001, concurrency: 1}) "
+                "YIELD node, community RETURN node.id, community;"
+            )
+        )
+        rows_high = list(
+            conn.execute(
+                "CALL leiden('g', {resolution: 100.0, concurrency: 1}) "
+                "YIELD node, community RETURN node.id, community;"
+            )
+        )
+    low_communities = {row[1] for row in rows_low}
+    high_communities = {row[1] for row in rows_high}
+    assert len(low_communities) < len(high_communities), (
+        f"Low resolution (γ=0.001) should produce fewer communities than "
+        f"high resolution (γ=100.0): {len(low_communities)} vs "
+        f"{len(high_communities)}"
+    )
+
+
+def test_louvain_resolution_sensitivity(tmp_path):
+    """Same as test_leiden_resolution_sensitivity but for Louvain."""
+    with resolution_test_connection(tmp_path) as conn:
+        rows_low = list(
+            conn.execute(
+                "CALL louvain('g', {resolution: 0.001, concurrency: 1}) "
+                "YIELD node, community RETURN node.id, community;"
+            )
+        )
+        rows_high = list(
+            conn.execute(
+                "CALL louvain('g', {resolution: 100.0, concurrency: 1}) "
+                "YIELD node, community RETURN node.id, community;"
+            )
+        )
+    low_communities = {row[1] for row in rows_low}
+    high_communities = {row[1] for row in rows_high}
+    assert len(low_communities) < len(high_communities), (
+        f"Low resolution (γ=0.001) should produce fewer communities than "
+        f"high resolution (γ=100.0): {len(low_communities)} vs "
+        f"{len(high_communities)}"
+    )
