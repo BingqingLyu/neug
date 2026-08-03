@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include "utils/v013_compat.h"
 
 #include <cstdint>
 #include <vector>

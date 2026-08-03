@@ -159,12 +159,12 @@ void BFS::compute() {
 
 void BFS::sink(execution::Context& ctx, int node_alias, int distance_alias,
                int path_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<int64_t> distance_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<int64_t> distance_builder;
 
   distance_builder.reserve(vertices_.size());
 
-  std::shared_ptr<execution::IContextColumn> path_column;
+  std::shared_ptr<IContextColumn> path_column;
   if (return_path_) {
     auto oe_view = graph_.GetGenericOutgoingGraphView(
         vertex_label_, vertex_label_, edge_label_);
@@ -189,14 +189,13 @@ void BFS::sink(execution::Context& ctx, int node_alias, int distance_alias,
       return source_;
     };
 
-    execution::PathColumnBuilder path_builder;
+    PathColumnBuilder path_builder;
     for (vid_t v : vertices_) {
       if (distances_[v] == std::numeric_limits<uint32_t>::max()) {
         path_builder.push_back_null();
       } else {
-        auto path = reconstruct_path(
-            v, source_, find_pred, vertex_label_, edge_label_, directed_,
-            graph_);
+        auto path = reconstruct_path(v, source_, find_pred, vertex_label_,
+                                     edge_label_, directed_, graph_);
         path_builder.push_back_opt(std::move(path));
       }
     }

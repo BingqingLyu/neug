@@ -99,7 +99,7 @@ std::unique_ptr<function::CallFuncInputBase> SSSPFunction::bind(
 }
 
 execution::Context SSSPFunction::exec(const function::CallFuncInputBase& input,
-                                      neug::IStorageInterface& g) {
+                                      IStorageInterface& g) {
   const auto& sssp_input = dynamic_cast<const SSSPInput&>(input);
 
   const auto& graph = dynamic_cast<const StorageReadInterface&>(g);
@@ -134,8 +134,9 @@ execution::Context SSSPFunction::exec(const function::CallFuncInputBase& input,
 
 function::function_set SSSPFunction::getFunctionSet() {
   function::function_set func_set;
-  std::vector<common::DataTypeId> input_types = {common::DataTypeId::kVarchar,
-                                                 common::DataTypeId::kUnknown};
+  std::vector<common::DataTypeId> input_types = {
+      common::DataTypeId::kVarchar,
+      common::DataTypeId::kUnknown};
   function::call_output_columns output_columns = {
       {"node", common::DataTypeId::kVertex},
       {"distance", common::DataTypeId::kDouble},

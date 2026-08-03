@@ -97,7 +97,7 @@ std::unique_ptr<function::CallFuncInputBase> BFSFunction::bind(
 }
 
 execution::Context BFSFunction::exec(const function::CallFuncInputBase& input,
-                                     neug::IStorageInterface& g) {
+                                     IStorageInterface& g) {
   const auto& bfs_input = dynamic_cast<const BFSInput&>(input);
 
   const auto& graph = dynamic_cast<const StorageReadInterface&>(g);
@@ -130,8 +130,9 @@ execution::Context BFSFunction::exec(const function::CallFuncInputBase& input,
 
 function::function_set BFSFunction::getFunctionSet() {
   function::function_set funcSet;
-  std::vector<common::DataTypeId> inputTypes = {common::DataTypeId::kVarchar,
-                                                common::DataTypeId::kUnknown};
+  std::vector<common::DataTypeId> inputTypes = {
+      common::DataTypeId::kVarchar,
+      common::DataTypeId::kUnknown};
   function::call_output_columns outputColumns = {
       {"node", common::DataTypeId::kVertex},
       {"distance", common::DataTypeId::kInt64},

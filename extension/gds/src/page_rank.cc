@@ -91,7 +91,7 @@ std::unique_ptr<function::CallFuncInputBase> PageRankFunction::bind(
 }
 
 execution::Context PageRankFunction::exec(
-    const function::CallFuncInputBase& input, neug::IStorageInterface& g) {
+    const function::CallFuncInputBase& input, IStorageInterface& g) {
   const auto& func_input = dynamic_cast<const PageRankInput&>(input);
   const auto& graph = dynamic_cast<const StorageReadInterface&>(g);
   execution::Context ret;
@@ -111,10 +111,9 @@ execution::Context PageRankFunction::exec(
 
     pagerank.sink(ret, func_input.node_alias, func_input.pr_alias);
   } else {
-    UndirectedPageRank pagerank(graph, func_input.vertex_label,
-                                func_input.edge_label,
-                                func_input.damping_factor,
-                                func_input.concurrency);
+    UndirectedPageRank pagerank(
+        graph, func_input.vertex_label, func_input.edge_label,
+        func_input.damping_factor, func_input.concurrency);
     pagerank.compute(func_input.max_iterations);
     pagerank.sink(ret, func_input.node_alias, func_input.pr_alias);
   }
@@ -126,8 +125,9 @@ function::function_set PageRankFunction::getFunctionSet() {
   // two input params:
   // 1. subgraph name in string
   // 2. options in map
-  std::vector<common::DataTypeId> inputTypes = {common::DataTypeId::kVarchar,
-                                                common::DataTypeId::kUnknown};
+  std::vector<common::DataTypeId> inputTypes = {
+      common::DataTypeId::kVarchar,
+      common::DataTypeId::kUnknown};
   // two output columns:
   // 1. node type
   // 2. page rank value in double

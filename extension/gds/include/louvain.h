@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include "utils/v013_compat.h"
 
 #include "neug/compiler/function/gds/gds_algo_function.h"
 #include "neug/compiler/function/neug_call_function.h"
@@ -30,7 +31,7 @@ struct NEUG_API LouvainFunction {
       const ::physical::PhysicalPlan& plan, int op_idx);
 
   static execution::Context exec(const function::CallFuncInputBase& input_base,
-                                 neug::IStorageInterface& g);
+                                 IStorageInterface& g);
 
   static function::function_set getFunctionSet();
 };

@@ -15,6 +15,7 @@
  */
 
 #pragma once
+#include "utils/v013_compat.h"
 
 #include "neug/compiler/function/gds/gds_algo_function.h"
 #include "neug/compiler/function/neug_call_function.h"
@@ -23,8 +24,8 @@ namespace neug {
 namespace gds {
 struct NEUG_API WCCFunction {
   static constexpr const char* name = "wcc";
-  static neug::execution::Context exec(const function::CallFuncInputBase& input,
-                                       neug::IStorageInterface& graph);
+  static execution::Context exec(const function::CallFuncInputBase& input,
+                                 IStorageInterface& graph);
 
   static std::unique_ptr<function::CallFuncInputBase> bind(
       const Schema& schema, const execution::ContextMeta& ctx_meta,

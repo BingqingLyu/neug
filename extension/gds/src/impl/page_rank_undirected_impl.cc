@@ -121,9 +121,9 @@ void UndirectedPageRank::compute(int max_iterations) {
 
 void UndirectedPageRank::sink(execution::Context& ctx, int node_alias,
                               int pr_alias) {
-  execution::MSVertexColumnBuilder builder(vertex_label_);
+  MSVertexColumnBuilder builder(vertex_label_);
 
-  execution::ValueColumnBuilder<double> pr_builder;
+  ValueColumnBuilder<double> pr_builder;
   pr_builder.reserve(valid_vertices_.size());
   for (vid_t v : valid_vertices_) {
     pr_builder.push_back_opt(pr_[v]);

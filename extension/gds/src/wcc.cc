@@ -83,7 +83,7 @@ std::unique_ptr<function::CallFuncInputBase> WCCFunction::bind(
 }
 
 execution::Context WCCFunction::exec(
-    const function::CallFuncInputBase& input_base, neug::IStorageInterface& g) {
+    const function::CallFuncInputBase& input_base, IStorageInterface& g) {
   const auto& input = dynamic_cast<const WCCInput&>(input_base);
   const auto& graph = dynamic_cast<const StorageReadInterface&>(g);
 
@@ -109,7 +109,8 @@ function::function_set WCCFunction::getFunctionSet() {
   // 1. subgraph name in string
   // 2. options in map
   std::vector<common::DataTypeId> inputTypes = {
-      common::DataTypeId::kVarchar, common::DataTypeId::kUnknown};
+      common::DataTypeId::kVarchar,
+      common::DataTypeId::kUnknown};
   // two output columns:
   // 1. node type
   // 2. label id in int64

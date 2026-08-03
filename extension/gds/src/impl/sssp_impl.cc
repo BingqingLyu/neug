@@ -179,8 +179,8 @@ void SSSP::compute() {
 }
 
 void SSSP::sink(execution::Context& ctx, int node_alias, int distance_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<double> distance_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<double> distance_builder;
 
   distance_builder.reserve(vertices_.size());
 

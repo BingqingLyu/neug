@@ -71,7 +71,7 @@ void LCCPred::compute() {
     }
   }
 
-  execution::LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
+  LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
   auto oe_view = graph_.GetGenericOutgoingGraphView(vertex_label_,
                                                     vertex_label_, edge_label_);
   auto ie_view = graph_.GetGenericIncomingGraphView(vertex_label_,
@@ -159,16 +159,16 @@ void LCCPred::compute() {
           pairs.insert({std::min(a, b), std::max(a, b)});
         }
       }
-      lcc_[v] =
-          2.0 * static_cast<double>(pairs.size()) /
-          (static_cast<double>(raw_degree) * static_cast<double>(raw_degree - 1));
+      lcc_[v] = 2.0 * static_cast<double>(pairs.size()) /
+                (static_cast<double>(raw_degree) *
+                 static_cast<double>(raw_degree - 1));
     }
   }
 }
 
 void LCCPred::sink(execution::Context& ctx, int node_alias, int lcc_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<double> lcc_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<double> lcc_builder;
   lcc_builder.reserve(vertices_.size());
 
   for (vid_t v : vertices_) {

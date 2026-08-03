@@ -158,8 +158,8 @@ void LCCDirected::compute() {
 }
 
 void LCCDirected::sink(execution::Context& ctx, int node_alias, int lcc_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<double> lcc_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<double> lcc_builder;
   lcc_builder.reserve(vertices_.size());
 
   for (vid_t v : vertices_) {

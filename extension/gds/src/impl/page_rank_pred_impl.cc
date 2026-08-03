@@ -74,7 +74,7 @@ void PageRankPred::compute() {
     return;
   }
 
-  execution::LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
+  LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
   auto oe_view = graph_.GetGenericOutgoingGraphView(vertex_label_,
                                                     vertex_label_, edge_label_);
   auto ie_view = graph_.GetGenericIncomingGraphView(vertex_label_,
@@ -133,8 +133,8 @@ void PageRankPred::compute() {
 
   std::unique_ptr<double[]> new_pr(new double[capacity]);
   for (int iter = 0; iter < max_iterations_; ++iter) {
-    double base = (1.0 - damping_factor_) / dn +
-                  damping_factor_ * dangling_sum / dn;
+    double base =
+        (1.0 - damping_factor_) / dn + damping_factor_ * dangling_sum / dn;
 
     if (directed_) {
       double next_dangling = 0.0;
@@ -184,8 +184,8 @@ void PageRankPred::compute() {
 }
 
 void PageRankPred::sink(execution::Context& ctx, int node_alias, int pr_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<double> pr_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<double> pr_builder;
   pr_builder.reserve(vertices_.size());
 
   for (vid_t v : vertices_) {

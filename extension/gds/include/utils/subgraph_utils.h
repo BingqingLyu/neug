@@ -15,11 +15,13 @@
  */
 
 #pragma once
+#include "utils/v013_compat.h"
 
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "neug/execution/common/types/graph_types.h"
 #include "neug/execution/expression/expr.h"
 #include "neug/storages/graph/graph_interface.h"
 
@@ -32,7 +34,7 @@ struct ParsedSubgraphEntry {
 };
 
 struct ParsedSubgraphEdgeEntry {
-  execution::LabelTriplet triplet;
+  LabelTriplet triplet;
   std::unique_ptr<execution::ExprBase> predicate;
 };
 

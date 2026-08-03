@@ -82,7 +82,7 @@ void SSSPPred::compute() {
             vertex_label_, vertex_label_, edge_label_, edge_weight_prop_));
   }
 
-  execution::LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
+  LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
   auto oe_view = graph_.GetGenericOutgoingGraphView(vertex_label_,
                                                     vertex_label_, edge_label_);
   auto ie_view = graph_.GetGenericIncomingGraphView(vertex_label_,
@@ -138,11 +138,11 @@ void SSSPPred::compute() {
 
 void SSSPPred::sink(execution::Context& ctx, int node_alias, int distance_alias,
                     int path_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<double> distance_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<double> distance_builder;
   distance_builder.reserve(vertices_.size());
 
-  std::shared_ptr<execution::IContextColumn> path_column;
+  std::shared_ptr<IContextColumn> path_column;
   if (return_path_) {
     auto oe_view = graph_.GetGenericOutgoingGraphView(
         vertex_label_, vertex_label_, edge_label_);
@@ -159,10 +159,10 @@ void SSSPPred::sink(execution::Context& ctx, int node_alias, int distance_alias,
 
     std::unique_ptr<execution::GeneralPred> epred;
     if (edge_pred_ != nullptr) {
-      epred =
-          std::make_unique<execution::GeneralPred>(edge_pred_->bind(&graph_, {}));
+      epred = std::make_unique<execution::GeneralPred>(
+          edge_pred_->bind(&graph_, {}));
     }
-    execution::LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
+    LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
 
     auto find_pred = [&](vid_t v) -> vid_t {
       double dv = distances_[v];
@@ -170,8 +170,10 @@ void SSSPPred::sink(execution::Context& ctx, int node_alias, int distance_alias,
       for (auto it = ie_edges.begin(); it != ie_edges.end(); ++it) {
         vid_t u = *it;
         double du = distances_[u];
-        if (du < 0) continue;
-        if (epred && !(*epred)(triplet, u, v, it.get_data_ptr())) continue;
+        if (du < 0)
+          continue;
+        if (epred && !(*epred)(triplet, u, v, it.get_data_ptr()))
+          continue;
         double weight =
             has_weight ? weight_accessor->get_typed_data<double>(it) : 1.0;
         if (std::abs(du + weight - dv) < 1e-9) {
@@ -183,8 +185,10 @@ void SSSPPred::sink(execution::Context& ctx, int node_alias, int distance_alias,
         for (auto it = oe_edges.begin(); it != oe_edges.end(); ++it) {
           vid_t u = *it;
           double du = distances_[u];
-          if (du < 0) continue;
-          if (epred && !(*epred)(triplet, v, u, it.get_data_ptr())) continue;
+          if (du < 0)
+            continue;
+          if (epred && !(*epred)(triplet, v, u, it.get_data_ptr()))
+            continue;
           double weight =
               has_weight ? weight_accessor->get_typed_data<double>(it) : 1.0;
           if (std::abs(du + weight - dv) < 1e-9) {
@@ -195,14 +199,13 @@ void SSSPPred::sink(execution::Context& ctx, int node_alias, int distance_alias,
       return source_;
     };
 
-    execution::PathColumnBuilder path_builder;
+    PathColumnBuilder path_builder;
     for (vid_t v : vertices_) {
       if (distances_[v] < 0) {
         path_builder.push_back_null();
       } else {
-        auto path = reconstruct_path(
-            v, source_, find_pred, vertex_label_, edge_label_, directed_,
-            graph_);
+        auto path = reconstruct_path(v, source_, find_pred, vertex_label_,
+                                     edge_label_, directed_, graph_);
         path_builder.push_back_opt(std::move(path));
       }
     }

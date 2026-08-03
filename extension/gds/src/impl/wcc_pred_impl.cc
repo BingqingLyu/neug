@@ -75,7 +75,7 @@ void WCCPred::compute() {
     }
   }
 
-  execution::LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
+  LabelTriplet triplet{vertex_label_, vertex_label_, edge_label_};
   auto oe_view = graph_.GetGenericOutgoingGraphView(vertex_label_,
                                                     vertex_label_, edge_label_);
   auto ie_view = graph_.GetGenericIncomingGraphView(vertex_label_,
@@ -134,8 +134,8 @@ void WCCPred::compute() {
 
 void WCCPred::sink(execution::Context& ctx, int node_alias,
                    int component_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<int64_t> component_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<int64_t> component_builder;
   component_builder.reserve(vertices_.size());
 
   for (vid_t v : vertices_) {

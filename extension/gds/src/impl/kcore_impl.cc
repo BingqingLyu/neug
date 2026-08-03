@@ -143,12 +143,12 @@ void KCore::compute() {
     frontier.swap(next_frontier);
     ++rounds;
   }
-  (void)rounds;
+  (void) rounds;
 }
 
 void KCore::sink(execution::Context& ctx, int node_alias, int core_alias) {
-  execution::MSVertexColumnBuilder node_builder(vertex_label_);
-  execution::ValueColumnBuilder<int64_t> core_builder;
+  MSVertexColumnBuilder node_builder(vertex_label_);
+  ValueColumnBuilder<int64_t> core_builder;
 
   node_builder.reserve(vertices_.size());
   core_builder.reserve(vertices_.size());
