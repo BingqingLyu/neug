@@ -47,3 +47,6 @@
 [submodule "third_party/carquet"]
 	path = third_party/carquet
 	url = https://github.com/Vitruves/carquet.git
+[submodule "third_party/aliyun-odps-sdk-cpp"]
+	path = third_party/aliyun-odps-sdk-cpp
+	url = https://github.com/aliyun/aliyun-odps-sdk-cpp.git
