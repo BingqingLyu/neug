@@ -23,6 +23,7 @@
 
 #include "odps_connection.h"
 #include "odps_options.h"
+#include "odps_schema_converter.h"
 
 namespace neug {
 namespace extension {
@@ -306,6 +307,8 @@ TEST(OdpsConnectionTest, HandleUnavailableWithoutSdk) {
 #if !defined(ODPS_SDK_ENABLE_ARROW)
   EXPECT_FALSE(conn.available());
   EXPECT_EQ(conn.handle(), nullptr);
+  EXPECT_FALSE(conn.clientAvailable());
+  EXPECT_EQ(conn.odpsClient(), nullptr);
 #endif
 }
 
@@ -319,6 +322,160 @@ TEST(OdpsConnectionTest, MasksCredentials) {
   EXPECT_EQ(maskCredential("abcd"), "***");
   EXPECT_EQ(maskCredential("abcdefgh"), "abcd***");
 }
+
+// ============================================================================
+// OdpsSchemaConverter (T105 pure type-mapping core, SDK-free)
+// ============================================================================
+
+namespace {
+int code(OdpsTypeCode t) { return static_cast<int>(t); }
+}  // namespace
+
+TEST(OdpsSchemaConverterTest, MapsIntegerWidths) {
+  // NeuG DataType has no 8/16-bit primitive: narrow ints collapse to INT32.
+  for (auto t : {OdpsTypeCode::kTinyint, OdpsTypeCode::kSmallint,
+                 OdpsTypeCode::kInteger}) {
+    auto dt = OdpsSchemaConverter::convertScalarType(code(t), "c");
+    ASSERT_TRUE(dt->has_primitive_type());
+    EXPECT_EQ(dt->primitive_type(), ::common::PrimitiveType::DT_SIGNED_INT32);
+  }
+  auto bigint =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kBigint), "c");
+  EXPECT_EQ(bigint->primitive_type(), ::common::PrimitiveType::DT_SIGNED_INT64);
+}
+
+TEST(OdpsSchemaConverterTest, MapsFloatDoubleBoolean) {
+  EXPECT_EQ(
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kFloat), "c")
+          ->primitive_type(),
+      ::common::PrimitiveType::DT_FLOAT);
+  EXPECT_EQ(
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kDouble), "c")
+          ->primitive_type(),
+      ::common::PrimitiveType::DT_DOUBLE);
+  EXPECT_EQ(
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kBoolean), "c")
+          ->primitive_type(),
+      ::common::PrimitiveType::DT_BOOL);
+}
+
+TEST(OdpsSchemaConverterTest, MapsStringFamilyToVarChar) {
+  for (auto t :
+       {OdpsTypeCode::kString, OdpsTypeCode::kVarchar, OdpsTypeCode::kChar}) {
+    auto dt = OdpsSchemaConverter::convertScalarType(code(t), "c");
+    ASSERT_TRUE(dt->has_string());
+    EXPECT_TRUE(dt->string().has_var_char());
+  }
+}
+
+TEST(OdpsSchemaConverterTest, SupportedScalarClassification) {
+  for (auto t :
+       {OdpsTypeCode::kTinyint, OdpsTypeCode::kSmallint, OdpsTypeCode::kInteger,
+        OdpsTypeCode::kBigint, OdpsTypeCode::kFloat, OdpsTypeCode::kDouble,
+        OdpsTypeCode::kBoolean, OdpsTypeCode::kString, OdpsTypeCode::kVarchar,
+        OdpsTypeCode::kChar}) {
+    EXPECT_TRUE(OdpsSchemaConverter::isSupportedScalar(code(t)));
+  }
+  for (auto t :
+       {OdpsTypeCode::kDecimal, OdpsTypeCode::kDate, OdpsTypeCode::kDatetime,
+        OdpsTypeCode::kTimestamp, OdpsTypeCode::kTimestampNtz,
+        OdpsTypeCode::kBinary, OdpsTypeCode::kArray, OdpsTypeCode::kMap,
+        OdpsTypeCode::kStruct, OdpsTypeCode::kJson,
+        OdpsTypeCode::kIntervalYearMonth, OdpsTypeCode::kIntervalDayTime,
+        OdpsTypeCode::kUnknown}) {
+    EXPECT_FALSE(OdpsSchemaConverter::isSupportedScalar(code(t)));
+  }
+}
+
+TEST(OdpsSchemaConverterTest, UnsupportedTypesThrow) {
+  for (auto t :
+       {OdpsTypeCode::kDecimal, OdpsTypeCode::kDate, OdpsTypeCode::kDatetime,
+        OdpsTypeCode::kTimestamp, OdpsTypeCode::kTimestampNtz,
+        OdpsTypeCode::kBinary, OdpsTypeCode::kArray, OdpsTypeCode::kMap,
+        OdpsTypeCode::kStruct, OdpsTypeCode::kJson, OdpsTypeCode::kUnknown}) {
+    EXPECT_THROW(OdpsSchemaConverter::convertScalarType(code(t), "col"),
+                 exception::InvalidArgumentException);
+  }
+  // An out-of-range raw code is treated as unknown, not silently mapped.
+  EXPECT_THROW(OdpsSchemaConverter::convertScalarType(999, "col"),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsSchemaConverterTest, TypeNameIsHumanReadable) {
+  EXPECT_EQ(OdpsSchemaConverter::typeName(code(OdpsTypeCode::kBigint)),
+            "BIGINT");
+  EXPECT_EQ(OdpsSchemaConverter::typeName(code(OdpsTypeCode::kDecimal)),
+            "DECIMAL");
+  EXPECT_EQ(OdpsSchemaConverter::typeName(code(OdpsTypeCode::kInteger)), "INT");
+  EXPECT_NE(OdpsSchemaConverter::typeName(999).find("UNKNOWN"),
+            std::string::npos);
+}
+
+TEST(OdpsSchemaConverterTest, ConvertColumnsBuildsOrderedTableSchema) {
+  std::vector<OdpsColumnDesc> cols = {
+      {"id", code(OdpsTypeCode::kBigint), false},
+      {"name", code(OdpsTypeCode::kString), true},
+      {"score", code(OdpsTypeCode::kDouble), true},
+  };
+  auto entry = OdpsSchemaConverter::convertColumns(cols);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->type(), reader::EntrySchemaType::TABLE);
+  ASSERT_EQ(entry->columnNames.size(), 3u);
+  ASSERT_EQ(entry->columnTypes.size(), 3u);
+  EXPECT_EQ(entry->columnNames[0], "id");
+  EXPECT_EQ(entry->columnNames[1], "name");
+  EXPECT_EQ(entry->columnNames[2], "score");
+  EXPECT_EQ(entry->columnTypes[0]->primitive_type(),
+            ::common::PrimitiveType::DT_SIGNED_INT64);
+  EXPECT_TRUE(entry->columnTypes[1]->has_string());
+  EXPECT_EQ(entry->columnTypes[2]->primitive_type(),
+            ::common::PrimitiveType::DT_DOUBLE);
+}
+
+TEST(OdpsSchemaConverterTest, ConvertColumnsRejectsEmpty) {
+  EXPECT_THROW(OdpsSchemaConverter::convertColumns({}),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsSchemaConverterTest, ConvertColumnsRejectsEmptyName) {
+  std::vector<OdpsColumnDesc> cols = {{"", code(OdpsTypeCode::kBigint), false}};
+  EXPECT_THROW(OdpsSchemaConverter::convertColumns(cols),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsSchemaConverterTest, ConvertColumnsRejectsDuplicateName) {
+  std::vector<OdpsColumnDesc> cols = {
+      {"a", code(OdpsTypeCode::kBigint), false},
+      {"a", code(OdpsTypeCode::kString), true},
+  };
+  EXPECT_THROW(OdpsSchemaConverter::convertColumns(cols),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsSchemaConverterTest, ConvertColumnsPropagatesUnsupportedType) {
+  std::vector<OdpsColumnDesc> cols = {
+      {"id", code(OdpsTypeCode::kBigint), false},
+      {"amount", code(OdpsTypeCode::kDecimal), true},
+  };
+  EXPECT_THROW(OdpsSchemaConverter::convertColumns(cols),
+               exception::InvalidArgumentException);
+}
+
+#if !defined(ODPS_SDK_ENABLE_ARROW)
+TEST(OdpsSchemaConverterTest, SniffWithoutSdkThrowsClearError) {
+  OdpsConnectionOptions opts;
+  opts.accessId = "id";
+  opts.accessKey = "key";
+  opts.endpoint = "http://example/endpoint";
+  opts.project = "proj";
+  OdpsConnection conn(opts);
+  OdpsSourceDesc source;
+  source.project = "proj";
+  source.table = "tbl";
+  EXPECT_THROW(OdpsSchemaConverter::sniffTableSchema(conn, source),
+               exception::InvalidArgumentException);
+}
+#endif
 
 }  // namespace
 }  // namespace odps
