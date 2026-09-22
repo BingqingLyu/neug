@@ -39,3 +39,12 @@ if(NEUG_WITH_ODPS_SDK)
         neug::odps_core)
     target_compile_definitions(neug_odps_extension PRIVATE ODPS_SDK_ENABLE_ARROW)
 endif()
+
+# Unit tests for the pure-logic modules (T103 odps_options, T104
+# odps_connection credential resolution). No SDK/network required.
+if(BUILD_TEST)
+    add_extension_test(
+        NAME odps
+        TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/odps_test.cc")
+    add_dependencies(odps_extension_test neug_odps_extension)
+endif()
