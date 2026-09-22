@@ -26,6 +26,7 @@
 #if defined(ODPS_SDK_ENABLE_ARROW)
 #include "configuration.h"
 #include "max_storage_api.h"
+#include "odps_api.h"
 #endif
 
 namespace neug {
@@ -146,7 +147,10 @@ OdpsConnectionOptions OdpsConnectionOptionsBuilder::build() const {
 
 struct OdpsConnection::Impl {
 #if defined(ODPS_SDK_ENABLE_ARROW)
-  apsara::odps::sdk::MaxStorageApi api;
+  apsara::odps::sdk::max_storage_api::MaxStorageApi api;
+  // ODPS core client, used by schema sniffing (T105) to read authoritative
+  // table metadata (works even for empty tables, unlike the Arrow read path).
+  apsara::odps::sdk::IODPSPtr odps;
   bool ready = false;
 #endif
 };
@@ -171,6 +175,7 @@ OdpsConnection::OdpsConnection(const OdpsConnectionOptions& options)
     conf.SetRegionId(options_.regionId);
   }
   impl_->api.Init(conf);
+  impl_->odps = apsara::odps::sdk::IODPS::Create(conf, options_.project);
   impl_->ready = true;
 #endif
 }
@@ -182,7 +187,17 @@ OdpsConnection& OdpsConnection::operator=(OdpsConnection&&) noexcept = default;
 void* OdpsConnection::handle() const {
 #if defined(ODPS_SDK_ENABLE_ARROW)
   if (impl_ && impl_->ready) {
-    return const_cast<apsara::odps::sdk::MaxStorageApi*>(&impl_->api);
+    return const_cast<apsara::odps::sdk::max_storage_api::MaxStorageApi*>(
+        &impl_->api);
+  }
+#endif
+  return nullptr;
+}
+
+void* OdpsConnection::odpsClient() const {
+#if defined(ODPS_SDK_ENABLE_ARROW)
+  if (impl_ && impl_->odps) {
+    return impl_->odps.get();
   }
 #endif
   return nullptr;

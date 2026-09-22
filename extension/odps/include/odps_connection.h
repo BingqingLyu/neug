@@ -120,10 +120,18 @@ class OdpsConnection {
 
   const OdpsConnectionOptions& options() const { return options_; }
 
-  // Opaque pointer to `apsara::odps::sdk::MaxStorageApi*` (owned by this
-  // object), or nullptr when built without SDK support.
+  // Opaque pointer to
+  // `apsara::odps::sdk::max_storage_api::MaxStorageApi*` (owned by this
+  // object), or nullptr when built without SDK support. Used by the data-plane
+  // reader (Storage API).
   void* handle() const;
   bool available() const { return handle() != nullptr; }
+
+  // Opaque pointer to `apsara::odps::sdk::IODPS*` (the ODPS core client, owned
+  // by this object), or nullptr when built without SDK support. Used by schema
+  // sniffing (T105), which reads authoritative table metadata via the core API.
+  void* odpsClient() const;
+  bool clientAvailable() const { return odpsClient() != nullptr; }
 
  private:
   OdpsConnectionOptions options_;

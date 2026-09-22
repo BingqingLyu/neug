@@ -27,7 +27,11 @@ target_include_directories(neug_odps_extension PRIVATE
 
 # neug (shared library) is linked last so the extension resolves core symbols
 # against libneug while keeping its own static dependencies self-contained.
-target_link_libraries(neug_odps_extension PRIVATE neug)
+# Protobuf follows neug: the schema converter (T105) builds `::common::DataType`
+# protobuf messages (mutable_string()->mutable_var_char()), whose Arena
+# allocator lives in the protobuf runtime that libneug does not re-export under
+# RTLD_LOCAL. Mirrors extension/parquet.
+target_link_libraries(neug_odps_extension PRIVATE neug ${Protobuf_LIBRARIES})
 
 if(NEUG_WITH_ODPS_SDK)
     include(${CMAKE_SOURCE_DIR}/cmake/BuildOdpsSdkAsThirdParty.cmake)

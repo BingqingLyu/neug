@@ -20,6 +20,9 @@
 #include "neug/compiler/function/function.h"
 #include "neug/compiler/function/read_function.h"
 #include "neug/utils/exception/exception.h"
+#include "odps_connection.h"
+#include "odps_options.h"
+#include "odps_schema_converter.h"
 
 namespace neug {
 namespace function {
@@ -39,7 +42,8 @@ struct OdpsReadFunction {
   static constexpr const char* name = "ODPS_SCAN";
 
   static function_set getFunctionSet() {
-    auto typeIDs = std::vector<::neug::DataTypeId>{::neug::DataTypeId::kVarchar};
+    auto typeIDs =
+        std::vector<::neug::DataTypeId>{::neug::DataTypeId::kVarchar};
     auto readFunction = std::make_unique<ReadFunction>(name, typeIDs);
     readFunction->execFunc = execFunc;
     readFunction->supplierFunc = supplierFunc;
@@ -65,9 +69,17 @@ struct OdpsReadFunction {
 
   static std::shared_ptr<reader::EntrySchema> sniffFunc(
       const reader::FileSchema& schema) {
-    THROW_INVALID_ARGUMENT_EXCEPTION(
-        "ODPS_SCAN: schema sniffing is not yet implemented (module 1, task "
-        "T105 pending)");
+    // Resolve the source table (odps:// address + options) and the
+    // credential/endpoint configuration, then read the authoritative
+    // IODPSTableSchema through the ODPS core API and map it to a NeuG
+    // EntrySchema. Without the SDK build this throws a clear "requires
+    // NEUG_WITH_ODPS_SDK" error (see OdpsSchemaConverter::sniffTableSchema).
+    auto source = extension::odps::OdpsOptions::fromFileSchema(schema);
+    auto connectionOptions =
+        extension::odps::OdpsConnectionOptionsBuilder(schema).build();
+    extension::odps::OdpsConnection connection(connectionOptions);
+    return extension::odps::OdpsSchemaConverter::sniffTableSchema(connection,
+                                                                  source);
   }
 };
 
