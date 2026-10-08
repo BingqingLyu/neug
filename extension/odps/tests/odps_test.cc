@@ -13,14 +13,19 @@
  * limitations under the License.
  */
 
+#include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "neug/common/types/value.h"
 #include "neug/utils/exception/exception.h"
 
+#include "odps_arrow_abi.h"
+#include "odps_arrow_bridge.h"
 #include "odps_connection.h"
 #include "odps_options.h"
 #include "odps_schema_converter.h"
@@ -474,6 +479,458 @@ TEST(OdpsSchemaConverterTest, SniffWithoutSdkThrowsClearError) {
                exception::InvalidArgumentException);
 }
 #endif
+
+// ============================================================================
+// Arrow C Data Interface bridge (T106, SDK-free): recordBatchToDataChunk
+// ============================================================================
+
+namespace {
+
+// Zero-initialized scalar-column schema. `format`/`name` must outlive the
+// returned struct; tests pass string literals (static storage duration).
+OdpsArrowSchema makeScalarSchema(const char* format, const char* name) {
+  OdpsArrowSchema s{};
+  s.format = format;
+  s.name = name;
+  s.flags = ODPS_ARROW_FLAG_NULLABLE;
+  return s;
+}
+
+// Zero-initialized scalar-column array over `buffers`.
+OdpsArrowArray makeScalarArray(int64_t length, int64_t nullCount,
+                               std::vector<const void*>& buffers) {
+  OdpsArrowArray a{};
+  a.length = length;
+  a.null_count = nullCount;
+  a.n_buffers = static_cast<int64_t>(buffers.size());
+  a.buffers = buffers.data();
+  return a;
+}
+
+// Packs a per-row validity mask into Arrow's LSB0 bitmap and reports the null
+// count. An empty mask means "all valid"; callers then export a null validity
+// buffer, which the bridge treats as having no nulls.
+std::vector<uint8_t> packValidity(const std::vector<bool>& valid,
+                                  int64_t& nullCount) {
+  std::vector<uint8_t> bits((valid.size() + 7) / 8, 0);
+  nullCount = 0;
+  for (size_t i = 0; i < valid.size(); ++i) {
+    if (valid[i]) {
+      bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+      ++nullCount;
+    }
+  }
+  return bits;
+}
+
+// Hand-builds an Arrow C Data Interface record batch: a top-level "+s" struct
+// of scalar columns. Owns every backing buffer plus the schema/array structs
+// and their child pointer tables, so the exported batch stays valid until the
+// builder dies. The bridge deep-copies values and never invokes `release`, so
+// release callbacks are intentionally left null. Example:
+//
+//   RecordBatchBuilder batch(3);
+//   batch.addInt64("id", {10, 20, 30}).addString("name", {"a", "b", "c"});
+//   auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+class RecordBatchBuilder {
+ public:
+  explicit RecordBatchBuilder(int64_t numRows) : numRows_(numRows) {}
+
+  RecordBatchBuilder& addInt64(const char* name, std::vector<int64_t> values,
+                               std::vector<bool> valid = {}) {
+    return addFixed("l", name, std::move(values), std::move(valid),
+                    &Column::i64);
+  }
+  RecordBatchBuilder& addInt32(const char* name, std::vector<int32_t> values,
+                               std::vector<bool> valid = {}) {
+    return addFixed("i", name, std::move(values), std::move(valid),
+                    &Column::i32);
+  }
+  RecordBatchBuilder& addDouble(const char* name, std::vector<double> values,
+                                std::vector<bool> valid = {}) {
+    return addFixed("g", name, std::move(values), std::move(valid),
+                    &Column::f64);
+  }
+  RecordBatchBuilder& addFloat(const char* name, std::vector<float> values,
+                               std::vector<bool> valid = {}) {
+    return addFixed("f", name, std::move(values), std::move(valid),
+                    &Column::f32);
+  }
+  RecordBatchBuilder& addDate32(const char* name, std::vector<int32_t> days,
+                                std::vector<bool> valid = {}) {
+    return addFixed("tdD", name, std::move(days), std::move(valid),
+                    &Column::i32);
+  }
+  RecordBatchBuilder& addTimestampMillis(const char* name,
+                                         std::vector<int64_t> millis,
+                                         std::vector<bool> valid = {}) {
+    return addFixed("tsm:", name, std::move(millis), std::move(valid),
+                    &Column::i64);
+  }
+
+  // Bit-packed boolean column (Arrow format "b").
+  RecordBatchBuilder& addBool(const char* name, const std::vector<bool>& values,
+                              std::vector<bool> valid = {}) {
+    auto col = std::make_unique<Column>();
+    col->boolBits.assign((values.size() + 7) / 8, 0);
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (values[i]) {
+        col->boolBits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+      }
+    }
+    const void* data = col->boolBits.data();
+    finalize("b", name, valid, {data}, std::move(col));
+    return *this;
+  }
+
+  // UTF-8 string column (Arrow format "u", 32-bit offsets).
+  RecordBatchBuilder& addString(const char* name,
+                                const std::vector<std::string>& values,
+                                std::vector<bool> valid = {}) {
+    auto col = std::make_unique<Column>();
+    col->strOffsets.reserve(values.size() + 1);
+    col->strOffsets.push_back(0);
+    for (const auto& s : values) {
+      col->strOffsets.push_back(col->strOffsets.back() +
+                                static_cast<int32_t>(s.size()));
+    }
+    for (const auto& s : values) {
+      col->strChars.insert(col->strChars.end(), s.begin(), s.end());
+    }
+    const void* offsets = col->strOffsets.data();
+    const void* chars = col->strChars.data();
+    finalize("u", name, valid, {offsets, chars}, std::move(col));
+    return *this;
+  }
+
+  const OdpsArrowSchema& schema() {
+    ensureRoot();
+    return rootSchema_;
+  }
+  const OdpsArrowArray& array() {
+    ensureRoot();
+    return rootArray_;
+  }
+
+ private:
+  // Owns the backing memory for one scalar column. Only the storage relevant
+  // to the column's Arrow type is populated; the rest stay empty.
+  struct Column {
+    OdpsArrowSchema schema{};
+    OdpsArrowArray array{};
+    std::vector<const void*> buffers;
+    std::vector<uint8_t> validity;
+    std::vector<int64_t> i64;
+    std::vector<int32_t> i32;
+    std::vector<double> f64;
+    std::vector<float> f32;
+    std::vector<uint8_t> boolBits;
+    std::vector<int32_t> strOffsets;
+    std::vector<char> strChars;
+  };
+
+  template <typename T>
+  RecordBatchBuilder& addFixed(const char* format, const char* name,
+                               std::vector<T> values, std::vector<bool> valid,
+                               std::vector<T> Column::*storage) {
+    auto col = std::make_unique<Column>();
+    (col.get()->*storage) = std::move(values);
+    const void* data = (col.get()->*storage).data();
+    finalize(format, name, valid, {data}, std::move(col));
+    return *this;
+  }
+
+  // Sets the column schema, packs the validity bitmap (when `valid` is
+  // non-empty), prepends the validity buffer to `dataBuffers`, and records the
+  // child array.
+  void finalize(const char* format, const char* name,
+                const std::vector<bool>& valid,
+                std::vector<const void*> dataBuffers,
+                std::unique_ptr<Column> col) {
+    col->schema = makeScalarSchema(format, name);
+    int64_t nullCount = 0;
+    const bool nullable = !valid.empty();
+    if (nullable) {
+      col->validity = packValidity(valid, nullCount);
+    }
+    std::vector<const void*> buffers;
+    buffers.reserve(dataBuffers.size() + 1);
+    buffers.push_back(nullable ? static_cast<const void*>(col->validity.data())
+                               : nullptr);
+    for (const void* b : dataBuffers) {
+      buffers.push_back(b);
+    }
+    col->buffers = std::move(buffers);
+    col->array = makeScalarArray(numRows_, nullCount, col->buffers);
+    columns_.push_back(std::move(col));
+  }
+
+  void ensureRoot() {
+    if (rootBuilt_) {
+      return;
+    }
+    childSchemas_.reserve(columns_.size());
+    childArrays_.reserve(columns_.size());
+    for (const auto& col : columns_) {
+      childSchemas_.push_back(&col->schema);
+      childArrays_.push_back(&col->array);
+    }
+    rootSchema_ = OdpsArrowSchema{};
+    rootSchema_.format = "+s";
+    rootSchema_.n_children = static_cast<int64_t>(columns_.size());
+    rootSchema_.children =
+        childSchemas_.empty() ? nullptr : childSchemas_.data();
+
+    rootBuffers_.assign(1, nullptr);
+    rootArray_ = OdpsArrowArray{};
+    rootArray_.length = numRows_;
+    rootArray_.null_count = 0;
+    rootArray_.offset = 0;
+    rootArray_.n_buffers = 1;
+    rootArray_.n_children = static_cast<int64_t>(columns_.size());
+    rootArray_.buffers = rootBuffers_.data();
+    rootArray_.children = childArrays_.empty() ? nullptr : childArrays_.data();
+    rootBuilt_ = true;
+  }
+
+  int64_t numRows_;
+  bool rootBuilt_ = false;
+  std::vector<std::unique_ptr<Column>> columns_;
+  std::vector<OdpsArrowSchema*> childSchemas_;
+  std::vector<OdpsArrowArray*> childArrays_;
+  std::vector<const void*> rootBuffers_;
+  OdpsArrowSchema rootSchema_{};
+  OdpsArrowArray rootArray_{};
+};
+
+TEST(OdpsArrowBridgeTest, ConvertsScalarColumnsIntoDataChunk) {
+  RecordBatchBuilder batch(3);
+  batch.addInt64("id", {10, 20, 30})
+      .addInt32("qty", {1, 2, 3})
+      .addDouble("score", {1.5, 2.5, 3.5})
+      .addFloat("ratio", {0.25f, 0.5f, 0.75f})
+      .addBool("flag", {true, false, true})
+      .addString("name", {"alice", "bob", "carol"});
+
+  auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+  ASSERT_NE(chunk, nullptr);
+  EXPECT_EQ(chunk->col_num(), 6u);
+  EXPECT_EQ(chunk->row_num(), 3u);
+
+  auto id = chunk->get(0);
+  ASSERT_NE(id, nullptr);
+  EXPECT_EQ(id->size(), 3u);
+  EXPECT_FALSE(id->is_optional());
+  EXPECT_EQ(id->get_elem(0).GetValue<int64_t>(), 10);
+  EXPECT_EQ(id->get_elem(1).GetValue<int64_t>(), 20);
+  EXPECT_EQ(id->get_elem(2).GetValue<int64_t>(), 30);
+
+  auto qty = chunk->get(1);
+  EXPECT_EQ(qty->get_elem(0).GetValue<int32_t>(), 1);
+  EXPECT_EQ(qty->get_elem(2).GetValue<int32_t>(), 3);
+
+  auto score = chunk->get(2);
+  EXPECT_DOUBLE_EQ(score->get_elem(1).GetValue<double>(), 2.5);
+
+  auto ratio = chunk->get(3);
+  EXPECT_FLOAT_EQ(ratio->get_elem(0).GetValue<float>(), 0.25f);
+
+  auto flag = chunk->get(4);
+  EXPECT_TRUE(flag->get_elem(0).GetValue<bool>());
+  EXPECT_FALSE(flag->get_elem(1).GetValue<bool>());
+  EXPECT_TRUE(flag->get_elem(2).GetValue<bool>());
+
+  auto name = chunk->get(5);
+  EXPECT_EQ(StringValue::Get(name->get_elem(0)), "alice");
+  EXPECT_EQ(StringValue::Get(name->get_elem(1)), "bob");
+  EXPECT_EQ(StringValue::Get(name->get_elem(2)), "carol");
+}
+
+TEST(OdpsArrowBridgeTest, PreservesNullsAcrossColumnTypes) {
+  RecordBatchBuilder batch(3);
+  batch.addInt64("id", {10, 0, 30}, {true, false, true})
+      .addString("name", {"alice", "", "carol"}, {true, false, true})
+      .addDouble("score", {1.5, 2.5, 0.0}, {true, true, false});
+
+  auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+  ASSERT_EQ(chunk->col_num(), 3u);
+
+  auto id = chunk->get(0);
+  EXPECT_TRUE(id->is_optional());
+  EXPECT_TRUE(id->has_value(0));
+  EXPECT_FALSE(id->has_value(1));
+  EXPECT_TRUE(id->has_value(2));
+  EXPECT_EQ(id->get_elem(0).GetValue<int64_t>(), 10);
+  EXPECT_TRUE(id->get_elem(1).IsNull());
+  EXPECT_EQ(id->get_elem(2).GetValue<int64_t>(), 30);
+
+  auto name = chunk->get(1);
+  EXPECT_EQ(StringValue::Get(name->get_elem(0)), "alice");
+  EXPECT_TRUE(name->get_elem(1).IsNull());
+  EXPECT_EQ(StringValue::Get(name->get_elem(2)), "carol");
+
+  auto score = chunk->get(2);
+  EXPECT_TRUE(score->has_value(0));
+  EXPECT_TRUE(score->has_value(1));
+  EXPECT_FALSE(score->has_value(2));
+  EXPECT_DOUBLE_EQ(score->get_elem(1).GetValue<double>(), 2.5);
+  EXPECT_TRUE(score->get_elem(2).IsNull());
+}
+
+TEST(OdpsArrowBridgeTest, ConvertsEmptyStringsAndUnicode) {
+  RecordBatchBuilder batch(3);
+  batch.addString("s", {"", "\xe4\xb8\xad\xe6\x96\x87", "tail"});
+
+  auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+  auto col = chunk->get(0);
+  ASSERT_EQ(col->size(), 3u);
+  EXPECT_EQ(StringValue::Get(col->get_elem(0)), "");
+  // UTF-8 bytes are copied verbatim (no transcoding):
+  // "\xe4\xb8\xad\xe6\x96\x87".
+  EXPECT_EQ(StringValue::Get(col->get_elem(1)),
+            std::string("\xe4\xb8\xad\xe6\x96\x87"));
+  EXPECT_EQ(StringValue::Get(col->get_elem(2)), "tail");
+}
+
+TEST(OdpsArrowBridgeTest, ConvertsDateAndTimestampColumns) {
+  RecordBatchBuilder batch(2);
+  batch.addDate32("d", {19000, 19001})
+      .addTimestampMillis("ts", {1234567890000LL, 1234567890001LL});
+
+  auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+  ASSERT_EQ(chunk->col_num(), 2u);
+  EXPECT_EQ(chunk->get(0)->get_elem(0).GetValue<date_t>(), Date(19000));
+  EXPECT_EQ(chunk->get(0)->get_elem(1).GetValue<date_t>(), Date(19001));
+  EXPECT_EQ(chunk->get(1)->get_elem(0).GetValue<timestamp_ms_t>().milli_second,
+            1234567890000LL);
+  EXPECT_EQ(chunk->get(1)->get_elem(1).GetValue<timestamp_ms_t>().milli_second,
+            1234567890001LL);
+}
+
+TEST(OdpsArrowBridgeTest, EmptyBatchYieldsEmptyColumn) {
+  RecordBatchBuilder batch(0);
+  batch.addInt64("id", {});
+
+  auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+  ASSERT_NE(chunk, nullptr);
+  EXPECT_EQ(chunk->col_num(), 1u);
+  EXPECT_EQ(chunk->row_num(), 0u);
+  EXPECT_EQ(chunk->get(0)->size(), 0u);
+}
+
+TEST(OdpsArrowBridgeTest, EmptyStructYieldsNoColumns) {
+  RecordBatchBuilder batch(0);
+  auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+  ASSERT_NE(chunk, nullptr);
+  EXPECT_EQ(chunk->col_num(), 0u);
+  EXPECT_EQ(chunk->row_num(), 0u);
+}
+
+// A minimal, fully-valid single int64-column batch whose fields are exposed so
+// each error test can corrupt exactly one and assert the bridge rejects it.
+struct SingleInt64Batch {
+  int64_t data[2] = {7, 9};
+  const void* childBuffers[2] = {nullptr, data};
+  OdpsArrowSchema childSchema{};
+  OdpsArrowArray childArray{};
+  OdpsArrowSchema* schemaChildren[1] = {&childSchema};
+  OdpsArrowArray* arrayChildren[1] = {&childArray};
+  const void* rootBuffers[1] = {nullptr};
+  OdpsArrowSchema dummyDict{};
+  OdpsArrowSchema schema{};
+  OdpsArrowArray array{};
+
+  SingleInt64Batch() {
+    childSchema.format = "l";
+    childSchema.name = "n";
+    childSchema.flags = ODPS_ARROW_FLAG_NULLABLE;
+    childArray.length = 2;
+    childArray.n_buffers = 2;
+    childArray.buffers = childBuffers;
+
+    schema.format = "+s";
+    schema.n_children = 1;
+    schema.children = schemaChildren;
+    array.length = 2;
+    array.n_buffers = 1;
+    array.buffers = rootBuffers;
+    array.n_children = 1;
+    array.children = arrayChildren;
+  }
+};
+
+TEST(OdpsArrowBridgeTest, RejectsNonStructRoot) {
+  SingleInt64Batch b;
+  b.schema.format = "l";
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsNullRootFormat) {
+  SingleInt64Batch b;
+  b.schema.format = nullptr;
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsChildCountMismatch) {
+  SingleInt64Batch b;
+  b.array.n_children = 2;  // schema declares 1
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsNullableRootStruct) {
+  SingleInt64Batch b;
+  b.array.null_count = 1;
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsUnsupportedChildFormat) {
+  SingleInt64Batch b;
+  b.childSchema.format = "d:38,10";  // decimal128 -> module 4 (T401)
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsDictionaryColumn) {
+  SingleInt64Batch b;
+  b.childSchema.dictionary = &b.dummyDict;
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsChildLengthMismatch) {
+  SingleInt64Batch b;
+  b.childArray.length = 1;  // root struct has length 2
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsNullChild) {
+  SingleInt64Batch b;
+  b.arrayChildren[0] = nullptr;
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsNullsWithoutValidityBuffer) {
+  SingleInt64Batch b;
+  b.childArray.null_count = 1;  // childBuffers[0] stays null
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsWrongBufferCount) {
+  SingleInt64Batch b;
+  b.childArray.n_buffers = 3;  // int64 column expects exactly 2
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+}  // namespace
 
 }  // namespace
 }  // namespace odps

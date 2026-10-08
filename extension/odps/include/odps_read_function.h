@@ -16,12 +16,16 @@
 #pragma once
 
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include "neug/compiler/function/function.h"
 #include "neug/compiler/function/read_function.h"
 #include "neug/utils/exception/exception.h"
+#include "neug/utils/io/read/common/row_expression_filter.h"
 #include "odps_connection.h"
 #include "odps_options.h"
+#include "odps_record_batch_supplier.h"
 #include "odps_schema_converter.h"
 
 namespace neug {
@@ -35,8 +39,9 @@ namespace function {
  * `{FORMAT}_SCAN` convention. The three callbacks mirror the ReadFunction
  * contract (sniff schema, materialize into a Context, or stream as chunks).
  *
- * Module 1 (tasks T105/T106) wires these to the Storage API reader; the
- * callbacks below are placeholders that fail loudly until then.
+ * Module 1 wires these to the Storage API reader: `sniffFunc` maps the table
+ * schema (T105), while `execFunc`/`supplierFunc` stream Arrow record batches
+ * through `OdpsRecordBatchSupplier` and the C Data Interface bridge (T106).
  */
 struct OdpsReadFunction {
   static constexpr const char* name = "ODPS_SCAN";
@@ -55,16 +60,34 @@ struct OdpsReadFunction {
 
   static execution::Context execFunc(
       std::shared_ptr<reader::ReadSharedState> state) {
-    THROW_INVALID_ARGUMENT_EXCEPTION(
-        "ODPS_SCAN: reading ODPS tables is not yet implemented (module 1, "
-        "tasks T105/T106 pending)");
+    // Eager path (LOAD FROM ... RETURN). Stream every batch through the
+    // supplier and materialize it into a Context. Pushing column pruning /
+    // predicates down to the SDK is module 3 (T301/T303); here the scan reads
+    // all columns and then applies the engine-side projection/filter contract
+    // every reader honors (both are no-ops for `RETURN *` with no predicate),
+    // so ODPS behaves exactly like the CSV/parquet scans downstream.
+    auto supplier =
+        std::make_shared<extension::odps::OdpsRecordBatchSupplier>(state);
+    const std::vector<std::string> columnNames =
+        state->schema.entry ? state->schema.entry->columnNames
+                            : std::vector<std::string>{};
+    execution::Context ctx;
+    while (auto chunk = supplier->GetNextChunk()) {
+      auto filtered = reader::filter_chunk(*chunk, state->skipRows, columnNames,
+                                           state->parameters);
+      ctx.append_chunk(
+          reader::project_chunk(filtered, columnNames, state->projectColumns));
+    }
+    return ctx;
   }
 
   static std::shared_ptr<IDataChunkSupplier> supplierFunc(
       std::shared_ptr<reader::ReadSharedState> state) {
-    THROW_INVALID_ARGUMENT_EXCEPTION(
-        "ODPS_SCAN: streaming ODPS tables is not yet implemented (module 1, "
-        "task T106 pending)");
+    // Lazy path (COPY ... FROM (LOAD FROM ...) fusion). Emits full-table
+    // columns in schema order; the COPY insert operator maps columns by index
+    // downstream. `project_columns`/`skip_rows` are empty on this path in v1.
+    return std::make_shared<extension::odps::OdpsRecordBatchSupplier>(
+        std::move(state));
   }
 
   static std::shared_ptr<reader::EntrySchema> sniffFunc(

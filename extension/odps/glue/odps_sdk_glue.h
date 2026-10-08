@@ -89,6 +89,58 @@ void odps_glue_schema_free(OdpsGlueSchema* schema);
 // Free a heap string returned by the glue (e.g. an out_error message).
 void odps_glue_free_string(char* s);
 
+// ---------------------------------------------------------------------------
+// Data-plane reader (module 1, task T106).
+//
+// Iterates a Storage API TableReadSession's splits and exports each Arrow
+// record batch across the ABI seam through the Arrow C Data Interface. Only
+// POD structs, C strings, opaque handles and void* cross here; every
+// SDK/Arrow C++ object stays on this ABI=0 side.
+// ---------------------------------------------------------------------------
+
+// Split/read knobs for opening a reader. Non-positive values mean "SDK
+// default".
+typedef struct OdpsGlueReadOptions {
+  long long split_size_bytes;  // >0 -> SIZE split mode with this target size
+  long long max_batch_rows;  // >0 -> ReadOptions.mMaxBatchRows (SDK max 20000)
+} OdpsGlueReadOptions;
+
+// Opaque reader handle. Owns a TableReadSession, its split list, the split
+// cursor and the currently-open TableReadStream. The OdpsGlueConnection it was
+// opened from must outlive it.
+typedef struct OdpsGlueReader OdpsGlueReader;
+
+// Open a read session over `project`.`schema`.`table`. Returns NULL on failure,
+// in which case *out_error (when non-NULL) is set to a heap message the caller
+// must free with odps_glue_free_string.
+OdpsGlueReader* odps_glue_open_reader(OdpsGlueConnection* conn,
+                                      const char* project, const char* schema,
+                                      const char* table,
+                                      const OdpsGlueReadOptions* options,
+                                      char** out_error);
+
+// Number of splits in the session (>=0), or -1 on error (*out_error set).
+long long odps_glue_reader_split_count(OdpsGlueReader* reader,
+                                       char** out_error);
+
+// Total record count across all splits (>=0), or -1 on error/unknown.
+long long odps_glue_reader_record_count(OdpsGlueReader* reader,
+                                        char** out_error);
+
+// Fetch the next record batch, exported through the Arrow C Data Interface.
+// `out_array`/`out_schema` point to caller-owned structs with the canonical
+// ArrowArray/ArrowSchema layout; the glue fills them (including the release
+// callbacks), and the caller MUST invoke those release callbacks when done.
+// Returns:
+//   1  -> a batch was produced (out_array/out_schema filled);
+//   0  -> end of data (all splits exhausted; structs left untouched);
+//  <0  -> error (*out_error set).
+int odps_glue_reader_next_batch(OdpsGlueReader* reader, void* out_array,
+                                void* out_schema, char** out_error);
+
+// Close and destroy a reader (safe on NULL); closes any open stream first.
+void odps_glue_reader_close(OdpsGlueReader* reader);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
