@@ -24,9 +24,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
+
+#include <arrow/api.h>
+#include <arrow/c/bridge.h>
 
 #include "configuration.h"
 #include "max_storage_api.h"
@@ -45,13 +49,32 @@ using apsara::odps::sdk::IODPSTableColumn;
 using apsara::odps::sdk::IODPSTablePtr;
 using apsara::odps::sdk::IODPSTableSchemaPtr;
 using apsara::odps::sdk::OdpsException;
+using apsara::odps::sdk::max_storage_api::IArrowReadStreamPtr;
+using apsara::odps::sdk::max_storage_api::ISplitPtr;
+using apsara::odps::sdk::max_storage_api::ISplitsPtr;
+using apsara::odps::sdk::max_storage_api::ITableReadSessionPtr;
 using apsara::odps::sdk::max_storage_api::MaxStorageApi;
+using apsara::odps::sdk::max_storage_api::ReadOptions;
+using apsara::odps::sdk::max_storage_api::SplitMode;
+using apsara::odps::sdk::max_storage_api::SplitOptions;
 
-// Concrete definition of the opaque handle. Owns the SDK objects; both live
-// entirely on the ABI=0 side and are never exposed as C++ types.
+// Concrete definition of the opaque connection handle. Owns the SDK objects;
+// both live entirely on the ABI=0 side and are never exposed as C++ types.
 struct Connection {
   MaxStorageApi api;
   IODPSPtr odps;
+};
+
+// Concrete definition of the opaque reader handle. Owns the Storage API read
+// session, its split list, the split cursor and the currently-open stream; all
+// live entirely on the ABI=0 side and are never exposed as C++ types.
+struct Reader {
+  ITableReadSessionPtr session;
+  ISplitsPtr splits;
+  ReadOptions readOptions;
+  int32_t splitCount = 0;
+  int32_t splitIndex = 0;      // next split to open
+  IArrowReadStreamPtr stream;  // currently-open stream (null between splits)
 };
 
 const char* orEmpty(const char* s) { return s ? s : ""; }
@@ -73,8 +96,9 @@ std::string formatOdpsException(const OdpsException& e) {
 
 }  // namespace
 
-// The public seam uses C linkage; the handle type is the file-local Connection.
+// The public seam uses C linkage; the handle types are the file-local structs.
 struct OdpsGlueConnection : public Connection {};
+struct OdpsGlueReader : public Reader {};
 
 extern "C" OdpsGlueConnection* odps_glue_connect(const OdpsGlueConfig* config,
                                                  char** out_error) {
@@ -203,3 +227,189 @@ extern "C" void odps_glue_schema_free(OdpsGlueSchema* schema) {
 }
 
 extern "C" void odps_glue_free_string(char* s) { std::free(s); }
+
+extern "C" OdpsGlueReader* odps_glue_open_reader(
+    OdpsGlueConnection* conn, const char* project, const char* schema,
+    const char* table, const OdpsGlueReadOptions* options, char** out_error) {
+  if (out_error != nullptr) {
+    *out_error = nullptr;
+  }
+  if (conn == nullptr) {
+    if (out_error != nullptr) {
+      *out_error = dupString("odps_glue: null connection");
+    }
+    return nullptr;
+  }
+  try {
+    // Default split mode is ROW_OFFSET; a positive split_size_mb hint switches
+    // to SIZE mode with that target split size (module 3 tunes this further).
+    SplitOptions splitOptions;
+    if (options != nullptr && options->split_size_bytes > 0) {
+      splitOptions.mSplitMode = SplitMode::SIZE;
+      splitOptions.mSplitSize = options->split_size_bytes;
+    }
+    ReadOptions readOptions;
+    if (options != nullptr && options->max_batch_rows > 0) {
+      readOptions.mMaxBatchRows = options->max_batch_rows;
+    }
+
+    ITableReadSessionPtr session = (*(conn->api.BuildTableReadSession()))
+                                       .SetProject(orEmpty(project))
+                                       .SetSchema(orEmpty(schema))
+                                       .SetTable(orEmpty(table))
+                                       .SetSplitOptions(splitOptions)
+                                       .Build();
+    if (!session) {
+      if (out_error != nullptr) {
+        *out_error = dupString("odps_glue: null read session");
+      }
+      return nullptr;
+    }
+    ISplitsPtr splits = session->GetSplits();
+    if (!splits) {
+      if (out_error != nullptr) {
+        *out_error = dupString("odps_glue: null split list");
+      }
+      return nullptr;
+    }
+
+    OdpsGlueReader* reader = new OdpsGlueReader();
+    reader->session = session;
+    reader->splits = splits;
+    reader->readOptions = readOptions;
+    reader->splitCount = splits->GetSplitCount();
+    reader->splitIndex = 0;
+    return reader;
+  } catch (const OdpsException& e) {
+    if (out_error != nullptr) {
+      *out_error = dupString(formatOdpsException(e));
+    }
+    return nullptr;
+  } catch (const std::exception& e) {
+    if (out_error != nullptr) {
+      *out_error = dupString(e.what());
+    }
+    return nullptr;
+  }
+}
+
+extern "C" long long odps_glue_reader_split_count(OdpsGlueReader* reader,
+                                                  char** out_error) {
+  if (out_error != nullptr) {
+    *out_error = nullptr;
+  }
+  if (reader == nullptr) {
+    if (out_error != nullptr) {
+      *out_error = dupString("odps_glue: null reader");
+    }
+    return -1;
+  }
+  return static_cast<long long>(reader->splitCount);
+}
+
+extern "C" long long odps_glue_reader_record_count(OdpsGlueReader* reader,
+                                                   char** out_error) {
+  if (out_error != nullptr) {
+    *out_error = nullptr;
+  }
+  if (reader == nullptr) {
+    if (out_error != nullptr) {
+      *out_error = dupString("odps_glue: null reader");
+    }
+    return -1;
+  }
+  try {
+    return static_cast<long long>(reader->splits->GetRecordCount());
+  } catch (const OdpsException& e) {
+    if (out_error != nullptr) {
+      *out_error = dupString(formatOdpsException(e));
+    }
+    return -1;
+  } catch (const std::exception& e) {
+    if (out_error != nullptr) {
+      *out_error = dupString(e.what());
+    }
+    return -1;
+  }
+}
+
+extern "C" int odps_glue_reader_next_batch(OdpsGlueReader* reader,
+                                           void* out_array, void* out_schema,
+                                           char** out_error) {
+  if (out_error != nullptr) {
+    *out_error = nullptr;
+  }
+  if (reader == nullptr || out_array == nullptr) {
+    if (out_error != nullptr) {
+      *out_error = dupString("odps_glue: null reader or output");
+    }
+    return -1;
+  }
+  try {
+    while (true) {
+      if (!reader->stream) {
+        if (reader->splitIndex >= reader->splitCount) {
+          return 0;  // end of data: every split exhausted
+        }
+        ISplitPtr split = reader->splits->GetSplit(reader->splitIndex);
+        ++reader->splitIndex;
+        reader->stream = reader->session->BuildTableReadStream()
+                             ->SetSplit(split)
+                             .SetReadOptions(reader->readOptions)
+                             .Build();
+        if (!reader->stream) {
+          if (out_error != nullptr) {
+            *out_error = dupString("odps_glue: failed to build read stream");
+          }
+          return -1;
+        }
+      }
+      std::shared_ptr<arrow::RecordBatch> batch = reader->stream->Read();
+      if (!batch) {
+        // Current split drained; close it and advance to the next split.
+        reader->stream->Close();
+        reader->stream.reset();
+        continue;
+      }
+      // Export through the Arrow C Data Interface (stable C ABI): the batch's
+      // buffers stay owned by Arrow and are released by the consumer via the
+      // release callbacks installed here. No Arrow C++ type crosses the seam.
+      arrow::Status st = arrow::ExportRecordBatch(
+          *batch, static_cast<struct ArrowArray*>(out_array),
+          out_schema != nullptr ? static_cast<struct ArrowSchema*>(out_schema)
+                                : nullptr);
+      if (!st.ok()) {
+        if (out_error != nullptr) {
+          *out_error = dupString("odps_glue: failed to export record batch: " +
+                                 st.ToString());
+        }
+        return -1;
+      }
+      return 1;
+    }
+  } catch (const OdpsException& e) {
+    if (out_error != nullptr) {
+      *out_error = dupString(formatOdpsException(e));
+    }
+    return -1;
+  } catch (const std::exception& e) {
+    if (out_error != nullptr) {
+      *out_error = dupString(e.what());
+    }
+    return -1;
+  }
+}
+
+extern "C" void odps_glue_reader_close(OdpsGlueReader* reader) {
+  if (reader == nullptr) {
+    return;
+  }
+  try {
+    if (reader->stream) {
+      reader->stream->Close();
+    }
+  } catch (...) {
+    // Best-effort close; never let an exception cross the C seam.
+  }
+  delete reader;
+}
