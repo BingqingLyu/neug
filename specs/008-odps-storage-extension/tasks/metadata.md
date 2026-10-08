@@ -7,13 +7,17 @@
 > 说明：任务按 spec 的 4 个功能模块组织（P1→P4）。Module 1 额外承载 extension 脚手架与 SDK 集成等地基工作
 > （没有它 M1 无法编译/加载）。各模块末位为该模块的测试任务（对齐 spec 各模块的 Test Strategy）。
 > 技术选型遵循 plan.md 的 Resolved Decisions：读路径 = Storage API（SDK `max_storage_api`，`WITH_ARROW=ON`）、
-> Arrow 仅锁 extension 内 + RTLD_LOCAL 隔离、SDK 以 submodule+patch 对齐 carquet、凭据对齐 httpfs `s3_options.cc`。
+> Arrow 仅锁 extension 内 + RTLD_LOCAL 隔离、SDK 以 submodule+patch 并入但用 **`ExternalProject_Add`**（非 `add_subdirectory`）、凭据对齐 httpfs `s3_options.cc`。
+>
+> **修订（Linux docker / Ubuntu 22.04 / GCC 11.4 实测后）**：三项集成硬约束已写入 plan.md “已验证的 SDK 集成硬约束”：
+> C1 `add_subdirectory`→`ExternalProject_Add`；C2 SDK 仅 x86_64 可编（`crc32c.cpp` 无架构保护 x86 汇编，本地 arm64 靠补丁）；
+> C3 SDK 硬编码 ABI=0 vs core 默认 ABI=1 → extension 内分 **内层 ABI=0 glue + 外层 ABI=1 shim**，经 C 接口/Arrow C Data Interface 跨缝。
 
 # Modules
 
 - Module 1: ODPS 表扫描数据源 (Priority: P1)
-    - [F008-T101] 集成 aliyun-odps-sdk-cpp 为 third_party（submodule + Build\*AsThirdParty，WITH_ARROW=ON）
-    - [F008-T102] 建立 extension/odps 骨架与注册（ODPS_SCAN 占位，可 `LOAD odps;`）
+    - [F008-T101] 集成 aliyun-odps-sdk-cpp 为 third_party（submodule + Build\*AsThirdParty 用 **ExternalProject_Add**，WITH_ARROW=ON，仅 x86_64）
+    - [F008-T102] 建立 extension/odps 骨架与注册（ODPS_SCAN 占位，可 `LOAD odps;`；**内层 ABI=0 glue + 外层 ABI=1 shim 两层**）
     - [F008-T103] 实现 odps_options：解析 odps:// 地址与选项 → OdpsSourceDesc
     - [F008-T104] 实现 odps_connection：封装 SDK 连接/鉴权，凭据对齐 httpfs 三件套
     - [F008-T105] 实现 sniffFunc + odps_schema_converter（基础标量类型）
