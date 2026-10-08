@@ -296,7 +296,7 @@ TEST(OdpsConnectionTest, MissingEndpointThrows) {
 }
 
 TEST(OdpsConnectionTest, HandleUnavailableWithoutSdk) {
-  // In a skeleton build (NEUG_WITH_ODPS_SDK=OFF) the SDK handle stays null but
+  // In a skeleton build (NEUG_WITH_ODPS_SDK=OFF) the glue handle stays null but
   // the connection object is still usable for option storage.
   OdpsConnectionOptions opts;
   opts.accessId = "id";
@@ -306,9 +306,7 @@ TEST(OdpsConnectionTest, HandleUnavailableWithoutSdk) {
   EXPECT_EQ(conn.options().endpoint, "http://example/endpoint");
 #if !defined(ODPS_SDK_ENABLE_ARROW)
   EXPECT_FALSE(conn.available());
-  EXPECT_EQ(conn.handle(), nullptr);
-  EXPECT_FALSE(conn.clientAvailable());
-  EXPECT_EQ(conn.odpsClient(), nullptr);
+  EXPECT_EQ(conn.glueHandle(), nullptr);
 #endif
 }
 

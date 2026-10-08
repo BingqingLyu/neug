@@ -34,21 +34,47 @@ target_include_directories(neug_odps_extension PRIVATE
 target_link_libraries(neug_odps_extension PRIVATE neug ${Protobuf_LIBRARIES})
 
 if(NEUG_WITH_ODPS_SDK)
+    # Builds the SDK as an isolated ExternalProject (it is not
+    # subdirectory-safe) and defines the IMPORTED aggregate target
+    # neug::odps_sdk plus NEUG_ODPS_SDK_INCLUDE_DIRS / _EXTERNAL_TARGET.
+    # See plan.md C1.
     include(${CMAKE_SOURCE_DIR}/cmake/BuildOdpsSdkAsThirdParty.cmake)
+    build_odps_sdk_as_third_party()
+
+    # Inner ABI=0 glue: the only TU that sees SDK/Arrow headers, built with
+    # -D_GLIBCXX_USE_CXX11_ABI=0 to match the SDK. The outer extension stays on
+    # NeuG's ABI=1 / C++20 and talks to it through the pure C seam. See plan.md C3.
+    add_subdirectory(glue)
+
+    # The outer extension includes only the SDK-free glue header and links the
+    # glue static lib. CMake propagates the glue's PRIVATE neug::odps_sdk link
+    # interface (four SDK static libs + shared deps) into this .so link-only,
+    # without leaking the SDK include dirs / ABI=0 define into the outer TUs.
     target_include_directories(neug_odps_extension PRIVATE
-        ${NEUG_ODPS_SDK_INCLUDE_DIRS})
-    target_link_libraries(neug_odps_extension PRIVATE
-        neug::odps_max_storage_api
-        neug::odps_tunnel
-        neug::odps_core)
+        ${CMAKE_CURRENT_SOURCE_DIR}/glue)
+    target_link_libraries(neug_odps_extension PRIVATE odps_sdk_glue)
     target_compile_definitions(neug_odps_extension PRIVATE ODPS_SDK_ENABLE_ARROW)
 endif()
 
 # Unit tests for the pure-logic modules (T103 odps_options, T104
-# odps_connection credential resolution). No SDK/network required.
+# odps_connection credential resolution). No SDK/network required, so the
+# default (NEUG_WITH_ODPS_SDK=OFF) skeleton build runs them green.
 if(BUILD_TEST)
-    add_extension_test(
-        NAME odps
-        TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/odps_test.cc")
+    if(NEUG_WITH_ODPS_SDK)
+        # add_extension_test compiles the extension src/*.cc directly into the
+        # test exe, so under SDK-ON it needs the same glue header, glue lib and
+        # ODPS_SDK_ENABLE_ARROW define as the extension .so.
+        add_extension_test(
+            NAME odps
+            TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/odps_test.cc"
+            EXTRA_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/glue"
+            EXTRA_LINK_LIBS odps_sdk_glue)
+        target_compile_definitions(odps_extension_test PRIVATE
+            ODPS_SDK_ENABLE_ARROW)
+    else()
+        add_extension_test(
+            NAME odps
+            TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/odps_test.cc")
+    endif()
     add_dependencies(odps_extension_test neug_odps_extension)
 endif()
