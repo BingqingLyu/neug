@@ -33,15 +33,40 @@ CI 无访问：以 mock/录制回放或 `skipif`（无凭据跳过）保证可�
 2. **Arrow 边界 = extension 内自持 + C Data Interface 桥**：Arrow 只存在于 odps extension（链 SDK 自带 Arrow），
    `RecordBatch→DataChunk` 转换在 extension 内部完成后只让 NeuG core 类型（`DataChunk`/`ValueColumn`）跨边界，
    RTLD_LOCAL 隔离；**NeuG core 仍零 Arrow**。跨版本 ABI 通过 Arrow C Data Interface（`ArrowSchema`/`ArrowArray`，见算法 4）规避。
-3. **SDK 交付形态 = 对齐 carquet**：`third_party/` 下 git submodule +（可选）`third_party/odps-sdk.patch`，CMake 内幂等 `git apply --check` 应用，
-   新增 `cmake/BuildOdpsSdkAsThirdParty.cmake`（沿用每库一文件的约定），`add_subdirectory(... EXCLUDE_FROM_ALL)` 并关掉 SDK 的 test/example/benchmark。
+3. **SDK 交付形态 = ExternalProject_Add + ABI 中立缝（本轮 docker 实测后修订）**：`third_party/` 下 git submodule +（可选）`third_party/odps-sdk.patch`
+   （幂等 `git apply --check` 应用），新增 `cmake/BuildOdpsSdkAsThirdParty.cmake`（沿用每库一文件的约定）。
+   **不再用 `add_subdirectory`**：SDK 根 CMakeLists 全量用 `${CMAKE_SOURCE_DIR}` 且把生成头（`build_sdk_version`/`common/sdk_version.h`）写回源码树，
+   作子工程时路径解析到 NeuG 根 → configure 失败（已实测）。改用 `ExternalProject_Add` 独立 configure/build 后 `IMPORTED` 其静态库
+   （`odps_sdk_common_static`/`odps_sdk_core_static`/`odps_sdk_tunnel_static`/`max_storage_api_static`），并关掉 SDK 的 test/example/benchmark。
 4. **凭据注入 = 对齐 httpfs `s3_options.cc`**：复用其 `resolveOption(opts,{aliases},{envKeys})` / `findFirstEnv({...})` / `maskCredential()` 三件套，
    优先级 **显式 options > 环境变量 > 报错**；AK 走 `access_id/access_key` options 或 `ODPS_ACCESS_KEY_ID/SECRET`（含 `ALIBABA_CLOUD_` 别名）env，
    endpoint 走 options 或 `ODPS_ENDPOINT`；日志一律脱敏、凭据不进查询文本/proto；TLS CA 沿用 `SSL_CERT_FILE→CURL_CA_BUNDLE→AWS_CA_BUNDLE→distro`。
 
 **Risks（需在实现初 spike 验证，非阻塞决策）**：
-- **Arrow 1.0.0 可编译性**：SDK 自带 Arrow 1.0.0（2020），需在 NeuG 的 C++20 工具链验证能否构建；若受阻，考虑让 SDK 改用 NeuG 的 Arrow 18（system-first 依赖覆盖），但有 SDK 端 Arrow API drift 风险。spike 结论决定最终 Arrow 版本，不影响 core 零-Arrow 不变式。
+- ~~**Arrow 1.0.0 可编译性**~~ **【已实测排除】**：见下“已验证的 SDK 集成硬约束”。
 - **谓词下推翻译覆盖率**：`skip_rows` 复杂表达式可能无法整树翻译，需保证回退引擎侧过滤后结果等价（算法 5 兜底）。
+
+**已验证的 SDK 集成硬约束（Linux docker / Ubuntu 22.04 / GCC 11.4 实测）**：
+
+本轮在 arm64 Ubuntu 22.04 容器内实际编译 SDK + Arrow，结论：
+
+1. **Arrow 1.0.0 可编译性 —— 头号 Risk 确定性排除**：SDK 自带 Arrow 1.0.0 在 GCC 11 / `-D_GLIBCXX_USE_CXX11_ABI=0` 下无错编译安装。
+2. **SDK 本体可编**：`odps_sdk_common_static`/`odps_sdk_core_static`/`odps_sdk_tunnel_static`/`max_storage_api_static` 四个静态库 `EXIT=0` 全部编成。
+3. **门控 glue 已对真实 SDK 头验证**：用只 `-c` 编译的探针 TU 在 `gnu++14`（SDK 自身标准）与 `gnu++20`（NeuG extension 实际标准）下均编译通过
+   → 命名空间/签名/枚举 cast 正确（含 T104 `MaxStorageApi` 实在 `apsara::odps::sdk::max_storage_api`），且 SDK 头在 C++20 TU 下可用。
+
+**集成时必须解决的三项硬约束**：
+
+- **C1（集成方式）**：`add_subdirectory` 不可行（SDK 非 subdirectory-safe）→ 改 `ExternalProject_Add` + `IMPORTED`（已写入决策 3）。
+- **C2（架构）**：**SDK 仅 x86_64 可编**。`util/crc32c.cpp` 的 `DoCrc32c_Intel`/`_Byte`/`GetDoCrc32cImpl` 用无架构保护的 x86 内联汇编
+  （`crc32b/crc32q` SSE4.2、`cpuid`、`xchg %%rbx`），arm64 报 `impossible constraint in 'asm'`。临时加 `#if defined(__x86_64__)` 保护后其余全编成 → crc32c 是唯一 arm64 阻塞点。
+  **生产为 VPC-only x86_64 Linux 故不阻断真实特性**；本地（Apple Silicon arm64）验证以 arm64 + crc32c 架构保护补丁为准（保真 x86_64 构建交 CI）。
+  若上游接受，可将该架构保护作为 `third_party/odps-sdk.patch` 的一部分（同时修复 arm64 开发机构建）。
+- **C3（ABI 缝）**：SDK 对 GCC≥5 **硬编码 `-D_GLIBCXX_USE_CXX11_ABI=0`**（`CMakeLists.txt:32` 本体 + `OdpsDeps.cmake:18` 的 Arrow/Protobuf/GTest/Boost），不可配；
+  而 **NeuG core 无 ABI flag → GCC 默认 ABI=1**。二者 `std::string`/`std::vector` 布局不兼容，跨 extension↔core 边界传 STL（如 sniffFunc 返回的 `EntrySchema.columnNames`）会 ODR/链接冲突。
+  **解法（ABI 中立缝）**：odps extension 内部分两层——内层 **ABI=0 静态库**（`-D_GLIBCXX_USE_CXX11_ABI=0`，include SDK 头、只碰 SDK/Arrow），对外只暴露 **C 接口/POD**
+  （不跨缝传 `std::string`/`std::vector`/`std::function` 等 STL）；外层 **ABI=1 shim**（与 core 同 ABI）把 C 接口包装成 `EntrySchema`/`DataChunk`/`ReadFunction` 交 core。
+  RTLD_LOCAL + 符号隐藏仍保留，防止 SDK/Arrow 全局对象与 libneug 冲突。
 
 ## Project Structure
 
@@ -49,8 +74,12 @@ CI 无访问：以 mock/录制回放或 `skipif`（无凭据跳过）保证可�
 
 ```text
 extension/odps/
-├── CMakeLists.txt                    # build_extension_lib("odps")；PRIVATE 链 odps-sdk + Arrow(1.0.0) + neug；RTLD_LOCAL 隔离
-├── include/
+├── CMakeLists.txt                    # build_extension_lib("odps")；外层 ABI=1，PRIVATE 链内层 glue + SDK IMPORTED + neug；RTLD_LOCAL 隔离
+├── glue/                             # 【新增】内层 ABI=0 静态库 odps_sdk_glue：唯一 include SDK/Arrow 头的一层
+│   ├── CMakeLists.txt                #   -D_GLIBCXX_USE_CXX11_ABI=0；链 SDK IMPORTED 静态库 + Arrow
+│   ├── odps_sdk_glue.h               #   extern "C" 接口（句柄/POD/char*+长度，不跨缝传 STL）
+│   └── odps_sdk_glue.cc              #   连接/建会话/读 schema/读批→导出为 C 接口（T104/T105/T106 的 SDK-facing 部分）
+├── include/                            # 外层 ABI=1（与 core 同）：只依赖 glue 的 C 接口，不 include SDK/Arrow 头
 │   ├── odps_extension.h              # 常量/声明
 │   ├── odps_read_function.h          # OdpsReadFunction : ReadFunction（sniff/exec/supplier），注册名 ODPS_SCAN
 │   ├── odps_options.h                # odps:// URL + FileSchema.options → 连接描述（project/schema/table/partition/endpoint/quota）
@@ -260,10 +289,16 @@ mRequiredPartitions, mRequiredBucketIds, mPredicate }`，其中 `mPredicate` 用
 
 ## Build & Isolation Notes
 
+- **SDK 以 `ExternalProject_Add` 构建**（非 `add_subdirectory`，见决策 3 / C1）：独立 configure/build 产出四个 `IMPORTED` 静态库，关掉 SDK 的 test/example/benchmark；
+  依赖由 SDK 自身 `OdpsDeps.cmake` find-or-fetch（Arrow 1.0.0/Protobuf/curl/OpenSSL/zstd/lz4/Boost 仅头）到其 `deps_install`。
+- **ABI 两层缝（见 C3，本特性的关键隔离设计）**：
+  - 内层 `odps_sdk_glue`（静态库，`-D_GLIBCXX_USE_CXX11_ABI=0`，`gnu++14` 或与 SDK 一致）：唯一 include SDK/Arrow 头的一层，实现连接/建会话/读 schema/读批，对外导出 `extern "C"` 接口（POD/句柄/`char*`+长度，不跨缝传 STL）。
+  - 外层 `neug_odps_extension`（与 core 同 ABI=1，C++20）：`OdpsReadFunction`/`EntrySchema`/`DataChunk` 都在这里构造，通过内层 C 接口取数据。T104/T105/T106 的 SDK-facing 代码归内层。
 - `extension/odps/CMakeLists.txt` 参照 `extension/parquet/CMakeLists.txt`：`build_extension_lib("odps")`，PRIVATE 链
-  odps SDK 目标与其 Arrow/zstd/lz4/protobuf/curl，`neug` 放最后（parquet 已有"neug 必须排在静态 Arrow 之后"的教训）。
+  内层 glue + SDK IMPORTED 静态库与其 Arrow/zstd/lz4/protobuf/curl，`neug` 放最后（parquet 已有“neug 必须排在静态 Arrow 之后”的教训）。
 - extension 以 **RTLD_LOCAL** 加载（见现有 `extension.cc`），符号隐藏（`cmake/neug_exports.ld`、`neug_unexported.sym`），
   防止 SDK/Arrow 全局对象与 libneug 冲突（double-free/heap corruption）。
+- **构建/验证架构**：SDK 仅 x86_64 可编（C2）。本地 Apple Silicon 验证靠 arm64 + `crc32c.cpp` 架构保护补丁（仅编译/链接层面证 glue 与 ABI 缝）；保真 x86_64 全量构建交 CI / Linux x86_64 机。
 - 用户侧：`LOAD odps;` 后 `COPY tbl FROM (LOAD FROM "odps://..." RETURN ...) `；`SHOW LOADED_EXTENSIONS()` 可见 `odps`。
 
 ## Rollout (phased, maps to spec P1→P4)
