@@ -100,13 +100,15 @@ class OdpsConnectionOptionsBuilder {
 };
 
 /**
- * @brief Owns an initialized ODPS Storage API handle for reuse by sniff/read.
+ * @brief Owns an initialized ODPS connection handle for reuse by sniff/read.
  *
- * Header is SDK-free: the concrete `MaxStorageApi` lives behind a pimpl and is
- * only instantiated when the extension is built with `NEUG_WITH_ODPS_SDK`
- * (which defines `ODPS_SDK_ENABLE_ARROW`). Without the SDK the object still
- * constructs (so option resolution stays testable) but `handle()` returns
- * nullptr; the reader then reports that reading requires the SDK.
+ * Header is SDK-free: the connection is an opaque `OdpsGlueConnection*`
+ * produced by the inner ABI=0 glue library (glue/odps_sdk_glue.h) and only
+ * exists when the extension is built with `NEUG_WITH_ODPS_SDK` (which defines
+ * `ODPS_SDK_ENABLE_ARROW`). Without the SDK the object still constructs (so
+ * option resolution stays testable) but `glueHandle()` returns nullptr; the
+ * reader then reports that reading requires the SDK. No SDK/Arrow type ever
+ * crosses into this ABI=1 header.
  */
 class OdpsConnection {
  public:
@@ -120,18 +122,13 @@ class OdpsConnection {
 
   const OdpsConnectionOptions& options() const { return options_; }
 
-  // Opaque pointer to
-  // `apsara::odps::sdk::max_storage_api::MaxStorageApi*` (owned by this
-  // object), or nullptr when built without SDK support. Used by the data-plane
-  // reader (Storage API).
-  void* handle() const;
-  bool available() const { return handle() != nullptr; }
-
-  // Opaque pointer to `apsara::odps::sdk::IODPS*` (the ODPS core client, owned
-  // by this object), or nullptr when built without SDK support. Used by schema
-  // sniffing (T105), which reads authoritative table metadata via the core API.
-  void* odpsClient() const;
-  bool clientAvailable() const { return odpsClient() != nullptr; }
+  // Opaque `OdpsGlueConnection*` handle owned by the inner ABI=0 glue library
+  // (see glue/odps_sdk_glue.h), or nullptr when built without SDK support. The
+  // outer extension never dereferences it — it is only handed back to the glue
+  // functions (schema sniff now; data-plane read in T106), keeping every
+  // SDK/Arrow type on the ABI=0 side of the seam.
+  void* glueHandle() const;
+  bool available() const { return glueHandle() != nullptr; }
 
  private:
   OdpsConnectionOptions options_;

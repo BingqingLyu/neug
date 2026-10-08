@@ -22,10 +22,7 @@
 #include "odps_connection.h"
 
 #if defined(ODPS_SDK_ENABLE_ARROW)
-#include "odps_api.h"
-#include "odps_exception.h"
-#include "odps_table.h"
-#include "odps_types.h"
+#include "odps_sdk_glue.h"
 #endif
 
 namespace neug {
@@ -184,42 +181,43 @@ std::shared_ptr<reader::EntrySchema> OdpsSchemaConverter::sniffTableSchema(
         "on the connection (set the `project` option or ODPS_PROJECT)");
   }
 
-  auto* odps = static_cast<apsara::odps::sdk::IODPS*>(connection.odpsClient());
-  if (odps == nullptr) {
+  auto* glue = static_cast<OdpsGlueConnection*>(connection.glueHandle());
+  if (glue == nullptr) {
     THROW_RUNTIME_ERROR(
-        "ODPS_SCAN: ODPS core client is unavailable on this connection");
+        "ODPS_SCAN: ODPS connection is unavailable on this handle");
   }
 
-  try {
-    auto table = odps->GetTables()->Get(project, source.schema, source.table);
-    if (!table) {
-      THROW_IO_EXCEPTION("ODPS_SCAN: table not found: " + project + "." +
-                         source.schema + "." + source.table);
-    }
-    auto schema = table->GetSchema();
-    if (!schema) {
-      THROW_IO_EXCEPTION("ODPS_SCAN: empty schema returned for table " +
-                         project + "." + source.schema + "." + source.table);
-    }
-    // Only the data columns are surfaced; partition columns act as filters in
-    // the Storage API read path and are not emitted as row columns in v1.
-    std::vector<OdpsColumnDesc> columns;
-    const uint32_t count = schema->GetColumnCount();
-    columns.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-      const auto& column = schema->GetTableColumn(i);
-      OdpsColumnDesc desc;
-      desc.name = column.GetName();
-      desc.typeCode = static_cast<int>(column.GetType());
-      desc.nullable = column.GetNullable();
-      columns.push_back(std::move(desc));
-    }
-    return convertColumns(columns);
-  } catch (const apsara::odps::sdk::OdpsException& e) {
+  // Read the authoritative column metadata through the ABI=0 glue seam. The
+  // glue returns a POD array of C strings/ints that we copy into SDK-free
+  // OdpsColumnDesc values, so no std::string ever crosses the ABI boundary.
+  // Only the data columns are surfaced; partition columns act as filters in
+  // the Storage API read path and are not emitted as row columns in v1.
+  OdpsGlueSchema result;
+  const int rc =
+      odps_glue_sniff_schema(glue, project.c_str(), source.schema.c_str(),
+                             source.table.c_str(), &result);
+  if (rc != 0 || result.error != nullptr) {
+    const std::string message =
+        (result.error != nullptr)
+            ? result.error
+            : "unknown error (code " + std::to_string(rc) + ")";
+    odps_glue_schema_free(&result);
     THROW_IO_EXCEPTION("ODPS_SCAN: failed to read schema of " + project + "." +
-                       source.schema + "." + source.table + ": [" +
-                       e.GetErrorCode() + "] " + e.GetErrorMsg());
+                       source.schema + "." + source.table + ": " + message);
   }
+
+  std::vector<OdpsColumnDesc> columns;
+  columns.reserve(result.count);
+  for (size_t i = 0; i < result.count; ++i) {
+    OdpsColumnDesc desc;
+    desc.name =
+        (result.columns[i].name != nullptr) ? result.columns[i].name : "";
+    desc.typeCode = result.columns[i].type_code;
+    desc.nullable = result.columns[i].nullable != 0;
+    columns.push_back(std::move(desc));
+  }
+  odps_glue_schema_free(&result);
+  return convertColumns(columns);
 #else
   (void) connection;
   (void) source;

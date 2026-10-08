@@ -1,0 +1,96 @@
+/** Copyright 2020 Alibaba Group Holding Limited.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * 	http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// ABI-neutral C seam between the outer `odps` extension (compiled with NeuG's
+// default _GLIBCXX_USE_CXX11_ABI=1, C++20) and the inner glue library
+// `odps_sdk_glue` (compiled with _GLIBCXX_USE_CXX11_ABI=0 to match the ODPS
+// SDK, which hard-codes that ABI for GCC>=5).
+//
+// RULE: nothing in this header may expose a C++ STL type (std::string,
+// std::vector, std::function, ...) or an SDK/Arrow type. Only POD structs,
+// C strings (char*) and opaque handles cross the seam, so the two ABIs never
+// share a std::string layout. All heap memory returned from the glue side is
+// allocated with malloc/strdup and must be released with the matching
+// odps_glue_*_free function (never with the caller's C++ delete/operator new).
+
+#ifndef NEUG_EXTENSION_ODPS_GLUE_ODPS_SDK_GLUE_H_
+#define NEUG_EXTENSION_ODPS_GLUE_ODPS_SDK_GLUE_H_
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Connection configuration. Every field is a NUL-terminated C string that may
+// be NULL or empty when the setting is not provided. The glue copies whatever
+// it needs; the caller retains ownership of the pointed-to memory.
+typedef struct OdpsGlueConfig {
+  const char* access_id;
+  const char* access_key;
+  const char* endpoint;         // ODPS service endpoint (required)
+  const char* tunnel_endpoint;  // optional; empty -> SDK default routing
+  const char* project;          // optional connection-default project
+  const char* quota_name;       // optional
+  const char* region_id;        // optional
+} OdpsGlueConfig;
+
+// One data column of a table schema, as an ABI-neutral POD.
+typedef struct OdpsGlueColumn {
+  const char* name;  // owned by OdpsGlueSchema; valid until schema_free
+  int type_code;     // numeric value of apsara::odps::sdk::ODPSColumnType
+  int nullable;      // 0 or 1
+} OdpsGlueColumn;
+
+// Result of a schema sniff.
+//  - success: columns/count filled, error == NULL;
+//  - failure: columns == NULL, count == 0, error == heap message.
+// Release with odps_glue_schema_free in both cases.
+typedef struct OdpsGlueSchema {
+  OdpsGlueColumn* columns;
+  size_t count;
+  char* error;
+} OdpsGlueSchema;
+
+// Opaque connection handle. Owns the SDK MaxStorageApi + IODPS core client.
+typedef struct OdpsGlueConnection OdpsGlueConnection;
+
+// Create and initialize a connection. Returns NULL on failure, in which case
+// *out_error (when non-NULL) is set to a heap message the caller must free
+// with odps_glue_free_string.
+OdpsGlueConnection* odps_glue_connect(const OdpsGlueConfig* config,
+                                      char** out_error);
+
+// Destroy a connection handle (safe on NULL).
+void odps_glue_disconnect(OdpsGlueConnection* conn);
+
+// Sniff the data-column schema of `project`.`schema`.`table`.
+// Returns 0 on success (out->columns/out->count filled); non-zero on failure
+// (out->error set). Always release `out` with odps_glue_schema_free.
+int odps_glue_sniff_schema(OdpsGlueConnection* conn, const char* project,
+                           const char* schema, const char* table,
+                           OdpsGlueSchema* out);
+
+// Release everything owned by an OdpsGlueSchema (columns, names, error).
+void odps_glue_schema_free(OdpsGlueSchema* schema);
+
+// Free a heap string returned by the glue (e.g. an out_error message).
+void odps_glue_free_string(char* s);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
+
+#endif  // NEUG_EXTENSION_ODPS_GLUE_ODPS_SDK_GLUE_H_

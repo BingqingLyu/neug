@@ -24,9 +24,7 @@
 #include "neug/utils/exception/exception.h"
 
 #if defined(ODPS_SDK_ENABLE_ARROW)
-#include "configuration.h"
-#include "max_storage_api.h"
-#include "odps_api.h"
+#include "odps_sdk_glue.h"
 #endif
 
 namespace neug {
@@ -142,41 +140,48 @@ OdpsConnectionOptions OdpsConnectionOptionsBuilder::build() const {
 }
 
 // ============================================================================
-// SDK handle (only real when built with NEUG_WITH_ODPS_SDK)
+// SDK connection handle (only real when built with NEUG_WITH_ODPS_SDK)
+//
+// The handle is an opaque OdpsGlueConnection* owned by the inner ABI=0 glue
+// library (glue/odps_sdk_glue.h). This ABI=1 file only stores and forwards the
+// raw pointer, so no SDK/Arrow type ever appears here.
 // ============================================================================
 
 struct OdpsConnection::Impl {
+  // Opaque glue handle; nullptr when built without the SDK.
+  void* glue = nullptr;
 #if defined(ODPS_SDK_ENABLE_ARROW)
-  apsara::odps::sdk::max_storage_api::MaxStorageApi api;
-  // ODPS core client, used by schema sniffing (T105) to read authoritative
-  // table metadata (works even for empty tables, unlike the Arrow read path).
-  apsara::odps::sdk::IODPSPtr odps;
-  bool ready = false;
+  ~Impl() {
+    if (glue != nullptr) {
+      odps_glue_disconnect(static_cast<OdpsGlueConnection*>(glue));
+      glue = nullptr;
+    }
+  }
 #endif
 };
 
 OdpsConnection::OdpsConnection(const OdpsConnectionOptions& options)
     : options_(options), impl_(std::make_unique<Impl>()) {
 #if defined(ODPS_SDK_ENABLE_ARROW)
-  apsara::odps::sdk::AliyunAccount account(options_.accessId,
-                                           options_.accessKey);
-  apsara::odps::sdk::Configuration conf(
-      account, options_.endpoint);  // NOLINT: SDK takes Account by value
-  if (!options_.tunnelEndpoint.empty()) {
-    conf.SetTunnelEndpoint(options_.tunnelEndpoint);
+  OdpsGlueConfig config;
+  config.access_id = options_.accessId.c_str();
+  config.access_key = options_.accessKey.c_str();
+  config.endpoint = options_.endpoint.c_str();
+  // Empty strings are fine: the glue treats "" the same as "not set".
+  config.tunnel_endpoint = options_.tunnelEndpoint.c_str();
+  config.project = options_.project.c_str();
+  config.quota_name = options_.quotaName.c_str();
+  config.region_id = options_.regionId.c_str();
+
+  char* error = nullptr;
+  impl_->glue = odps_glue_connect(&config, &error);
+  if (impl_->glue == nullptr) {
+    const std::string message = (error != nullptr) ? error : "unknown error";
+    odps_glue_free_string(error);
+    THROW_IO_EXCEPTION(
+        "odps_connection: failed to initialize the ODPS connection: " +
+        message);
   }
-  if (!options_.project.empty()) {
-    conf.SetDefaultProject(options_.project);
-  }
-  if (!options_.quotaName.empty()) {
-    conf.SetTunnelQuotaName(options_.quotaName);
-  }
-  if (!options_.regionId.empty()) {
-    conf.SetRegionId(options_.regionId);
-  }
-  impl_->api.Init(conf);
-  impl_->odps = apsara::odps::sdk::IODPS::Create(conf, options_.project);
-  impl_->ready = true;
 #endif
 }
 
@@ -184,20 +189,10 @@ OdpsConnection::~OdpsConnection() = default;
 OdpsConnection::OdpsConnection(OdpsConnection&&) noexcept = default;
 OdpsConnection& OdpsConnection::operator=(OdpsConnection&&) noexcept = default;
 
-void* OdpsConnection::handle() const {
+void* OdpsConnection::glueHandle() const {
 #if defined(ODPS_SDK_ENABLE_ARROW)
-  if (impl_ && impl_->ready) {
-    return const_cast<apsara::odps::sdk::max_storage_api::MaxStorageApi*>(
-        &impl_->api);
-  }
-#endif
-  return nullptr;
-}
-
-void* OdpsConnection::odpsClient() const {
-#if defined(ODPS_SDK_ENABLE_ARROW)
-  if (impl_ && impl_->odps) {
-    return impl_->odps.get();
+  if (impl_) {
+    return impl_->glue;
   }
 #endif
   return nullptr;
