@@ -58,8 +58,49 @@ std::string getFileExtension(const std::filesystem::path& path) {
   return extension.string();
 }
 
+// Extracts the "<scheme>" from a "<scheme>://..." URL-style source, or returns
+// "" when there is no such prefix. Follows the RFC 3986 scheme grammar
+// (ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )); the ASCII-only checks keep it
+// locale-independent, as a URL scheme must be.
+std::string getUrlScheme(const std::string& path) {
+  const auto sep = path.find("://");
+  if (sep == std::string::npos || sep == 0) {
+    return "";
+  }
+  const auto scheme = path.substr(0, sep);
+  const auto isAlpha = [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+  };
+  if (!isAlpha(scheme[0])) {
+    return "";
+  }
+  for (const char c : scheme) {
+    const bool ok = isAlpha(c) || (c >= '0' && c <= '9') || c == '+' ||
+                    c == '-' || c == '.';
+    if (!ok) {
+      return "";
+    }
+  }
+  return scheme;
+}
+
 FileTypeInfo bindSingleFileType(const main::ClientContext* context,
                                 const std::string& filePath) {
+  // A URL-style source whose scheme names a registered scan format
+  // ("{SCHEME}_SCAN" present in the catalog) resolves to that format. This lets
+  // extension data sources with no file extension -- e.g.
+  // odps://project.schema.table -- reach their scan function instead of having
+  // the trailing ".table" mis-parsed as an extension. The catalog gate keeps it
+  // backward compatible: plain paths and schemes without a scan function (e.g.
+  // s3://bucket/file.parquet) still fall through to extension-based detection.
+  const auto scheme = getUrlScheme(filePath);
+  if (!scheme.empty() && context != nullptr) {
+    const auto scanName =
+        stringFormat("{}_SCAN", StringUtils::getUpper(scheme));
+    if (context->getCatalog()->containsFunction(scanName)) {
+      return FileTypeInfo{FileTypeUtils::fromString(scheme), scheme};
+    }
+  }
   std::filesystem::path fileName(filePath);
   auto extension = getFileExtension(fileName);
   return FileTypeInfo{
