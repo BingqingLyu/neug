@@ -55,6 +55,22 @@ if(NEUG_WITH_ODPS_SDK)
         ${CMAKE_CURRENT_SOURCE_DIR}/glue)
     target_link_libraries(neug_odps_extension PRIVATE odps_sdk_glue)
     target_compile_definitions(neug_odps_extension PRIVATE ODPS_SDK_ENABLE_ARROW)
+
+    # Bug #8: the SDK-ON extension statically links NeuG's protobuf (to build
+    # ::common::DataType schema messages) and, per build_extension_lib, does NOT
+    # hide those exports. It therefore publishes ~586 google::protobuf symbols
+    # (incl. MessageLite::ParseFromArray). At `LOAD odps;` time the loader
+    # dlopen's this .so into a group that already contains the SDK's ABI=0
+    # libprotobuf.so.3.7.1.0 (via the glue); the SDK protobuf's static-init
+    # AddDescriptors -> ParseFromArray then binds to THIS extension's ABI=1 copy
+    # instead of its own, and the cross-ABI call segfaults before any query.
+    # Hide the extension's protobuf/arrow/absl exports (neug_exports.ld keeps
+    # `Init` and all UNDEF imports global) so each protobuf runtime binds to
+    # itself. Verified safe here: the extension has ZERO UNDEF symbols matching
+    # any local: pattern (its arrow/SDK deps are sealed inside the glue .so, and
+    # the only UNDEF protobuf-adjacent refs are common::* -> _ZN6common...,
+    # which the script does not touch).
+    neug_apply_symbol_visibility(neug_odps_extension)
 endif()
 
 # Unit tests for the pure-logic modules (T103 odps_options, T104
