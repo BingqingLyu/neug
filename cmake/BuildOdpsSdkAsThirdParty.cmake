@@ -73,7 +73,19 @@ function(_neug_odps_apply_patch source_dir patch_file patch_name)
 endfunction()
 
 function(build_odps_sdk_as_third_party)
-    if(DEFINED NEUG_BUILD_ODPS_SDK_DONE AND NEUG_BUILD_ODPS_SDK_DONE)
+    # Idempotence guard scoped to a SINGLE configure run — it must NOT be a
+    # CACHE variable. The IMPORTED (neug::odps_sdk) and ExternalProject
+    # (odps_sdk_external) targets created below live only in the in-memory CMake
+    # model and are recreated on every configure; they are never persisted to
+    # the cache. A CACHE-internal guard survives re-configuration, makes this
+    # function return early, and the generate step then fails with "target
+    # neug::odps_sdk ... was not found" because the consumers in
+    # extension/odps/{,glue/}CMakeLists.txt still reference it. A GLOBAL
+    # property is reset at the start of each cmake run, so it guards against
+    # double-invocation within one configure without breaking incremental
+    # re-configures (see plan.md C1).
+    get_property(_neug_odps_sdk_done GLOBAL PROPERTY NEUG_BUILD_ODPS_SDK_DONE)
+    if(_neug_odps_sdk_done)
         return()
     endif()
 
@@ -172,15 +184,29 @@ function(build_odps_sdk_as_third_party)
     file(MAKE_DIRECTORY "${_odps_deps_prefix}/include")
     file(MAKE_DIRECTORY "${_odps_deps_prefix}/lib")
 
+    # The SDK's fetched third-party deps are SHARED-only (no static .a for
+    # Arrow/protobuf) and live under deps_install/lib. They MUST be referenced
+    # by FULL PATH, never by bare name: INTERFACE_LINK_DIRECTORIES does not
+    # survive propagation across the glue's link interface into the outer
+    # extension .so, so a bare `-larrow`/`-lprotobuf` there binds to the SYSTEM
+    # libs (Arrow 22 / protobuf 3.21, both ABI=1) instead of the SDK's ABI=0
+    # Arrow 1.0.0 / protobuf 3.7.1, leaving the extension .so with undefined
+    # `Ss`/`EPSs` (old-ABI std::string) symbols that fail at dlopen. Full paths
+    # pin the exact SDK copies regardless of -L propagation.
+    set(_odps_deps_libdir "${_odps_deps_prefix}/lib")
+    set(_odps_arrow_lib "${_odps_deps_libdir}/libarrow.so")
+    set(_odps_protobuf_lib "${_odps_deps_libdir}/libprotobuf.so")
+    set(_odps_protobuf_lite_lib "${_odps_deps_libdir}/libprotobuf-lite.so")
+
     # IMPORTED aggregate target carrying the full link interface: the four SDK
     # static libs plus the SDK's shared third-party deps. The SDK libs have
     # circular references, so they are wrapped in --start-group/--end-group.
     add_library(neug::odps_sdk INTERFACE IMPORTED GLOBAL)
     set_target_properties(neug::odps_sdk PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES "${_odps_include_dirs}"
-        INTERFACE_LINK_DIRECTORIES "${_odps_deps_prefix}/lib"
+        INTERFACE_LINK_DIRECTORIES "${_odps_deps_libdir}"
         INTERFACE_LINK_LIBRARIES
-        "-Wl,--start-group;${_odps_msa_lib};${_odps_tunnel_lib};${_odps_core_lib};${_odps_common_lib};-Wl,--end-group;arrow;protobuf;curl;ssl;crypto;zstd;lz4;z;pthread;dl;rt")
+        "-Wl,--start-group;${_odps_msa_lib};${_odps_tunnel_lib};${_odps_core_lib};${_odps_common_lib};-Wl,--end-group;${_odps_arrow_lib};${_odps_protobuf_lib};${_odps_protobuf_lite_lib};curl;ssl;crypto;zstd;lz4;z;pthread;dl;rt")
     add_dependencies(neug::odps_sdk odps_sdk_external)
 
     # Exported for the inner glue library's CMakeLists.
@@ -188,7 +214,9 @@ function(build_odps_sdk_as_third_party)
         CACHE INTERNAL "Include dirs for aliyun-odps-sdk-cpp")
     set(NEUG_ODPS_SDK_EXTERNAL_TARGET "odps_sdk_external"
         CACHE INTERNAL "ExternalProject target that builds the ODPS SDK")
-    set(NEUG_BUILD_ODPS_SDK_DONE TRUE CACHE INTERNAL "")
+    set(NEUG_ODPS_SDK_DEPS_LIB_DIR "${_odps_deps_libdir}"
+        CACHE INTERNAL "Directory holding the ODPS SDK's shared third-party deps (Arrow 1.0.0, protobuf 3.7.1) to bundle next to the glue .so")
+    set_property(GLOBAL PROPERTY NEUG_BUILD_ODPS_SDK_DONE TRUE)
 
     message(STATUS
         "Integrating aliyun-odps-sdk-cpp from ${NEUG_ODPS_SDK_SOURCE_DIR} "

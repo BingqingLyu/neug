@@ -30,6 +30,19 @@
 
 #include <stddef.h>
 
+// The glue is built as a SHARED library with -fvisibility=hidden so that the
+// SDK's ABI=0 Arrow/protobuf code it absorbs stays invisible to the process
+// (see plan.md C3, RTLD_LOCAL isolation). Only the C seam below crosses the
+// boundary, so each entry point is explicitly promoted back to default
+// visibility; everything else in the .so remains hidden.
+#if defined(_WIN32)
+#define ODPS_GLUE_API __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
+#define ODPS_GLUE_API __attribute__((visibility("default")))
+#else
+#define ODPS_GLUE_API
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -70,24 +83,25 @@ typedef struct OdpsGlueConnection OdpsGlueConnection;
 // Create and initialize a connection. Returns NULL on failure, in which case
 // *out_error (when non-NULL) is set to a heap message the caller must free
 // with odps_glue_free_string.
-OdpsGlueConnection* odps_glue_connect(const OdpsGlueConfig* config,
-                                      char** out_error);
+ODPS_GLUE_API OdpsGlueConnection* odps_glue_connect(const OdpsGlueConfig* config,
+                                                    char** out_error);
 
 // Destroy a connection handle (safe on NULL).
-void odps_glue_disconnect(OdpsGlueConnection* conn);
+ODPS_GLUE_API void odps_glue_disconnect(OdpsGlueConnection* conn);
 
 // Sniff the data-column schema of `project`.`schema`.`table`.
 // Returns 0 on success (out->columns/out->count filled); non-zero on failure
 // (out->error set). Always release `out` with odps_glue_schema_free.
-int odps_glue_sniff_schema(OdpsGlueConnection* conn, const char* project,
-                           const char* schema, const char* table,
-                           OdpsGlueSchema* out);
+ODPS_GLUE_API int odps_glue_sniff_schema(OdpsGlueConnection* conn,
+                                         const char* project,
+                                         const char* schema, const char* table,
+                                         OdpsGlueSchema* out);
 
 // Release everything owned by an OdpsGlueSchema (columns, names, error).
-void odps_glue_schema_free(OdpsGlueSchema* schema);
+ODPS_GLUE_API void odps_glue_schema_free(OdpsGlueSchema* schema);
 
 // Free a heap string returned by the glue (e.g. an out_error message).
-void odps_glue_free_string(char* s);
+ODPS_GLUE_API void odps_glue_free_string(char* s);
 
 // ---------------------------------------------------------------------------
 // Data-plane reader (module 1, task T106).
@@ -113,19 +127,20 @@ typedef struct OdpsGlueReader OdpsGlueReader;
 // Open a read session over `project`.`schema`.`table`. Returns NULL on failure,
 // in which case *out_error (when non-NULL) is set to a heap message the caller
 // must free with odps_glue_free_string.
-OdpsGlueReader* odps_glue_open_reader(OdpsGlueConnection* conn,
-                                      const char* project, const char* schema,
-                                      const char* table,
-                                      const OdpsGlueReadOptions* options,
-                                      char** out_error);
+ODPS_GLUE_API OdpsGlueReader* odps_glue_open_reader(OdpsGlueConnection* conn,
+                                                    const char* project,
+                                                    const char* schema,
+                                                    const char* table,
+                                                    const OdpsGlueReadOptions* options,
+                                                    char** out_error);
 
 // Number of splits in the session (>=0), or -1 on error (*out_error set).
-long long odps_glue_reader_split_count(OdpsGlueReader* reader,
-                                       char** out_error);
+ODPS_GLUE_API long long odps_glue_reader_split_count(OdpsGlueReader* reader,
+                                                     char** out_error);
 
 // Total record count across all splits (>=0), or -1 on error/unknown.
-long long odps_glue_reader_record_count(OdpsGlueReader* reader,
-                                        char** out_error);
+ODPS_GLUE_API long long odps_glue_reader_record_count(OdpsGlueReader* reader,
+                                                      char** out_error);
 
 // Fetch the next record batch, exported through the Arrow C Data Interface.
 // `out_array`/`out_schema` point to caller-owned structs with the canonical
@@ -135,11 +150,13 @@ long long odps_glue_reader_record_count(OdpsGlueReader* reader,
 //   1  -> a batch was produced (out_array/out_schema filled);
 //   0  -> end of data (all splits exhausted; structs left untouched);
 //  <0  -> error (*out_error set).
-int odps_glue_reader_next_batch(OdpsGlueReader* reader, void* out_array,
-                                void* out_schema, char** out_error);
+ODPS_GLUE_API int odps_glue_reader_next_batch(OdpsGlueReader* reader,
+                                              void* out_array,
+                                              void* out_schema,
+                                              char** out_error);
 
 // Close and destroy a reader (safe on NULL); closes any open stream first.
-void odps_glue_reader_close(OdpsGlueReader* reader);
+ODPS_GLUE_API void odps_glue_reader_close(OdpsGlueReader* reader);
 
 #ifdef __cplusplus
 }  // extern "C"

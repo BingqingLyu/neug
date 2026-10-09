@@ -47,9 +47,10 @@ if(NEUG_WITH_ODPS_SDK)
     add_subdirectory(glue)
 
     # The outer extension includes only the SDK-free glue header and links the
-    # glue static lib. CMake propagates the glue's PRIVATE neug::odps_sdk link
-    # interface (four SDK static libs + shared deps) into this .so link-only,
-    # without leaking the SDK include dirs / ABI=0 define into the outer TUs.
+    # glue SHARED lib. Because the glue is a .so that seals the SDK's ABI=0
+    # Arrow/protobuf behind -fvisibility=hidden + --exclude-libs,ALL, this .so
+    # depends only on libodps_sdk_glue.so and its odps_glue_* C seam; no SDK or
+    # Arrow symbol is pulled into the ABI=1 extension or leaks into the process.
     target_include_directories(neug_odps_extension PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/glue)
     target_link_libraries(neug_odps_extension PRIVATE odps_sdk_glue)
@@ -71,6 +72,16 @@ if(BUILD_TEST)
             EXTRA_LINK_LIBS odps_sdk_glue)
         target_compile_definitions(odps_extension_test PRIVATE
             ODPS_SDK_ENABLE_ARROW)
+        # The test exe links libneug (NeuG protobuf, ABI=1) AND loads the glue
+        # .so, which pulls the SDK's libprotobuf.so.3.7.1.0 (ABI=0) into the same
+        # process. A normal executable exports its statically-linked protobuf
+        # symbols into the GLOBAL scope, where they interpose the SDK protobuf's
+        # internal calls (ParseFromArray -> GetTypeName) and segfault during
+        # library init. Hide this exe's arrow/protobuf/absl symbols exactly like
+        # libneug.so does (neug_exports.ld) so each protobuf runtime binds to
+        # itself. The shipped extension avoids this because it is dlopen'd with
+        # RTLD_LOCAL, but the test links the glue as a normal global dependency.
+        neug_apply_symbol_visibility(odps_extension_test)
     else()
         add_extension_test(
             NAME odps
