@@ -46,6 +46,18 @@
 
 ## [F008-T305] 分片并行读取
 
+**status**: DEFERRED (TODO) — 2026-10-09 决定推迟；触发条件：待 NeuG 执行引擎具备并行 scan / morsel 模型后，再实现「并行读取」。
+
+**推迟理由**: 经核实 NeuG 执行引擎全无线程池 / 并行 scan 基础设施（`src/execution` 与 `include/neug/execution` 内 `std::thread` / `std::async` / `ThreadPool` / `parallel` / `morsel` / `std::future` / `tbb` / `omp` 匹配数均为 0）；读取契约为单线程顺序 pull（`execFunc` 返回完整 Context，`supplierFunc` 返回单个 `IDataChunkSupplier` 并经 `GetNextChunk()` 顺序拉取），CSV/JSON/parquet 亦均顺序读取。故 details 中「分派到执行侧并行度（对齐 NeuG 现有并发模型）」当前无对象可对齐；强行并行需在 SDK-gated glue 内自建线程池（宿主 x86_64-only + 门控不可编译验证、SDK 线程安全性未证实、与单线程契约相悖）。FR-014 为 SHOULD、SC-005 已由流式分批满足，整体推迟为 TODO。
+
+**已完成（无需重做）**:
+* 分片粒度可配置：`split_size_mb` 选项 → `SplitOptions{mSplitMode=SIZE, mSplitSize}` 已全链路打通（odps_options → supplier → glue）并有单测（`RejectsInvalidSplitSize`）；glue `next_batch` 已按 `splitIndex` 游标顺序遍历多 split。
+* SC-005（流式读取、内存不随表行数线性增长）：`GetNextChunk()` 每次拉一批、split 逐个 drain，结构上已满足。
+
+**待办（推迟到 NeuG 支持 parallel scan 后）**:
+* `ReadOptions.mMaxBatchRows`（默认 4096，SDK 上限 20000）用户可调选项：glue 侧已就绪（`OdpsGlueReadOptions.max_batch_rows` + open_reader 内 `mMaxBatchRows` 赋值），但 supplier 硬编码 `max_batch_rows = 0`、`OdpsConfigOptionKeys` 无对应 key —— 与并行读取一并实现。
+* 真·多 split 并行 fan-out、配额/限流下的并发调度、以及「并行结果与串行一致 + 总时延下降」验证。
+
 **description**: 按数据量/行数把表划分为多 split 并支持并行读取，分片粒度可配置（FR-014，SC-005）。
 
 **details**:
