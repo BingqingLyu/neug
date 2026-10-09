@@ -17,6 +17,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "neug/common/types/data_chunk.h"
 #include "neug/storages/loader/loader_utils.h"
@@ -49,8 +51,14 @@ namespace odps {
  */
 class OdpsRecordBatchSupplier : public IDataChunkSupplier {
  public:
+  // `enableColumnPruning` turns on T301 column pruning (request only the
+  // projected + filtered columns). It is ON for the eager `LOAD FROM ...
+  // RETURN` path (execFunc) and OFF for the lazy path (supplierFunc, used by
+  // COPY ... FROM (LOAD FROM ...)), which maps source columns BY INDEX against
+  // the full table schema and must therefore keep reading every column.
   explicit OdpsRecordBatchSupplier(
-      std::shared_ptr<reader::ReadSharedState> state);
+      std::shared_ptr<reader::ReadSharedState> state,
+      bool enableColumnPruning = true);
   ~OdpsRecordBatchSupplier() override;
 
   OdpsRecordBatchSupplier(const OdpsRecordBatchSupplier&) = delete;
@@ -60,6 +68,17 @@ class OdpsRecordBatchSupplier : public IDataChunkSupplier {
 
   // Total rows across all splits, or -1 when the session reports no count.
   int64_t RowNum() const override { return row_num_; }
+
+  // Ordered names of the columns each chunk from GetNextChunk() contains
+  // (module 3, T301). This is the pruned projection -- the queried output
+  // columns plus every column the engine-side filter references, in
+  // table-schema order -- and matches the layout of the returned Arrow batches.
+  // execFunc decodes chunks against this list (not the full schema) so
+  // filter_chunk / project_chunk stay positionally correct after column
+  // pruning. Empty when no schema was available (no pruning info).
+  const std::vector<std::string>& PhysicalColumnNames() const {
+    return physical_column_names_;
+  }
 
  private:
   // Keeps the SDK connection alive for as long as the reader depends on it.
@@ -71,6 +90,9 @@ class OdpsRecordBatchSupplier : public IDataChunkSupplier {
   void* reader_ = nullptr;
 #endif
   int64_t row_num_ = 0;
+  // Column names the produced chunks carry, in schema order (see
+  // PhysicalColumnNames). SDK-free, so it is present in both builds.
+  std::vector<std::string> physical_column_names_;
 };
 
 }  // namespace odps

@@ -266,12 +266,15 @@ extern "C" OdpsGlueReader* odps_glue_open_reader(
         .SetSchema(orEmpty(schema))
         .SetTable(orEmpty(table))
         .SetSplitOptions(splitOptions);
-    // Session filter (module 3): partition pruning (T302) + predicate pushdown
-    // (T303), merged into one FilterOptions since SetFilterOptions replaces the
-    // whole struct. Either part may be absent; the call is made only when at
-    // least one is present, so a plain read leaves FilterOptions unset and
-    // matches pre-pushdown behavior exactly.
+    // Session filter (module 3): column pruning (T301) + partition pruning
+    // (T302) + predicate pushdown (T303), merged into one FilterOptions since
+    // SetFilterOptions replaces the whole struct. Any part may be absent; the
+    // call is made only when at least one is present, so a plain read leaves
+    // FilterOptions unset and matches pre-pushdown behavior exactly.
     //
+    // Column pruning: each caller-supplied name is a data column, given in
+    // table-schema order, so it maps straight onto mRequiredDataColumns and the
+    // session materializes only those columns.
     // Partition pruning: each caller-supplied spec is already a complete
     // '/'-delimited partition path, so it maps straight onto
     // mRequiredPartitions and the session reads only those partitions.
@@ -282,6 +285,15 @@ extern "C" OdpsGlueReader* odps_glue_open_reader(
     // are transferred.
     FilterOptions filterOptions;
     bool haveFilter = false;
+    if (options != nullptr && options->required_data_columns != nullptr) {
+      for (size_t i = 0; i < options->required_data_column_count; ++i) {
+        if (nonEmpty(options->required_data_columns[i])) {
+          filterOptions.mRequiredDataColumns.push_back(
+              options->required_data_columns[i]);
+        }
+      }
+      haveFilter = !filterOptions.mRequiredDataColumns.empty();
+    }
     if (options != nullptr && options->required_partitions != nullptr) {
       for (size_t i = 0; i < options->required_partition_count; ++i) {
         if (nonEmpty(options->required_partitions[i])) {
@@ -289,7 +301,7 @@ extern "C" OdpsGlueReader* odps_glue_open_reader(
               options->required_partitions[i]);
         }
       }
-      haveFilter = !filterOptions.mRequiredPartitions.empty();
+      haveFilter = haveFilter || !filterOptions.mRequiredPartitions.empty();
     }
     if (options != nullptr && nonEmpty(options->filter_predicate)) {
       filterOptions.mPredicate = IRawPredicate::Of(options->filter_predicate);

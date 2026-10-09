@@ -132,6 +132,16 @@ typedef struct OdpsGlueReadOptions {
   // ownership of the array and every element.
   const char* const* required_partitions;
   size_t required_partition_count;
+  // Data columns to materialize (module 3, task T301). Maps 1:1 onto
+  // FilterOptions.mRequiredDataColumns so the read session returns only these
+  // columns and unreferenced ones never cross the wire. The names MUST be given
+  // in table-schema order (see include/odps_column_projection.h): that makes
+  // the returned Arrow batch column order unambiguous, so the caller can decode
+  // positionally against the same list. NULL or a zero count -> read every
+  // column (no pruning). The glue copies the strings it needs; the caller
+  // retains ownership of the array and every element.
+  const char* const* required_data_columns;
+  size_t required_data_column_count;
 } OdpsGlueReadOptions;
 
 // Opaque reader handle. Owns a TableReadSession, its split list, the split
