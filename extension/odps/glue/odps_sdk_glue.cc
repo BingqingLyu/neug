@@ -49,9 +49,13 @@ using apsara::odps::sdk::IODPSTableColumn;
 using apsara::odps::sdk::IODPSTablePtr;
 using apsara::odps::sdk::IODPSTableSchemaPtr;
 using apsara::odps::sdk::OdpsException;
+using apsara::odps::sdk::max_storage_api::FilterOptions;
 using apsara::odps::sdk::max_storage_api::IArrowReadStreamPtr;
+using apsara::odps::sdk::max_storage_api::IRawPredicate;
 using apsara::odps::sdk::max_storage_api::ISplitPtr;
 using apsara::odps::sdk::max_storage_api::ISplitsPtr;
+using apsara::odps::sdk::max_storage_api::ITableReadSessionBuilder;
+using apsara::odps::sdk::max_storage_api::ITableReadSessionBuilderPtr;
 using apsara::odps::sdk::max_storage_api::ITableReadSessionPtr;
 using apsara::odps::sdk::max_storage_api::MaxStorageApi;
 using apsara::odps::sdk::max_storage_api::ReadOptions;
@@ -253,12 +257,29 @@ extern "C" OdpsGlueReader* odps_glue_open_reader(
       readOptions.mMaxBatchRows = options->max_batch_rows;
     }
 
-    ITableReadSessionPtr session = (*(conn->api.BuildTableReadSession()))
-                                       .SetProject(orEmpty(project))
-                                       .SetSchema(orEmpty(schema))
-                                       .SetTable(orEmpty(table))
-                                       .SetSplitOptions(splitOptions)
-                                       .Build();
+    // Hold the builder's owning smart pointer for the whole chain:
+    // BuildTableReadSession() returns it by value, and binding a bare reference
+    // to *(temporary) would dangle once the temporary is destroyed.
+    ITableReadSessionBuilderPtr builderPtr = conn->api.BuildTableReadSession();
+    ITableReadSessionBuilder& builder = *builderPtr;
+    builder.SetProject(orEmpty(project))
+        .SetSchema(orEmpty(schema))
+        .SetTable(orEmpty(table))
+        .SetSplitOptions(splitOptions);
+    // Predicate pushdown (module 3, T303): when the caller supplied an ODPS
+    // filter-predicate string, wrap it as a raw predicate so the session sends
+    // it to SetFilterPredicate for server-side row filtering. The string is
+    // already in the SDK's IPredicate::ToString() dialect (see
+    // odps_predicate_converter); engine-side filtering still re-applies the
+    // full predicate, so this only reduces how many rows are transferred. A
+    // NULL or empty predicate leaves FilterOptions unset, matching pre-pushdown
+    // behavior exactly.
+    if (options != nullptr && nonEmpty(options->filter_predicate)) {
+      FilterOptions filterOptions;
+      filterOptions.mPredicate = IRawPredicate::Of(options->filter_predicate);
+      builder.SetFilterOptions(filterOptions);
+    }
+    ITableReadSessionPtr session = builder.Build();
     if (!session) {
       if (out_error != nullptr) {
         *out_error = dupString("odps_glue: null read session");

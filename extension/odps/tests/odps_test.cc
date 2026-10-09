@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@
 #include "odps_connection.h"
 #include "odps_error.h"
 #include "odps_options.h"
+#include "odps_predicate_converter.h"
 #include "odps_schema_converter.h"
 
 #if defined(__APPLE__)
@@ -1055,6 +1057,276 @@ TEST(OdpsArrowBridgeTest, RejectsWrongBufferCount) {
   b.childArray.n_buffers = 3;  // int64 column expects exactly 2
   EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
                exception::InvalidArgumentException);
+}
+
+}  // namespace
+
+// ============================================================================
+// OdpsPredicateConverter (T303/T306, SDK-free): skip_rows AST -> ODPS string
+// ============================================================================
+
+namespace {
+
+// NeuG encodes a filter as a flat INFIX token stream (operand, operator,
+// operand) that the converter walks with a shunting yard. These builders mirror
+// carquet_scan_test.cc so the AST shape matches what the binder produces.
+void appendOpr(::common::Expression& target, const ::common::Expression& src) {
+  for (const auto& op : src.operators()) {
+    *target.add_operators() = op;
+  }
+}
+
+::common::Expression compareI64(const std::string& col, ::common::Logical op,
+                                int64_t value) {
+  ::common::Expression e;
+  e.add_operators()->mutable_var()->mutable_tag()->set_name(col);
+  e.add_operators()->set_logical(op);
+  e.add_operators()->mutable_const_()->set_i64(value);
+  return e;
+}
+
+::common::Expression compareF64(const std::string& col, ::common::Logical op,
+                                double value) {
+  ::common::Expression e;
+  e.add_operators()->mutable_var()->mutable_tag()->set_name(col);
+  e.add_operators()->set_logical(op);
+  e.add_operators()->mutable_const_()->set_f64(value);
+  return e;
+}
+
+::common::Expression compareStr(const std::string& col, ::common::Logical op,
+                                std::string value) {
+  ::common::Expression e;
+  e.add_operators()->mutable_var()->mutable_tag()->set_name(col);
+  e.add_operators()->set_logical(op);
+  e.add_operators()->mutable_const_()->set_str(std::move(value));
+  return e;
+}
+
+::common::Expression isNullExpr(const std::string& col) {
+  ::common::Expression e;
+  e.add_operators()->set_logical(::common::Logical::ISNULL);
+  e.add_operators()->mutable_var()->mutable_tag()->set_name(col);
+  return e;
+}
+
+// `col OP (v1, v2, ...)` over a string literal list built as a to_list node.
+::common::Expression withinStrings(const std::string& col, ::common::Logical op,
+                                   std::vector<std::string> values) {
+  ::common::Expression e;
+  e.add_operators()->mutable_var()->mutable_tag()->set_name(col);
+  e.add_operators()->set_logical(op);
+  auto* fields = e.add_operators()->mutable_to_list()->mutable_fields();
+  for (const auto& v : values) {
+    fields->Add()->add_operators()->mutable_const_()->set_str(v);
+  }
+  return e;
+}
+
+::common::Expression combine(const ::common::Expression& left,
+                             ::common::Logical op,
+                             const ::common::Expression& right) {
+  ::common::Expression e;
+  e.add_operators()->set_brace(::common::ExprOpr::LEFT_BRACE);
+  appendOpr(e, left);
+  e.add_operators()->set_brace(::common::ExprOpr::RIGHT_BRACE);
+  e.add_operators()->set_logical(op);
+  e.add_operators()->set_brace(::common::ExprOpr::LEFT_BRACE);
+  appendOpr(e, right);
+  e.add_operators()->set_brace(::common::ExprOpr::RIGHT_BRACE);
+  return e;
+}
+
+::common::Expression negate(const ::common::Expression& operand) {
+  ::common::Expression e;
+  e.add_operators()->set_logical(::common::Logical::NOT);
+  e.add_operators()->set_brace(::common::ExprOpr::LEFT_BRACE);
+  appendOpr(e, operand);
+  e.add_operators()->set_brace(::common::ExprOpr::RIGHT_BRACE);
+  return e;
+}
+
+// Asserts full pushdown and returns the emitted predicate string.
+std::string pushed(const ::common::Expression& e) {
+  auto c = OdpsPredicateConverter::convert(e);
+  EXPECT_TRUE(c.fullyPushed);
+  return c.predicate;
+}
+
+// Asserts the expression is NOT pushed (engine-side filtering must remain).
+void expectNotPushed(const ::common::Expression& e) {
+  auto c = OdpsPredicateConverter::convert(e);
+  EXPECT_FALSE(c.fullyPushed);
+  EXPECT_TRUE(c.predicate.empty());
+}
+
+TEST(OdpsPredicateConverterTest, TranslatesComparisons) {
+  EXPECT_EQ("`age` > 30", pushed(compareI64("age", ::common::Logical::GT, 30)));
+  EXPECT_EQ("`score` >= 1.5",
+            pushed(compareF64("score", ::common::Logical::GE, 1.5)));
+  EXPECT_EQ("`name` = 'bob'",
+            pushed(compareStr("name", ::common::Logical::EQ, "bob")));
+  EXPECT_EQ("`n` != 1", pushed(compareI64("n", ::common::Logical::NE, 1)));
+  EXPECT_EQ("`n` < 1", pushed(compareI64("n", ::common::Logical::LT, 1)));
+  EXPECT_EQ("`n` <= 1", pushed(compareI64("n", ::common::Logical::LE, 1)));
+}
+
+TEST(OdpsPredicateConverterTest, TranslatesIsNullAndNot) {
+  EXPECT_EQ("`age` is null", pushed(isNullExpr("age")));
+  EXPECT_EQ("not (`age` > 30)",
+            pushed(negate(compareI64("age", ::common::Logical::GT, 30))));
+}
+
+TEST(OdpsPredicateConverterTest, TranslatesAndOr) {
+  auto left = compareI64("a", ::common::Logical::GT, 1);
+  auto right = compareI64("b", ::common::Logical::LT, 2);
+  EXPECT_EQ("(`a` > 1) and (`b` < 2)",
+            pushed(combine(left, ::common::Logical::AND, right)));
+  EXPECT_EQ("(`a` > 1) or (`b` < 2)",
+            pushed(combine(left, ::common::Logical::OR, right)));
+}
+
+TEST(OdpsPredicateConverterTest, TranslatesInAndNotIn) {
+  EXPECT_EQ("`ds` in ('a', 'b')",
+            pushed(withinStrings("ds", ::common::Logical::WITHIN, {"a", "b"})));
+  EXPECT_EQ(
+      "`ds` not in ('a', 'b')",
+      pushed(withinStrings("ds", ::common::Logical::WITHOUT, {"a", "b"})));
+}
+
+TEST(OdpsPredicateConverterTest, AndBindsTighterThanOrWithoutBraces) {
+  // Flat infix `a = 1 AND b = 2 OR c = 3` must group as ((a AND b) OR c).
+  ::common::Expression e;
+  e.add_operators()->mutable_var()->mutable_tag()->set_name("a");
+  e.add_operators()->set_logical(::common::Logical::EQ);
+  e.add_operators()->mutable_const_()->set_i64(1);
+  e.add_operators()->set_logical(::common::Logical::AND);
+  e.add_operators()->mutable_var()->mutable_tag()->set_name("b");
+  e.add_operators()->set_logical(::common::Logical::EQ);
+  e.add_operators()->mutable_const_()->set_i64(2);
+  e.add_operators()->set_logical(::common::Logical::OR);
+  e.add_operators()->mutable_var()->mutable_tag()->set_name("c");
+  e.add_operators()->set_logical(::common::Logical::EQ);
+  e.add_operators()->mutable_const_()->set_i64(3);
+  EXPECT_EQ("((`a` = 1) and (`b` = 2)) or (`c` = 3)", pushed(e));
+}
+
+TEST(OdpsPredicateConverterTest, QuotesIdentifiersLikeTheSdk) {
+  EXPECT_EQ("`age`", OdpsPredicateConverter::quoteIdentifier("age"));
+  // Internal backticks are doubled, matching IAttribute::ToString.
+  EXPECT_EQ("`a``b`", OdpsPredicateConverter::quoteIdentifier("a`b"));
+}
+
+TEST(OdpsPredicateConverterTest, RendersLiterals) {
+  std::string out;
+  ::common::Value v;
+  v.set_boolean(true);
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("true", out);
+  v.set_boolean(false);
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("false", out);
+  v.set_i64(-42);
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("-42", out);
+  v.set_u64(42);
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("42", out);
+  v.set_f64(1.5);
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("1.5", out);
+  v.set_str("bob");
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("'bob'", out);
+  // Single quotes are doubled and backslashes escaped so the literal cannot
+  // break out of its quoting.
+  v.set_str("O'Brien");
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("'O''Brien'", out);
+  v.set_str("a\\b");
+  EXPECT_TRUE(OdpsPredicateConverter::renderLiteral(v, out));
+  EXPECT_EQ("'a\\\\b'", out);
+}
+
+TEST(OdpsPredicateConverterTest, RejectsNonWhitelistedLiterals) {
+  std::string out;
+  ::common::Value v;
+  v.set_blob("raw");  // blob is outside the v1 literal whitelist
+  EXPECT_FALSE(OdpsPredicateConverter::renderLiteral(v, out));
+  v.set_f64(std::numeric_limits<double>::infinity());
+  EXPECT_FALSE(OdpsPredicateConverter::renderLiteral(v, out));
+}
+
+TEST(OdpsPredicateConverterTest, FallsBackOnUnsupportedConstructs) {
+  // Arithmetic anywhere in the tree makes the whole predicate non-pushable.
+  {
+    ::common::Expression e;
+    e.add_operators()->mutable_var()->mutable_tag()->set_name("a");
+    e.add_operators()->set_arith(::common::Arithmetic::ADD);
+    e.add_operators()->mutable_const_()->set_i64(1);
+    e.add_operators()->set_logical(::common::Logical::GT);
+    e.add_operators()->mutable_const_()->set_i64(5);
+    expectNotPushed(e);
+  }
+  // Dynamic param: v1 does not resolve params (engine side still applies them).
+  {
+    ::common::Expression e;
+    e.add_operators()->mutable_var()->mutable_tag()->set_name("a");
+    e.add_operators()->set_logical(::common::Logical::EQ);
+    e.add_operators()->mutable_param()->set_name("p");
+    expectNotPushed(e);
+  }
+  // Scalar function node -> unsupported structure.
+  {
+    ::common::Expression e;
+    e.add_operators()->mutable_var()->mutable_tag()->set_name("a");
+    e.add_operators()->set_logical(::common::Logical::EQ);
+    e.add_operators()->mutable_scalar_func();
+    expectNotPushed(e);
+  }
+  // Nested property reference (r.a.key) is not a plain column.
+  {
+    ::common::Expression e;
+    e.add_operators()->mutable_var()->mutable_tag()->set_name("a");
+    e.add_operators()->mutable_var()->mutable_property();
+    e.add_operators()->set_logical(::common::Logical::EQ);
+    e.add_operators()->mutable_const_()->set_i64(1);
+    expectNotPushed(e);
+  }
+  // Non-whitelisted literal type (blob).
+  {
+    ::common::Expression e;
+    e.add_operators()->mutable_var()->mutable_tag()->set_name("a");
+    e.add_operators()->set_logical(::common::Logical::EQ);
+    e.add_operators()->mutable_const_()->set_blob("x");
+    expectNotPushed(e);
+  }
+  // STARTSWITH is a string op outside the v1 whitelist.
+  {
+    ::common::Expression e;
+    e.add_operators()->mutable_var()->mutable_tag()->set_name("s");
+    e.add_operators()->set_logical(::common::Logical::STARTSWITH);
+    e.add_operators()->mutable_const_()->set_str("pre");
+    expectNotPushed(e);
+  }
+  // Empty IN list is rejected rather than emitting a degenerate `in ()`.
+  expectNotPushed(withinStrings("ds", ::common::Logical::WITHIN, {}));
+  // An empty expression is not a predicate.
+  expectNotPushed(::common::Expression());
+}
+
+TEST(OdpsPredicateConverterTest, UnsupportedConjunctDisablesWholePushdown) {
+  // (`a` > 1) AND (b + 1 > 2): one unsupported conjunct makes the entire
+  // expression non-pushable in v1 (whole-or-nothing), so the engine re-applies
+  // the full predicate and correctness is preserved.
+  ::common::Expression arith;
+  arith.add_operators()->mutable_var()->mutable_tag()->set_name("b");
+  arith.add_operators()->set_arith(::common::Arithmetic::ADD);
+  arith.add_operators()->mutable_const_()->set_i64(1);
+  arith.add_operators()->set_logical(::common::Logical::GT);
+  arith.add_operators()->mutable_const_()->set_i64(2);
+  expectNotPushed(combine(compareI64("a", ::common::Logical::GT, 1),
+                          ::common::Logical::AND, arith));
 }
 
 }  // namespace

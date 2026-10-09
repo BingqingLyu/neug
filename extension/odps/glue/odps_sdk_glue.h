@@ -83,8 +83,8 @@ typedef struct OdpsGlueConnection OdpsGlueConnection;
 // Create and initialize a connection. Returns NULL on failure, in which case
 // *out_error (when non-NULL) is set to a heap message the caller must free
 // with odps_glue_free_string.
-ODPS_GLUE_API OdpsGlueConnection* odps_glue_connect(const OdpsGlueConfig* config,
-                                                    char** out_error);
+ODPS_GLUE_API OdpsGlueConnection* odps_glue_connect(
+    const OdpsGlueConfig* config, char** out_error);
 
 // Destroy a connection handle (safe on NULL).
 ODPS_GLUE_API void odps_glue_disconnect(OdpsGlueConnection* conn);
@@ -117,6 +117,13 @@ ODPS_GLUE_API void odps_glue_free_string(char* s);
 typedef struct OdpsGlueReadOptions {
   long long split_size_bytes;  // >0 -> SIZE split mode with this target size
   long long max_batch_rows;  // >0 -> ReadOptions.mMaxBatchRows (SDK max 20000)
+  // ODPS filter-predicate string in the SDK's IPredicate::ToString() /
+  // SetFilterPredicate dialect (see include/odps_predicate_converter.h). NULL
+  // or empty -> no predicate pushdown. Non-empty -> the glue wraps it as an
+  // IRawPredicate on FilterOptions.mPredicate so the read session filters rows
+  // server-side (module 3, task T303). Callers still re-apply the full filter
+  // after decoding, so this only reduces how many rows are transferred.
+  const char* filter_predicate;
 } OdpsGlueReadOptions;
 
 // Opaque reader handle. Owns a TableReadSession, its split list, the split
@@ -127,12 +134,9 @@ typedef struct OdpsGlueReader OdpsGlueReader;
 // Open a read session over `project`.`schema`.`table`. Returns NULL on failure,
 // in which case *out_error (when non-NULL) is set to a heap message the caller
 // must free with odps_glue_free_string.
-ODPS_GLUE_API OdpsGlueReader* odps_glue_open_reader(OdpsGlueConnection* conn,
-                                                    const char* project,
-                                                    const char* schema,
-                                                    const char* table,
-                                                    const OdpsGlueReadOptions* options,
-                                                    char** out_error);
+ODPS_GLUE_API OdpsGlueReader* odps_glue_open_reader(
+    OdpsGlueConnection* conn, const char* project, const char* schema,
+    const char* table, const OdpsGlueReadOptions* options, char** out_error);
 
 // Number of splits in the session (>=0), or -1 on error (*out_error set).
 ODPS_GLUE_API long long odps_glue_reader_split_count(OdpsGlueReader* reader,
@@ -151,8 +155,7 @@ ODPS_GLUE_API long long odps_glue_reader_record_count(OdpsGlueReader* reader,
 //   0  -> end of data (all splits exhausted; structs left untouched);
 //  <0  -> error (*out_error set).
 ODPS_GLUE_API int odps_glue_reader_next_batch(OdpsGlueReader* reader,
-                                              void* out_array,
-                                              void* out_schema,
+                                              void* out_array, void* out_schema,
                                               char** out_error);
 
 // Close and destroy a reader (safe on NULL); closes any open stream first.

@@ -25,6 +25,7 @@
 #include "odps_arrow_bridge.h"
 #include "odps_error.h"
 #include "odps_options.h"
+#include "odps_predicate_converter.h"
 
 #if defined(ODPS_SDK_ENABLE_ARROW)
 #include "odps_sdk_glue.h"
@@ -96,6 +97,20 @@ OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
           ? static_cast<long long>(source.splitSizeMb) * 1024 * 1024
           : 0;
   readOptions.max_batch_rows = 0;
+
+  // Predicate pushdown (module 3, T303): translate the engine's skip_rows
+  // filter into the ODPS predicate string dialect so the read session can
+  // filter rows server-side. This is a pure transfer-reduction optimization --
+  // execFunc still re-applies the full predicate via reader::filter_chunk -- so
+  // an unsupported expression pushes nothing (fullyPushed=false) and stays
+  // correct. `conversion` must outlive the open_reader call below, which copies
+  // the string into the SDK predicate; as a ctor local, it does.
+  OdpsPredicateConversion conversion;
+  if (state->skipRows) {
+    conversion = OdpsPredicateConverter::convert(*state->skipRows);
+  }
+  readOptions.filter_predicate =
+      conversion.fullyPushed ? conversion.predicate.c_str() : nullptr;
 
   char* error = nullptr;
   OdpsGlueReader* reader =
