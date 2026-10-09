@@ -87,6 +87,22 @@ Module 2 (COPY <table> FROM (LOAD FROM ...)) live-mode additions:
   NEUG_ODPS_TYPE_MISMATCH_PROJECTION
                               optional: RETURN body paired with the mismatched
                               DDL (defaults to NEUG_ODPS_TEST_COLUMNS)
+
+Module 3 (predicate-pushdown equivalence, T304) live-mode additions:
+  NEUG_ODPS_TEST_FILTER       required by the pushdown-equivalence test: a WHERE
+                              clause the converter CAN push down (whitelisted
+                              comparisons / IN / IS NULL / AND / OR / NOT over
+                              plain columns and literals), e.g. "age > 30"
+  NEUG_ODPS_TEST_FILTER_UNPUSHABLE
+                              required by the same test: a WHERE clause that is
+                              semantically EQUIVALENT to NEUG_ODPS_TEST_FILTER
+                              but that the converter will NOT push (arithmetic,
+                              CAST, CASE, a scalar function, or a dynamic
+                              param), e.g. "age + 0 > 30". Forcing the
+                              engine-side fallback is what makes the two reads a
+                              fair equivalence check.
+  NEUG_ODPS_TEST_FILTER_ROWS  optional: JSON list of the rows the filter should
+                              yield (the ground truth both reads are held to)
 """
 
 import json
@@ -262,6 +278,33 @@ def _live_type_mismatch_schema():
             "type to check against."
         )
     return schema
+
+
+def _live_filter():
+    """A pushable WHERE clause for the pushdown-equivalence test."""
+    clause = os.environ.get("NEUG_ODPS_TEST_FILTER", "").strip()
+    if not clause:
+        pytest.skip("NEUG_ODPS_TEST_FILTER not set; no pushable predicate.")
+    return clause
+
+
+def _live_filter_unpushable():
+    """An equivalent-but-non-pushable WHERE clause (forces engine filtering)."""
+    clause = os.environ.get("NEUG_ODPS_TEST_FILTER_UNPUSHABLE", "").strip()
+    if not clause:
+        pytest.skip(
+            "NEUG_ODPS_TEST_FILTER_UNPUSHABLE not set; no engine-side equivalent "
+            "to compare the pushed read against."
+        )
+    return clause
+
+
+def _live_filter_rows():
+    """Optional ground-truth rows the filter should yield, or None."""
+    raw = os.environ.get("NEUG_ODPS_TEST_FILTER_ROWS", "").strip()
+    if not raw:
+        return None
+    return json.loads(raw)
 
 
 # --- Live integration tests (SDK-ON + real credentials) ----------------------
@@ -669,6 +712,70 @@ def test_odps_live_copy_type_mismatch_reports_error(tmp_path):
         assert (
             str(ERR_TYPE_CONVERSION) in message or str(ERR_SCHEMA_MISMATCH) in message
         ), message
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_predicate_pushdown_matches_engine_filter(tmp_path):
+    """A pushed predicate and its engine-side equivalent return identical rows.
+
+    T304 / FR-013 + FR-015 (spec M3: pushdown fallback and result equivalence).
+    The pushable clause is translated to an ODPS predicate and filtered
+    server-side (the transfer-reduction path); the equivalent non-pushable
+    clause is NOT translated, so ODPS returns every row and NeuG's
+    reader::filter_chunk does the filtering engine-side (the fallback path).
+    Both must yield the exact same row multiset -- and the ground truth when
+    supplied -- which is what proves pushdown never changes the result and the
+    fallback stays correct. Mirrors parquet's
+    test_reader_preserves_complete_predicates, where pushable and non-pushable
+    predicates alike return the expected rows.
+    """
+    _live_credentials()
+    table = _live_table()
+    pushable = _live_filter()
+    unpushable = _live_filter_unpushable()
+    columns = _live_columns()
+    projection = ", ".join(columns) if columns else "*"
+
+    db = Database(db_path=str(tmp_path / "odps_live_pushdown"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        try:
+            full = [
+                list(row)
+                for row in conn.execute(f'LOAD FROM "{table}" RETURN {projection};')
+            ]
+            pushed = [
+                list(row)
+                for row in conn.execute(
+                    f'LOAD FROM "{table}" WHERE {pushable} RETURN {projection};'
+                )
+            ]
+            engine = [
+                list(row)
+                for row in conn.execute(
+                    f'LOAD FROM "{table}" WHERE {unpushable} RETURN {projection};'
+                )
+            ]
+        except RuntimeError as error:
+            _skip_if_sdk_off(error)
+            raise
+
+        # Server-side pushdown == engine-side fallback, row for row (FR-013/015).
+        _assert_same_rows(pushed, engine)
+        # A filter can only remove rows, never add them: the pushed read is a
+        # subset of the unfiltered scan (SC-004 rows-read reduction observable).
+        assert len(pushed) <= len(full), "filter returned more rows than the scan"
+
+        ground_truth = _live_filter_rows()
+        if ground_truth is not None:
+            _assert_same_rows(pushed, ground_truth)
     finally:
         conn.close()
         db.close()

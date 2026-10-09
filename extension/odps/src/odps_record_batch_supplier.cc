@@ -163,18 +163,57 @@ OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
   readOptions.filter_predicate =
       conversion.fullyPushed ? conversion.predicate.c_str() : nullptr;
 
+  const std::string operation = "ODPS_SCAN: failed to open a read session on " +
+                                project + "." + source.schema + "." +
+                                source.table;
+  const std::vector<std::string> secrets = {connection_->options().accessId,
+                                            connection_->options().accessKey};
+
   char* error = nullptr;
   OdpsGlueReader* reader =
       odps_glue_open_reader(glue, project.c_str(), source.schema.c_str(),
                             source.table.c_str(), &readOptions, &error);
+
+  // Predicate pushdown is a best-effort transfer optimization (module 3, T304):
+  // execFunc always re-applies the full skip_rows predicate via
+  // reader::filter_chunk, so dropping the pushed predicate never changes the
+  // result (FR-013). If the SDK refused to open the session AND we had pushed a
+  // predicate, retry once with column + partition pruning only -- the server
+  // may reject a predicate it cannot evaluate (a column it will not filter on,
+  // a type/operator its parser dislikes) while still serving the pruned scan;
+  // the engine-side filter then does the whole job (FR-015). A genuine
+  // connection/auth/table failure fails the retry identically and is surfaced
+  // below with both messages. The lazy COPY path never reaches here with a
+  // predicate: its fused builder declines skip_rows sources (see
+  // batch_insert_{vertex,edge}.cc), so filter_predicate is null and no retry
+  // happens there.
+  if (reader == nullptr && readOptions.filter_predicate != nullptr) {
+    const std::string rejectedMessage =
+        (error != nullptr) ? error : "unknown error";
+    odps_glue_free_string(error);
+    error = nullptr;
+    readOptions.filter_predicate = nullptr;  // keep column + partition pruning
+    reader = odps_glue_open_reader(glue, project.c_str(), source.schema.c_str(),
+                                   source.table.c_str(), &readOptions, &error);
+    if (reader == nullptr) {
+      const std::string retryMessage =
+          (error != nullptr) ? error : "unknown error";
+      odps_glue_free_string(error);
+      OdpsError::throwAttributed(
+          operation,
+          retryMessage +
+              " (the same read with predicate pushdown also failed: " +
+              rejectedMessage + ")",
+          secrets);
+    }
+    // Fell back: the predicate was rejected, so engine-side filtering does the
+    // work while column/partition pruning stay pushed.
+  }
+
   if (reader == nullptr) {
     const std::string message = (error != nullptr) ? error : "unknown error";
     odps_glue_free_string(error);
-    OdpsError::throwAttributed(
-        "ODPS_SCAN: failed to open a read session on " + project + "." +
-            source.schema + "." + source.table,
-        message,
-        {connection_->options().accessId, connection_->options().accessKey});
+    OdpsError::throwAttributed(operation, message, secrets);
   }
   reader_ = reader;
 
