@@ -13,8 +13,10 @@
  * limitations under the License.
  */
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -22,6 +24,8 @@
 #include <gtest/gtest.h>
 
 #include "neug/common/types/value.h"
+#include "neug/main/connection.h"
+#include "neug/main/neug_db.h"
 #include "neug/utils/exception/exception.h"
 
 #include "odps_arrow_abi.h"
@@ -29,6 +33,12 @@
 #include "odps_connection.h"
 #include "odps_options.h"
 #include "odps_schema_converter.h"
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace neug {
 namespace extension {
@@ -50,6 +60,12 @@ class ScopedOdpsEnv {
   }
 
   ~ScopedOdpsEnv() {
+    // Fully restore the prior state: drop every key this scope touched (so a
+    // value set() during the test never leaks into later tests), then re-apply
+    // the ones that were present beforehand.
+    for (const char* key : keys_) {
+      unsetenv(key);
+    }
     for (const auto& [key, value] : saved_) {
       setenv(key.c_str(), value.c_str(), 1);
     }
@@ -928,6 +944,103 @@ TEST(OdpsArrowBridgeTest, RejectsWrongBufferCount) {
   b.childArray.n_buffers = 3;  // int64 column expects exactly 2
   EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
                exception::InvalidArgumentException);
+}
+
+}  // namespace
+
+namespace {
+
+// --- End-to-end LOAD FROM routing (SDK-OFF) ---------------------------------
+// The data plane itself needs the x86_64-only ODPS SDK plus live credentials,
+// so it cannot run here. What CAN be verified without the SDK is the query
+// routing: that an `odps://` source resolves to this extension's ODPS_SCAN (via
+// the {SCHEME}_SCAN catalog lookup added to the binder) instead of failing to
+// parse the address as a file extension. With routing correct the scan reaches
+// sniffFunc, which raises the SDK-required error asserted below.
+
+std::filesystem::path GetExecutablePath() {
+#if defined(__APPLE__)
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::string buffer(size, '\0');
+  if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+    return {};
+  }
+  return std::filesystem::canonical(buffer.c_str());
+#else
+  return std::filesystem::read_symlink("/proc/self/exe");
+#endif
+}
+
+// Walks up from the test binary to the build root holding the loadable
+// libodps.neug_extension, mirroring the fts extension load-smoke test.
+std::string FindOdpsBuildRoot() {
+  auto directory = GetExecutablePath().parent_path();
+  const auto extension_path =
+      std::filesystem::path("extension/odps/libodps.neug_extension");
+  for (int i = 0; i < 8; ++i) {
+    if (std::filesystem::exists(directory / extension_path)) {
+      return directory.string();
+    }
+    if (directory == directory.parent_path()) {
+      break;
+    }
+    directory = directory.parent_path();
+  }
+  return "";
+}
+
+class TemporaryDatabaseDirectory {
+ public:
+  TemporaryDatabaseDirectory() {
+    const auto suffix =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = std::filesystem::temp_directory_path() /
+            ("neug_odps_routing_" + std::to_string(suffix));
+  }
+  ~TemporaryDatabaseDirectory() { std::filesystem::remove_all(path_); }
+  const std::filesystem::path& path() const { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+TEST(OdpsLoadFromRoutingTest, OdpsSchemeReachesOdpsScanWithoutSdk) {
+  const auto build_root = FindOdpsBuildRoot();
+  ASSERT_FALSE(build_root.empty())
+      << "could not locate libodps.neug_extension above the test binary";
+  ASSERT_EQ(setenv("NEUG_EXTENSION_HOME_PYENV", build_root.c_str(), 1), 0);
+
+  // Connection options are resolved before the scan reaches sniffFunc, so
+  // supply dummy credentials/endpoint to clear that gate deterministically; the
+  // SDK-OFF sniff short-circuits to its error before any network call.
+  // ScopedOdpsEnv makes this independent of test order and restores the
+  // environment after.
+  ScopedOdpsEnv env(allOdpsEnvKeys());
+  env.set(OdpsConnectionKeys::kEnvAccessKeyId, "routing-dummy-id");
+  env.set(OdpsConnectionKeys::kEnvAccessKeySecret, "routing-dummy-secret");
+  env.set(OdpsConnectionKeys::kEnvEndpoint, "routing-dummy-endpoint");
+
+  TemporaryDatabaseDirectory database_directory;
+  neug::NeugDB database;
+  ASSERT_TRUE(database.Open(database_directory.path()));
+  auto connection = database.Connect();
+  ASSERT_NE(connection, nullptr);
+
+  auto load = connection->Query("LOAD odps;");
+  ASSERT_TRUE(load.has_value()) << load.error().ToString();
+
+  // No SDK build: the scan cannot fetch data, but it MUST route to ODPS_SCAN
+  // and surface the SDK-required error from sniffFunc. A regression in scheme
+  // detection would instead fail earlier with a "{...}_SCAN does not exist"
+  // catalog error naming a mis-parsed fragment of the address (e.g. MY_TABLE).
+  auto result = connection->Query(
+      "LOAD FROM \"odps://my_project.default.my_table\" RETURN *;");
+  ASSERT_FALSE(result.has_value());
+  const auto message = result.error().ToString();
+  EXPECT_NE(message.find("ODPS_SCAN"), std::string::npos) << message;
+  EXPECT_NE(message.find("requires the ODPS SDK build"), std::string::npos)
+      << message;
 }
 
 }  // namespace
