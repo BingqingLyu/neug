@@ -691,14 +691,27 @@ def _set_dummy_credentials(monkeypatch):
 
 
 def _assert_routed_to_odps_scan(message):
-    # ODPS_SCAN in the message proves the binder routed the odps:// scheme to
-    # this extension (T107's catalog-gated {SCHEME}_SCAN detection) rather than
-    # mis-parsing the address as a file extension.
-    assert "ODPS_SCAN" in message, message
-    if _SDK_REQUIRED_MARKER not in message:
-        # SDK build present: no SDK-required short-circuit fires. The live tests
-        # own the data-path verification, so don't assert a marker that can't.
+    # Reaching the ODPS data path proves the binder routed the odps:// scheme to
+    # this extension's ODPS_SCAN operator (T107's catalog-gated {SCHEME}_SCAN
+    # detection) rather than mis-parsing the address as a file extension.
+    #
+    # The two builds surface this differently:
+    #   * SDK-OFF skeleton: sniffFunc short-circuits with _SDK_REQUIRED_MARKER
+    #     and the operator name ODPS_SCAN is embedded in the error. Assert both
+    #     so a routing regression (which produces neither) still fails here.
+    #   * SDK-ON: the scan reaches the real connection layer, which fails on the
+    #     dummy credentials with an odps_connection/[LocalError] error that does
+    #     NOT name ODPS_SCAN. Routing is nonetheless proven; the live tests own
+    #     the data-path verification, so skip rather than assert a marker that
+    #     cannot fire in this build.
+    if _SDK_REQUIRED_MARKER in message:
+        assert "ODPS_SCAN" in message, message
+        return
+    if "odps_connection" in message or "ODPS_SCAN" in message:
         pytest.skip("ODPS SDK build present; run with NEUG_ODPS_LIVE=1 for data.")
+    # Neither the SDK-required marker nor an ODPS connection error: routing
+    # genuinely failed (e.g. a catalog error naming a mis-parsed fragment).
+    assert "ODPS_SCAN" in message, message
 
 
 @pytest.mark.skipif(
