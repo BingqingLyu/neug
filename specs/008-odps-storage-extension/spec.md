@@ -53,7 +53,7 @@ NeuG 目前可通过 extension（parquet、httpfs 等）把外部文件/对象�
 
 1. **Given** 一张标准 ODPS 表和有效凭据，**When** 执行 `LOAD FROM "odps://proj/tbl" RETURN a, b`，
    **Then** 返回的列名/类型/行数据与 `SELECT a, b FROM proj.tbl` 在 ODPS 侧结果一致。
-2. **Given** 一张分区表，**When** 执行带分区限定的 `LOAD FROM "odps://proj/tbl?partition=pt=20260921" RETURN *`，
+2. **Given** 一张分区表，**When** 执行带分区限定的 `LOAD FROM "odps://proj/tbl?pt=20260921" RETURN *`，
    **Then** 仅返回该分区的数据。
 3. **Given** 错误的项目名或表名，**When** 执行扫描，**Then** 返回明确指出"表/项目不存在或无权限"的错误。
 4. **Given** 缺少或错误的凭据，**When** 执行扫描，**Then** 返回鉴权失败错误，且错误信息中不包含 AccessKey 明文。

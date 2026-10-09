@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "neug/utils/exception/exception.h"
 #include "odps_arrow_abi.h"
@@ -97,6 +98,20 @@ OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
           ? static_cast<long long>(source.splitSizeMb) * 1024 * 1024
           : 0;
   readOptions.max_batch_rows = 0;
+
+  // Partition pruning (module 3, T302): pass the address/option partition specs
+  // straight through to FilterOptions.mRequiredPartitions; each element is
+  // already a complete '/'-joined path (see odps_options parsePartitions).
+  // `source.partitions` and the pointer array are ctor locals, so both outlive
+  // the open_reader call below (the glue copies the strings it needs).
+  std::vector<const char*> partitionPtrs;
+  partitionPtrs.reserve(source.partitions.size());
+  for (const std::string& partition : source.partitions) {
+    partitionPtrs.push_back(partition.c_str());
+  }
+  readOptions.required_partitions =
+      partitionPtrs.empty() ? nullptr : partitionPtrs.data();
+  readOptions.required_partition_count = partitionPtrs.size();
 
   // Predicate pushdown (module 3, T303): translate the engine's skip_rows
   // filter into the ODPS predicate string dialect so the read session can
