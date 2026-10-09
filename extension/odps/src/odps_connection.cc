@@ -22,6 +22,7 @@
 #include <string>
 
 #include "neug/utils/exception/exception.h"
+#include "odps_error.h"
 
 #if defined(ODPS_SDK_ENABLE_ARROW)
 #include "odps_sdk_glue.h"
@@ -178,9 +179,9 @@ OdpsConnection::OdpsConnection(const OdpsConnectionOptions& options)
   if (impl_->glue == nullptr) {
     const std::string message = (error != nullptr) ? error : "unknown error";
     odps_glue_free_string(error);
-    THROW_IO_EXCEPTION(
-        "odps_connection: failed to initialize the ODPS connection: " +
-        message);
+    OdpsError::throwAttributed(
+        "odps_connection: failed to initialize the ODPS connection", message,
+        {options_.accessId, options_.accessKey});
   }
 #endif
 }

@@ -31,6 +31,7 @@
 #include "odps_arrow_abi.h"
 #include "odps_arrow_bridge.h"
 #include "odps_connection.h"
+#include "odps_error.h"
 #include "odps_options.h"
 #include "odps_schema_converter.h"
 
@@ -495,6 +496,116 @@ TEST(OdpsSchemaConverterTest, SniffWithoutSdkThrowsClearError) {
                exception::InvalidArgumentException);
 }
 #endif
+
+// ============================================================================
+// OdpsError attribution (T108, SDK-free): glue "[code] msg" -> actionable cause
+// ============================================================================
+
+TEST(OdpsErrorTest, ExtractsBracketedCode) {
+  EXPECT_EQ("AccessDenied", OdpsError::extractCode("[AccessDenied] no perms"));
+  EXPECT_EQ("ODPS-0130131",
+            OdpsError::extractCode("[ODPS-0130131] Table not found"));
+  // No bracketed prefix (a bare std::exception::what()) or unbalanced -> empty.
+  EXPECT_EQ("", OdpsError::extractCode("connection reset by peer"));
+  EXPECT_EQ("", OdpsError::extractCode("[unclosed"));
+}
+
+TEST(OdpsErrorTest, ClassifiesAuthenticationCodes) {
+  for (const char* msg :
+       {"[AccessDenied] denied", "[Unauthorized] x",
+        "[SignatureDoesNotMatch] bad signature",
+        "[InvalidAccessKeyId.NotFound] no key", "[TokenExpired] token expired",
+        "[ODPS-0410051] invalid credentials"}) {
+    EXPECT_EQ(OdpsErrorCategory::kAuthentication, OdpsError::classify(msg))
+        << msg;
+  }
+}
+
+TEST(OdpsErrorTest, ClassifiesNotFoundCodes) {
+  for (const char* msg :
+       {"[NoSuchObject] gone", "[NoSuchTable] t", "[TableNotFound] t",
+        "[NoSuchPartition] pt", "[ODPS-0130131] Table not found"}) {
+    EXPECT_EQ(OdpsErrorCategory::kNotFound, OdpsError::classify(msg)) << msg;
+  }
+}
+
+TEST(OdpsErrorTest, ClassifiesNetworkCodes) {
+  for (const char* msg : {"[ConnectionError] refused", "could not resolve host",
+                          "[NetworkUnreachable] no route to host",
+                          "[ConnectTimeout] connect timed out"}) {
+    EXPECT_EQ(OdpsErrorCategory::kNetwork, OdpsError::classify(msg)) << msg;
+  }
+}
+
+TEST(OdpsErrorTest, ClassifiesTimeoutQuotaAndBadRequest) {
+  EXPECT_EQ(OdpsErrorCategory::kSessionTimeout,
+            OdpsError::classify("[RequestTimeout] timed out"));
+  EXPECT_EQ(OdpsErrorCategory::kSessionTimeout,
+            OdpsError::classify("[SessionExpired] reload the session"));
+  EXPECT_EQ(OdpsErrorCategory::kQuota,
+            OdpsError::classify("[QuotaExceeded] over quota"));
+  EXPECT_EQ(OdpsErrorCategory::kQuota,
+            OdpsError::classify("[Throttling] slow down"));
+  EXPECT_EQ(OdpsErrorCategory::kBadRequest,
+            OdpsError::classify("[InvalidParameter] bad partition spec"));
+}
+
+TEST(OdpsErrorTest, UnknownCodeFallsBackToUnknown) {
+  EXPECT_EQ(OdpsErrorCategory::kUnknown,
+            OdpsError::classify("[SomethingWeird] huh"));
+  EXPECT_STREQ("Unknown", OdpsError::categoryName(OdpsErrorCategory::kUnknown));
+  EXPECT_STREQ("Authentication",
+               OdpsError::categoryName(OdpsErrorCategory::kAuthentication));
+}
+
+TEST(OdpsErrorTest, AttributeKeepsOperationHintAndOriginalText) {
+  const std::string msg =
+      OdpsError::attribute("ODPS_SCAN: failed to read schema of p.s.t",
+                           "[AccessDenied] you have no permission");
+  EXPECT_NE(msg.find("failed to read schema of p.s.t"), std::string::npos);
+  EXPECT_NE(msg.find("authentication or authorization failed"),
+            std::string::npos);
+  EXPECT_NE(msg.find("[AccessDenied] you have no permission"),
+            std::string::npos);
+}
+
+TEST(OdpsErrorTest, RedactSecretsMasksLongCredentialsOnly) {
+  const std::string secret = "SUPERSECRETACCESSKEY123";
+  const std::string redacted = OdpsError::redactSecrets(
+      "signature computed from " + secret + " does not match", {secret});
+  EXPECT_EQ(redacted.find(secret), std::string::npos);
+  EXPECT_NE(redacted.find(maskCredential(secret)), std::string::npos);
+  // Short values are left untouched so ordinary words are never masked.
+  EXPECT_EQ("id", OdpsError::redactSecrets("id", {"id"}));
+}
+
+TEST(OdpsErrorTest, ThrowAttributedMapsCategoryToExceptionType) {
+  EXPECT_THROW(OdpsError::throwAttributed("op", "[AccessDenied] denied"),
+               exception::PermissionDeniedException);
+  EXPECT_THROW(OdpsError::throwAttributed("op", "[NoSuchTable] gone"),
+               exception::NotFoundException);
+  EXPECT_THROW(OdpsError::throwAttributed("op", "[ConnectionError] refused"),
+               exception::ConnectionException);
+  EXPECT_THROW(OdpsError::throwAttributed("op", "[InvalidParameter] bad"),
+               exception::InvalidArgumentException);
+  // Timeout / quota / unknown all surface as IO errors.
+  EXPECT_THROW(OdpsError::throwAttributed("op", "[RequestTimeout] slow"),
+               exception::IOException);
+  EXPECT_THROW(OdpsError::throwAttributed("op", "[Weird] huh"),
+               exception::IOException);
+}
+
+TEST(OdpsErrorTest, ThrowAttributedRedactsSecretsBeforeThrowing) {
+  const std::string secret = "SUPERSECRETACCESSKEY123";
+  try {
+    OdpsError::throwAttributed("op", "[SignatureDoesNotMatch] " + secret,
+                               {secret});
+    FAIL() << "throwAttributed should always throw";
+  } catch (const exception::Exception& e) {
+    EXPECT_EQ(std::string(e.what()).find(secret), std::string::npos)
+        << e.what();
+  }
+}
 
 // ============================================================================
 // Arrow C Data Interface bridge (T106, SDK-free): recordBatchToDataChunk
