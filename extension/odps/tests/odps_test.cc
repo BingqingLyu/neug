@@ -1059,6 +1059,7 @@ TEST(OdpsArrowBridgeTest, RejectsWrongBufferCount) {
 
 }  // namespace
 
+#if !defined(ODPS_SDK_ENABLE_ARROW)
 namespace {
 
 // --- End-to-end LOAD FROM routing (SDK-OFF) ---------------------------------
@@ -1155,6 +1156,7 @@ TEST(OdpsLoadFromRoutingTest, OdpsSchemeReachesOdpsScanWithoutSdk) {
 }
 
 }  // namespace
+#endif  // !ODPS_SDK_ENABLE_ARROW
 
 }  // namespace
 }  // namespace odps
