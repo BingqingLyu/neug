@@ -122,14 +122,62 @@ TEST(OdpsOptionsAddressTest, TableOnlyLeavesProjectEmpty) {
   EXPECT_EQ(desc.table, "orders");
 }
 
-TEST(OdpsOptionsAddressTest, AcceptsAmpersandAndWhitespace) {
+TEST(OdpsOptionsAddressTest, AcceptsAmpersandSeparatorAndWhitespace) {
+  // '&' (like ',') separates MULTIPLE partitions; the same partition column
+  // repeated means two distinct partitions are read. Whitespace around the
+  // address and each term is trimmed.
   auto desc = OdpsOptions::parseAddress(
-      "  odps://sales.default.orders ? dt=20260921 & hh=01  ");
+      "  odps://sales.default.orders ? dt=20260921 & dt=20260922  ");
   EXPECT_EQ(desc.project, "sales");
   EXPECT_EQ(desc.table, "orders");
   ASSERT_EQ(desc.partitions.size(), 2u);
   EXPECT_EQ(desc.partitions[0], "dt=20260921");
-  EXPECT_EQ(desc.partitions[1], "hh=01");
+  EXPECT_EQ(desc.partitions[1], "dt=20260922");
+}
+
+TEST(OdpsOptionsAddressTest, ParsesMultiLevelPartitionWithSlash) {
+  // '/' joins the levels of ONE partition (the SDK SetPartitionSpec dialect);
+  // the single element is the normalized full partition path.
+  auto desc = OdpsOptions::parseAddress("odps://sales.orders?pt=1/ds=x");
+  ASSERT_EQ(desc.partitions.size(), 1u);
+  EXPECT_EQ(desc.partitions[0], "pt=1/ds=x");
+}
+
+TEST(OdpsOptionsAddressTest, ParsesMultipleMultiLevelPartitions) {
+  // ',' separates several complete partition paths.
+  auto desc =
+      OdpsOptions::parseAddress("odps://sales.orders?pt=1/ds=a,pt=2/ds=b");
+  ASSERT_EQ(desc.partitions.size(), 2u);
+  EXPECT_EQ(desc.partitions[0], "pt=1/ds=a");
+  EXPECT_EQ(desc.partitions[1], "pt=2/ds=b");
+}
+
+TEST(OdpsOptionsAddressTest, NormalizesWhitespaceInsidePartitionLevels) {
+  auto desc =
+      OdpsOptions::parseAddress("odps://sales.orders? pt = 1 / ds = x ");
+  ASSERT_EQ(desc.partitions.size(), 1u);
+  EXPECT_EQ(desc.partitions[0], "pt=1/ds=x");
+}
+
+TEST(OdpsOptionsAddressTest, RejectsCommaSeparatedLevelsOfOnePartition) {
+  // MaxCompute DDL habit PARTITION(pt=1, ds=x): several single-level terms with
+  // different keys and no '/' -> the guard rejects it rather than silently
+  // reading two partial partitions.
+  EXPECT_THROW(OdpsOptions::parseAddress("odps://proj.tbl?pt=1,ds=x"),
+               exception::InvalidArgumentException);
+  EXPECT_THROW(OdpsOptions::parseAddress("odps://proj.tbl?pt=1&ds=x"),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsOptionsAddressTest, RejectsMalformedPartitionLevels) {
+  // A level without '=', an empty level (doubled '/') and an empty key/value
+  // inside a multi-level term are all rejected.
+  EXPECT_THROW(OdpsOptions::parseAddress("odps://proj.tbl?pt=1/ds"),
+               exception::InvalidArgumentException);
+  EXPECT_THROW(OdpsOptions::parseAddress("odps://proj.tbl?pt=1//ds=x"),
+               exception::InvalidArgumentException);
+  EXPECT_THROW(OdpsOptions::parseAddress("odps://proj.tbl?pt=1/=x"),
+               exception::InvalidArgumentException);
 }
 
 TEST(OdpsOptionsAddressTest, SchemeIsCaseInsensitiveAndOptional) {

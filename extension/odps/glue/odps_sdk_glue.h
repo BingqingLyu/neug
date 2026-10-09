@@ -124,6 +124,14 @@ typedef struct OdpsGlueReadOptions {
   // server-side (module 3, task T303). Callers still re-apply the full filter
   // after decoding, so this only reduces how many rows are transferred.
   const char* filter_predicate;
+  // Partition specs to prune to (module 3, task T302). Each entry is one
+  // complete partition path in the SDK's '/'-delimited dialect (e.g.
+  // "pt=1/ds=x") and maps 1:1 onto FilterOptions.mRequiredPartitions, so the
+  // session reads exactly these partitions. NULL or a zero count -> read all
+  // partitions. The glue copies the strings it needs; the caller retains
+  // ownership of the array and every element.
+  const char* const* required_partitions;
+  size_t required_partition_count;
 } OdpsGlueReadOptions;
 
 // Opaque reader handle. Owns a TableReadSession, its split list, the split

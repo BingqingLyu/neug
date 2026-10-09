@@ -45,7 +45,7 @@ inline constexpr const char* kOdpsScheme = "odps://";
 /**
  * @brief Parsed, credential-free description of an ODPS source table.
  *
- * Produced from `odps://[project.][schema.]table[?pt=v1,ds=v2]` plus the
+ * Produced from `odps://[project.][schema.]table[?pt=1/ds=x]` plus the
  * COPY/LOAD read knobs. Access credentials and the service endpoint are
  * intentionally NOT part of this descriptor so they never leak into query
  * text — they are resolved separately by `OdpsConnectionOptions` (T104).
@@ -58,8 +58,9 @@ struct OdpsSourceDesc {
   std::string schema = kOdpsDefaultSchema;
   // Required.
   std::string table;
-  // Ordered partition specs, each of the form `key=value`
-  // (maps to FilterOptions.mRequiredPartitions downstream).
+  // Partition specs to prune to, each a complete '/'-joined partition path
+  // (e.g. "pt=1/ds=x"). Maps 1:1 onto FilterOptions.mRequiredPartitions; empty
+  // means "read all partitions".
   std::vector<std::string> partitions;
   // Split size hint in MiB; 0 means "unset" -> SDK default split mode.
   long splitSizeMb = 0;
@@ -75,12 +76,17 @@ struct OdpsSourceDesc {
  * @brief Parses odps:// addresses and FileSchema options into OdpsSourceDesc.
  *
  * Address grammar (spec FR-001/003/005):
- *   odps://[project.][schema.]table[?pt=v1,ds=v2]
+ *   odps://[project.][schema.]table[?pt=1/ds=x,pt=2/ds=y]
  *   - at most three dot-separated segments: project, schema, table;
  *   - a missing schema defaults to "default";
  *   - a missing project is left empty (resolved from the connection later);
- *   - everything after `?` is a comma/`&`-separated partition spec; each term
- *     must be `key=value` with non-empty key and value.
+ *   - everything after `?` is a partition spec: ',' or '&' separates MULTIPLE
+ *     partitions (all are read), '/' separates the LEVELS within one partition
+ *     (matching the SDK's SetPartitionSpec dialect), and each level is a
+ *     `key=value` pair with non-empty key and value. Several single-level terms
+ *     with differing keys and no '/' (e.g. "pt=1,ds=x") are rejected, since
+ *     that is MaxCompute's comma-separated DDL habit rather than a partition
+ *     separator here.
  * Illegal input (missing table, more than three segments, malformed partition)
  * raises a located `THROW_INVALID_ARGUMENT_EXCEPTION`.
  */

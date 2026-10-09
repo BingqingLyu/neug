@@ -266,17 +266,36 @@ extern "C" OdpsGlueReader* odps_glue_open_reader(
         .SetSchema(orEmpty(schema))
         .SetTable(orEmpty(table))
         .SetSplitOptions(splitOptions);
-    // Predicate pushdown (module 3, T303): when the caller supplied an ODPS
-    // filter-predicate string, wrap it as a raw predicate so the session sends
-    // it to SetFilterPredicate for server-side row filtering. The string is
-    // already in the SDK's IPredicate::ToString() dialect (see
-    // odps_predicate_converter); engine-side filtering still re-applies the
-    // full predicate, so this only reduces how many rows are transferred. A
-    // NULL or empty predicate leaves FilterOptions unset, matching pre-pushdown
-    // behavior exactly.
+    // Session filter (module 3): partition pruning (T302) + predicate pushdown
+    // (T303), merged into one FilterOptions since SetFilterOptions replaces the
+    // whole struct. Either part may be absent; the call is made only when at
+    // least one is present, so a plain read leaves FilterOptions unset and
+    // matches pre-pushdown behavior exactly.
+    //
+    // Partition pruning: each caller-supplied spec is already a complete
+    // '/'-delimited partition path, so it maps straight onto
+    // mRequiredPartitions and the session reads only those partitions.
+    // Predicate pushdown: the string is already in the SDK's
+    // IPredicate::ToString() dialect (see odps_predicate_converter) and is
+    // wrapped as a raw predicate for SetFilterPredicate. Engine-side filtering
+    // still re-applies the full predicate, so this only reduces how many rows
+    // are transferred.
+    FilterOptions filterOptions;
+    bool haveFilter = false;
+    if (options != nullptr && options->required_partitions != nullptr) {
+      for (size_t i = 0; i < options->required_partition_count; ++i) {
+        if (nonEmpty(options->required_partitions[i])) {
+          filterOptions.mRequiredPartitions.push_back(
+              options->required_partitions[i]);
+        }
+      }
+      haveFilter = !filterOptions.mRequiredPartitions.empty();
+    }
     if (options != nullptr && nonEmpty(options->filter_predicate)) {
-      FilterOptions filterOptions;
       filterOptions.mPredicate = IRawPredicate::Of(options->filter_predicate);
+      haveFilter = true;
+    }
+    if (haveFilter) {
       builder.SetFilterOptions(filterOptions);
     }
     ITableReadSessionPtr session = builder.Build();

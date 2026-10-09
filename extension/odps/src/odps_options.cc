@@ -103,13 +103,35 @@ void splitAuthority(const std::string& authority, OdpsSourceDesc& desc,
   }
 }
 
-// Parse a `k=v[,k=v...]` partition spec into ordered "k=v" strings.
+// Parse the `?`-suffix partition spec into the SDK's mRequiredPartitions form.
+//
+// Grammar (module 3, T302 -- aligned with the Storage API data model, where
+// mRequiredPartitions is a list of complete partition paths):
+//   - ',' or '&' separates MULTIPLE partitions; each becomes one list element
+//     and the session reads all of them (OR);
+//   - '/' separates the LEVELS within one partition, matching the SDK's own
+//     SetPartitionSpec dialect ("pt1=a/pt2=b", '/' is the only level
+//     delimiter);
+//   - every level is a `key=value` pair with a non-empty key and value.
+// Each returned element is the normalized, '/'-joined partition path.
+//
+// Guard: MaxCompute DDL writes ONE multi-level partition with commas
+// (PARTITION(pt='1', ds='x')) -- the opposite of the Storage API. So if the
+// spec lists several single-level terms with differing keys and no '/'
+// anywhere (e.g. "pt=1,ds=x"), that is almost certainly the DDL habit mistaken
+// for a partition separator; we reject it with an actionable message instead of
+// silently reading partial/wrong partitions. Terms that already use '/' show
+// the grammar is understood, so mixed key-lists are then passed through
+// untouched.
 std::vector<std::string> parsePartitions(const std::string& spec,
                                          const std::string& source) {
   std::vector<std::string> out;
   if (trim(spec).empty()) {
     return out;
   }
+  bool anySlash = false;
+  std::vector<std::string>
+      firstKeys;  // per-term first-level key, for the guard
   size_t start = 0;
   while (start <= spec.size()) {
     size_t sep = spec.find_first_of(",&", start);
@@ -118,27 +140,70 @@ std::vector<std::string> parsePartitions(const std::string& spec,
     if (term.empty()) {
       THROW_INVALID_ARGUMENT_EXCEPTION(
           "odps_options: empty partition term in '" + source +
-          "'. Each partition must be 'key=value'.");
+          "'. Each partition must be one or more 'key=value' levels joined "
+          "by '/'.");
     }
-    size_t eq = term.find('=');
-    if (eq == std::string::npos) {
-      THROW_INVALID_ARGUMENT_EXCEPTION(
-          "odps_options: invalid partition term '" + term + "' in '" + source +
-          "'. Expected 'key=value'.");
+    if (term.find('/') != std::string::npos) {
+      anySlash = true;
     }
-    std::string key = trim(term.substr(0, eq));
-    std::string value = trim(term.substr(eq + 1));
-    if (key.empty() || value.empty()) {
-      THROW_INVALID_ARGUMENT_EXCEPTION(
-          "odps_options: invalid partition term '" + term + "' in '" + source +
-          "'. Both key and value must be "
-          "non-empty ('key=value').");
+    // Split the term on '/' into levels, validate each, and re-join normalized.
+    std::string normalized;
+    size_t lstart = 0;
+    while (lstart <= term.size()) {
+      size_t slash = term.find('/', lstart);
+      std::string level = trim(term.substr(lstart, slash == std::string::npos
+                                                       ? std::string::npos
+                                                       : slash - lstart));
+      if (level.empty()) {
+        THROW_INVALID_ARGUMENT_EXCEPTION(
+            "odps_options: empty partition level in '" + term + "' in '" +
+            source + "'. Join levels with '/', each of the form 'key=value'.");
+      }
+      size_t eq = level.find('=');
+      if (eq == std::string::npos) {
+        THROW_INVALID_ARGUMENT_EXCEPTION(
+            "odps_options: invalid partition level '" + level + "' in '" +
+            source + "'. Expected 'key=value'.");
+      }
+      std::string key = trim(level.substr(0, eq));
+      std::string value = trim(level.substr(eq + 1));
+      if (key.empty() || value.empty()) {
+        THROW_INVALID_ARGUMENT_EXCEPTION(
+            "odps_options: invalid partition level '" + level + "' in '" +
+            source + "'. Both key and value must be non-empty ('key=value').");
+      }
+      if (!normalized.empty()) {
+        normalized += "/";
+      } else {
+        firstKeys.push_back(key);
+      }
+      normalized += key + "=" + value;
+      if (slash == std::string::npos) {
+        break;
+      }
+      lstart = slash + 1;
     }
-    out.push_back(key + "=" + value);
+    out.push_back(normalized);
     if (sep == std::string::npos) {
       break;
     }
     start = sep + 1;
+  }
+
+  // Guard against the DDL comma-for-levels habit (see the comment above).
+  if (out.size() > 1 && !anySlash) {
+    const bool allSameKey =
+        std::all_of(firstKeys.begin(), firstKeys.end(),
+                    [&](const std::string& k) { return k == firstKeys[0]; });
+    if (!allSameKey) {
+      THROW_INVALID_ARGUMENT_EXCEPTION(
+          "odps_options: partition spec '" + spec + "' in '" + source +
+          "' lists several single-level partitions with different keys. If "
+          "these are levels of ONE partition, join them with '/' (e.g. "
+          "'pt=1/ds=x'): MaxCompute's comma-separated PARTITION(...) syntax is "
+          "not the partition separator here. Use ',' or '&' only to read "
+          "several partitions of the same partition column(s).");
+    }
   }
   return out;
 }
