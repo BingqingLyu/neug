@@ -55,6 +55,13 @@ Live-mode environment contract (all read at test time):
                               (e.g. "id INT64 PRIMARY KEY, name STRING")
   NEUG_ODPS_TEST_ROWS         optional: JSON list of expected rows
                               (e.g. [[1,"alpha"],[2,"beta"]])
+  NEUG_ODPS_TEST_PARTITION    optional: partition spec for the partition-limited
+                              read (e.g. "pt=20260921"), appended to the table
+                              address as "?<spec>"
+  NEUG_ODPS_TEST_PARTITION_ROWS
+                              optional: JSON list of the rows expected in that
+                              single partition (the ground truth that proves
+                              partition pruning happened)
 """
 
 import json
@@ -144,6 +151,24 @@ def _live_expected_rows():
     raw = os.environ.get("NEUG_ODPS_TEST_ROWS", "").strip()
     if not raw:
         return None
+    return json.loads(raw)
+
+
+def _live_partition():
+    """Partition spec for the partition-limited read; skip when not set."""
+    partition = os.environ.get("NEUG_ODPS_TEST_PARTITION", "").strip()
+    if not partition:
+        pytest.skip("NEUG_ODPS_TEST_PARTITION not set; no partition to limit to.")
+    return partition.lstrip("?")
+
+
+def _live_partition_rows():
+    """Ground-truth rows of the single partition under test."""
+    raw = os.environ.get("NEUG_ODPS_TEST_PARTITION_ROWS", "").strip()
+    if not raw:
+        pytest.skip(
+            "NEUG_ODPS_TEST_PARTITION_ROWS not set; cannot prove partition pruning."
+        )
     return json.loads(raw)
 
 
@@ -248,6 +273,145 @@ def test_odps_live_copy_from_load_imports_rows(tmp_path):
                 for row in conn.execute(f'LOAD FROM "{table}" RETURN {projection};')
             ]
             _assert_same_rows(imported, direct)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_partition_limited_read(tmp_path):
+    """`LOAD FROM "odps://...?<partition>" RETURN *` reads only that partition.
+
+    T109 / Acceptance Scenario 2 (spec M1 Integration Tests: partition-limited
+    read): a partition-qualified address must return exactly the rows of that
+    single partition. Comparing against the known per-partition ground truth is
+    what proves the partition filter reached ODPS (pruning) instead of scanning
+    the whole table.
+    """
+    _live_credentials()
+    table = _live_table()
+    partition = _live_partition()
+    expected_rows = _live_partition_rows()
+    address = f"{table}?{partition}"
+
+    db = Database(db_path=str(tmp_path / "odps_live_partition"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        try:
+            result = conn.execute(f'LOAD FROM "{address}" RETURN *;')
+        except RuntimeError as error:
+            _skip_if_sdk_off(error)
+            raise
+        rows = [list(row) for row in result]
+        assert rows, f"partition {partition!r} of {table!r} returned no rows"
+        _assert_same_rows(rows, expected_rows)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_missing_table_reports_not_found(tmp_path):
+    """A non-existent table must surface a locatable not-found error.
+
+    T109 / Acceptance Scenario 3 + FR-005 (spec M1 Integration Tests: the
+    table-not-found error path): the attributed error must point at
+    "table/project does not exist or no access" (OdpsError NotFound ->
+    NotFoundException in C++) and, per SC-006, must never echo the real
+    AccessKey secret.
+    """
+    _live_credentials()
+    table = _live_table()
+    secret = os.environ.get("ODPS_ACCESS_KEY_SECRET", "")
+    missing = f"{table}_neug_t109_missing"
+
+    db = Database(db_path=str(tmp_path / "odps_live_missing"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(f'LOAD FROM "{missing}" RETURN *;')
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        lowered = message.lower()
+        assert any(
+            token in lowered
+            for token in (
+                "not exist",
+                "does not exist",
+                "not found",
+                "no access",
+                "nosuch",
+                "no permission",
+            )
+        ), message
+        if secret:
+            assert secret not in message, "AccessKey secret leaked into the error"
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_bad_credentials_reports_auth_failure_without_plaintext(
+    tmp_path, monkeypatch
+):
+    """Bad credentials must surface an auth failure with no AccessKey plaintext.
+
+    T109 / Acceptance Scenario 4 + FR-005/SC-006 (spec M1 Integration Tests:
+    the auth-failure error path): with a real endpoint but deliberately wrong
+    keys, the attributed error must indicate an authentication/authorization
+    failure (OdpsError Authentication -> PermissionDeniedException in C++) and
+    must not contain the supplied secret in clear text.
+    """
+    table = _live_table()
+    endpoint = os.environ.get("ODPS_ENDPOINT", "").strip()
+    if not endpoint:
+        pytest.skip("ODPS_ENDPOINT required to reach a real auth failure.")
+
+    bogus_secret = "NeugT109BogusSecretKey0000000000"
+    monkeypatch.setenv("ODPS_ACCESS_KEY_ID", "LTAI5tBogusKeyId000000")
+    monkeypatch.setenv("ODPS_ACCESS_KEY_SECRET", bogus_secret)
+    # Make sure the bogus keys are the ones resolved: drop the ALIBABA_CLOUD
+    # aliases so they cannot shadow ODPS_ACCESS_KEY_ID/SECRET.
+    monkeypatch.delenv("ALIBABA_CLOUD_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", raising=False)
+
+    db = Database(db_path=str(tmp_path / "odps_live_badcreds"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        lowered = message.lower()
+        assert any(
+            token in lowered
+            for token in (
+                "authenticat",
+                "authoriz",
+                "unauthorized",
+                "accessdenied",
+                "access denied",
+                "signature",
+                "forbidden",
+                "invalidaccesskey",
+                "permission",
+                "credential",
+            )
+        ), message
+        assert bogus_secret not in message, "AccessKey secret leaked into the error"
     finally:
         conn.close()
         db.close()
