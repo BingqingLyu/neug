@@ -131,27 +131,51 @@ done
 
 # --- artifacts exist --------------------------------------------------------
 EXT_SO="$(find "$BUILD_DIR" -name 'libodps.neug_extension' | head -1)"
-GLUE_A="$(find "$BUILD_DIR" -name 'libodps_sdk_glue.a' | head -1)"
+# The glue is a SHARED library (plan.md C3): it seals the SDK's ABI=0 Arrow 1.0.0
+# / protobuf 3.7.1 behind a hidden-visibility odps_glue_* C seam, so the ABI=1
+# extension .so links only that seam and never a raw SDK/Arrow symbol.
+GLUE_SO="$(find "$BUILD_DIR" -name 'libodps_sdk_glue.so' | head -1)"
 LIBNEUG="$(find "$BUILD_DIR" -maxdepth 4 -name 'libneug.so' -o -maxdepth 4 -name 'libneug.dylib' | head -1)"
 check "extension shared object built" "[[ -n '$EXT_SO' && -s '$EXT_SO' ]]"
-check "inner glue static lib built"   "[[ -n '$GLUE_A' && -s '$GLUE_A' ]]"
+check "inner glue shared lib built"   "[[ -n '$GLUE_SO' && -s '$GLUE_SO' ]]"
 check "core libneug built"            "[[ -n '$LIBNEUG' && -s '$LIBNEUG' ]]"
 
 # ===========================================================================
 # 4. C3 — ABI seam assertions.
 # ===========================================================================
-if [[ -n "$GLUE_A" ]]; then
+if [[ -n "$GLUE_SO" ]]; then
+  GLUE_DIR="$(dirname "$GLUE_SO")"
   # 4a. The glue must be compiled with the pre-C++11 ABI (=0): ABI=1 code emits
   #     std::__cxx11::basic_string symbols, ABI=0 emits none.
-  CXX11_SYMS="$(nm "$GLUE_A" 2>/dev/null | grep -c '__cxx11' || true)"
+  CXX11_SYMS="$(nm "$GLUE_SO" 2>/dev/null | grep -c '__cxx11' || true)"
   check "C3: glue is ABI=0 (no std::__cxx11 symbols; found $CXX11_SYMS)" \
         "[[ '$CXX11_SYMS' == '0' ]]"
 
-  # 4b. The C seam symbols must be unmangled (extern "C").
+  # 4b. The C seam symbols must be exported (T) and unmangled (extern "C") in
+  #     the glue's dynamic symbol table.
   for sym in odps_glue_connect odps_glue_disconnect odps_glue_sniff_schema \
-             odps_glue_schema_free odps_glue_free_string; do
-    check "C3: extern \"C\" seam symbol present & unmangled — $sym" \
-          "nm '$GLUE_A' 2>/dev/null | grep -qE ' T $sym\$'"
+             odps_glue_schema_free odps_glue_free_string odps_glue_open_reader \
+             odps_glue_reader_next_batch odps_glue_reader_record_count \
+             odps_glue_reader_split_count odps_glue_reader_close; do
+    check "C3: extern \"C\" seam symbol exported & unmangled — $sym" \
+          "nm -D --defined-only '$GLUE_SO' 2>/dev/null | grep -qE ' T $sym\$'"
+  done
+
+  # 4e. The glue must SEAL the SDK: it exports only the odps_glue_* seam, never
+  #     an SDK Arrow/protobuf/apsara C++ symbol that could interpose libneug's.
+  LEAKED_EXPORTS="$(nm -D --defined-only "$GLUE_SO" 2>/dev/null | awk '{print $3}' | grep -vcE '^(odps_glue_|_)' || true)"
+  check "C3: glue exports only the C seam (leaked $LEAKED_EXPORTS SDK/C++ symbols)" \
+        "[[ '$LEAKED_EXPORTS' == '0' ]]"
+
+  # 4f. The glue must be self-contained: its bundled ABI=0 Arrow/protobuf deps
+  #     resolve, leaving zero undefined symbols (Bug #7 regression guard).
+  GLUE_UNDEF="$(cd "$GLUE_DIR" && ldd -r ./libodps_sdk_glue.so 2>&1 | grep -c 'undefined symbol' || true)"
+  check "C3: glue .so has zero undefined symbols (found $GLUE_UNDEF)" \
+        "[[ '$GLUE_UNDEF' == '0' ]]"
+
+  # 4g. The SDK's ABI=0 runtime deps are bundled next to the glue ($ORIGIN).
+  for dep in libarrow.so.100 libprotobuf.so.3.7.1.0; do
+    check "C3: bundled SDK runtime dep present — $dep" "[[ -e '$GLUE_DIR/$dep' ]]"
   done
 fi
 
@@ -162,12 +186,29 @@ if [[ -n "$LIBNEUG" ]]; then
   check "C3: libneug leaks no SDK/Arrow symbol (found $LEAK)" "[[ '$LEAK' == '0' ]]"
 fi
 
-# 4d. The extension .so must have been compiled with ODPS_SDK_ENABLE_ARROW.
-#     The sniff path only exists under that macro; assert the glue seam is
-#     referenced by the extension object set.
+# 4d. The extension .so imports the glue C seam (proves the ODPS_SDK_ENABLE_ARROW
+#     path is compiled in) and must NOT link a system Arrow/protobuf directly nor
+#     carry any undefined SDK ABI=0 symbol (Bug #7 regression guard).
 if [[ -n "$EXT_SO" ]]; then
-  check "extension references the glue C seam (odps_glue_connect)" \
-        "nm -D '$EXT_SO' 2>/dev/null | grep -q 'odps_glue_connect' || nm '$EXT_SO' 2>/dev/null | grep -q 'odps_glue_connect'"
+  SEAM_IMPORT="$(nm -D "$EXT_SO" 2>/dev/null | grep -cE 'U odps_glue_connect' || true)"
+  check "extension imports the glue C seam (odps_glue_connect)" "[[ '$SEAM_IMPORT' -ge 1 ]]"
+  EXT_NEEDED="$(readelf -d "$EXT_SO" 2>/dev/null | grep NEEDED)"
+  HAS_GLUE="$(echo "$EXT_NEEDED" | grep -c 'libodps_sdk_glue.so' || true)"
+  HAS_SYS_ARROW="$(echo "$EXT_NEEDED" | grep -c 'libarrow.so' || true)"
+  HAS_SYS_PB="$(echo "$EXT_NEEDED" | grep -c 'libprotobuf.so' || true)"
+  check "extension links the shared glue (libodps_sdk_glue.so)" "[[ '$HAS_GLUE' == '1' ]]"
+  check "extension does NOT pull a system libarrow (Bug #7)"   "[[ '$HAS_SYS_ARROW' == '0' ]]"
+  check "extension does NOT pull a system libprotobuf (Bug #7)" "[[ '$HAS_SYS_PB' == '0' ]]"
+  # Resolve the extension against its real load environment (libneug + the
+  # co-located glue and bundled SDK ABI=0 deps + mimalloc) and require ZERO
+  # undefined symbols. This is the direct Bug #7 guard: before the shared-glue
+  # fix the .so carried ~23 undefined SDK arrow/protobuf symbols (bare -larrow/
+  # -lprotobuf bound to the system ABI=1 libs) and could not be dlopen'd.
+  EXT_DIR="$(dirname "$EXT_SO")"
+  MIMALLOC_DIR="$(dirname "$(find "$BUILD_DIR" -name 'libmimalloc.so*' | head -1)")"
+  EXT_UNDEF="$(LD_LIBRARY_PATH="$(dirname "$LIBNEUG"):$EXT_DIR:$MIMALLOC_DIR" ldd -r "$EXT_SO" 2>&1 | grep -c 'undefined symbol' || true)"
+  check "extension .so fully resolves in its load env (undefined=$EXT_UNDEF; Bug #7 guard)" \
+        "[[ '$EXT_UNDEF' == '0' ]]"
 fi
 
 # ===========================================================================
