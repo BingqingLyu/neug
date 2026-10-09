@@ -20,6 +20,7 @@
 
 #include "neug/utils/exception/exception.h"
 #include "odps_connection.h"
+#include "odps_error.h"
 
 #if defined(ODPS_SDK_ENABLE_ARROW)
 #include "odps_sdk_glue.h"
@@ -202,8 +203,11 @@ std::shared_ptr<reader::EntrySchema> OdpsSchemaConverter::sniffTableSchema(
             ? result.error
             : "unknown error (code " + std::to_string(rc) + ")";
     odps_glue_schema_free(&result);
-    THROW_IO_EXCEPTION("ODPS_SCAN: failed to read schema of " + project + "." +
-                       source.schema + "." + source.table + ": " + message);
+    OdpsError::throwAttributed(
+        "ODPS_SCAN: failed to read schema of " + project + "." + source.schema +
+            "." + source.table,
+        message,
+        {connection.options().accessId, connection.options().accessKey});
   }
 
   std::vector<OdpsColumnDesc> columns;

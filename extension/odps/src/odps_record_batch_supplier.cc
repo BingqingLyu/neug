@@ -23,6 +23,7 @@
 #include "neug/utils/exception/exception.h"
 #include "odps_arrow_abi.h"
 #include "odps_arrow_bridge.h"
+#include "odps_error.h"
 #include "odps_options.h"
 
 #if defined(ODPS_SDK_ENABLE_ARROW)
@@ -103,9 +104,11 @@ OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
   if (reader == nullptr) {
     const std::string message = (error != nullptr) ? error : "unknown error";
     odps_glue_free_string(error);
-    THROW_IO_EXCEPTION("ODPS_SCAN: failed to open a read session on " +
-                       project + "." + source.schema + "." + source.table +
-                       ": " + message);
+    OdpsError::throwAttributed(
+        "ODPS_SCAN: failed to open a read session on " + project + "." +
+            source.schema + "." + source.table,
+        message,
+        {connection_->options().accessId, connection_->options().accessKey});
   }
   reader_ = reader;
 
@@ -142,7 +145,9 @@ std::shared_ptr<DataChunk> OdpsRecordBatchSupplier::GetNextChunk() {
   if (rc < 0) {
     const std::string message = (error != nullptr) ? error : "unknown error";
     odps_glue_free_string(error);
-    THROW_IO_EXCEPTION("ODPS_SCAN: failed to read the next batch: " + message);
+    OdpsError::throwAttributed(
+        "ODPS_SCAN: failed to read the next batch", message,
+        {connection_->options().accessId, connection_->options().accessKey});
   }
   if (rc == 0) {
     return nullptr;  // end of data: every split exhausted
