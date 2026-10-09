@@ -31,6 +31,7 @@
 
 #include "odps_arrow_abi.h"
 #include "odps_arrow_bridge.h"
+#include "odps_column_projection.h"
 #include "odps_connection.h"
 #include "odps_error.h"
 #include "odps_options.h"
@@ -1375,6 +1376,106 @@ TEST(OdpsPredicateConverterTest, UnsupportedConjunctDisablesWholePushdown) {
   arith.add_operators()->mutable_const_()->set_i64(2);
   expectNotPushed(combine(compareI64("a", ::common::Logical::GT, 1),
                           ::common::Logical::AND, arith));
+}
+
+// --- buildColumnProjection (T301, SDK-free) ---------------------------------
+// Which columns a read must materialize: the projected output plus every
+// column the engine-side filter touches, in schema order.
+
+std::shared_ptr<::common::Expression> sharedExpr(::common::Expression e) {
+  return std::make_shared<::common::Expression>(std::move(e));
+}
+
+TEST(OdpsColumnProjectionTest, NoProjectionNoFilterReadsFullSchema) {
+  const std::vector<std::string> schema{"id", "name", "age", "score"};
+  auto p = buildColumnProjection(schema, {}, nullptr);
+  EXPECT_TRUE(p.isFullSchema);
+  EXPECT_EQ(p.columns, schema);
+}
+
+TEST(OdpsColumnProjectionTest, ProjectsSubsetInSchemaOrder) {
+  const std::vector<std::string> schema{"id", "name", "age", "score"};
+  // Requested out of order; the result follows schema order so it matches the
+  // layout of the returned Arrow batches.
+  auto p = buildColumnProjection(schema, {"age", "id"}, nullptr);
+  EXPECT_FALSE(p.isFullSchema);
+  EXPECT_EQ(p.columns, (std::vector<std::string>{"id", "age"}));
+}
+
+TEST(OdpsColumnProjectionTest, AddsFilterColumnsBeyondProjection) {
+  const std::vector<std::string> schema{"id", "name", "age", "score"};
+  // RETURN name WHERE age > 30: `age` is not projected but the engine-side
+  // filter needs it, so it must still be materialized.
+  auto p = buildColumnProjection(
+      schema, {"name"},
+      sharedExpr(compareI64("age", ::common::Logical::GT, 30)));
+  EXPECT_FALSE(p.isFullSchema);
+  EXPECT_EQ(p.columns, (std::vector<std::string>{"name", "age"}));
+}
+
+TEST(OdpsColumnProjectionTest, EmptyProjectionReadsFullSchemaEvenWithFilter) {
+  const std::vector<std::string> schema{"id", "name", "age", "score"};
+  // No projection info (e.g. RETURN *) -> fall back to every column, filter or
+  // not, preserving correctness.
+  auto p = buildColumnProjection(
+      schema, {}, sharedExpr(compareI64("age", ::common::Logical::GT, 30)));
+  EXPECT_TRUE(p.isFullSchema);
+  EXPECT_EQ(p.columns, schema);
+}
+
+TEST(OdpsColumnProjectionTest, CollectsColumnsFromCompoundFilter) {
+  const std::vector<std::string> schema{"id", "name", "age", "score"};
+  // RETURN id WHERE age > 1 AND name = 'bob'
+  auto filter = sharedExpr(combine(
+      compareI64("age", ::common::Logical::GT, 1), ::common::Logical::AND,
+      compareStr("name", ::common::Logical::EQ, "bob")));
+  auto p = buildColumnProjection(schema, {"id"}, filter);
+  EXPECT_FALSE(p.isFullSchema);
+  EXPECT_EQ(p.columns, (std::vector<std::string>{"id", "name", "age"}));
+}
+
+TEST(OdpsColumnProjectionTest, CollectsInListColumnAndDeduplicates) {
+  const std::vector<std::string> schema{"id", "name", "age", "score"};
+  // RETURN id WHERE name IN ('a','b'): the IN list holds constants, not
+  // columns, so only `name` is added; `id` appears once despite repetition.
+  auto filter =
+      sharedExpr(withinStrings("name", ::common::Logical::WITHIN, {"a", "b"}));
+  auto p = buildColumnProjection(schema, {"id", "id", "name"}, filter);
+  EXPECT_FALSE(p.isFullSchema);
+  EXPECT_EQ(p.columns, (std::vector<std::string>{"id", "name"}));
+}
+
+TEST(OdpsColumnProjectionTest, ProjectionCoveringEveryColumnIsFullSchema) {
+  const std::vector<std::string> schema{"id", "name", "age", "score"};
+  auto p =
+      buildColumnProjection(schema, {"score", "age", "name", "id"}, nullptr);
+  EXPECT_TRUE(p.isFullSchema);
+  EXPECT_EQ(p.columns, schema);
+}
+
+TEST(OdpsColumnProjectionTest, RejectsUnknownProjectedColumn) {
+  const std::vector<std::string> schema{"id", "name"};
+  EXPECT_THROW(buildColumnProjection(schema, {"missing"}, nullptr),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsColumnProjectionTest, RejectsUnknownFilterColumn) {
+  const std::vector<std::string> schema{"id", "name"};
+  auto filter = sharedExpr(compareI64("nope", ::common::Logical::GT, 1));
+  EXPECT_THROW(buildColumnProjection(schema, {"id"}, filter),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsColumnProjectionTest, RejectsPropertyReferenceInFilter) {
+  const std::vector<std::string> schema{"id", "name"};
+  // A graph property access (r.a.key) is not a flat table column.
+  ::common::Expression filter;
+  filter.add_operators()->mutable_var()->mutable_tag()->set_name("id");
+  filter.add_operators()->mutable_var()->mutable_property();
+  filter.add_operators()->set_logical(::common::Logical::EQ);
+  filter.add_operators()->mutable_const_()->set_i64(1);
+  EXPECT_THROW(buildColumnProjection(schema, {"id"}, sharedExpr(filter)),
+               exception::InvalidArgumentException);
 }
 
 }  // namespace

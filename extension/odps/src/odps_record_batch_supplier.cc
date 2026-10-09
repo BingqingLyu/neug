@@ -24,6 +24,7 @@
 #include "neug/utils/exception/exception.h"
 #include "odps_arrow_abi.h"
 #include "odps_arrow_bridge.h"
+#include "odps_column_projection.h"
 #include "odps_error.h"
 #include "odps_options.h"
 #include "odps_predicate_converter.h"
@@ -59,7 +60,7 @@ struct ArrowCReleaseGuard {
 }  // namespace
 
 OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
-    std::shared_ptr<reader::ReadSharedState> state) {
+    std::shared_ptr<reader::ReadSharedState> state, bool enableColumnPruning) {
   if (!state) {
     THROW_INVALID_ARGUMENT_EXCEPTION("ODPS_SCAN: null read state");
   }
@@ -98,6 +99,41 @@ OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
           ? static_cast<long long>(source.splitSizeMb) * 1024 * 1024
           : 0;
   readOptions.max_batch_rows = 0;
+
+  // Column pruning (module 3, T301): request only the columns the query needs
+  // -- the projected output plus every column the engine-side filter touches --
+  // so unreferenced columns never cross the wire. Names are collected in
+  // schema order (see odps_column_projection.h), which is also the layout the
+  // returned Arrow batches use and what execFunc decodes against via
+  // PhysicalColumnNames(). When the projection covers the whole schema we push
+  // nothing, leaving the session exactly as it was before column pruning.
+  // Pruning is enabled only for the eager execFunc path; the lazy COPY path
+  // (enableColumnPruning=false) keeps reading every column in schema order,
+  // which is what its by-index column mapping expects.
+  // `projection` is a ctor local whose strings back `dataColumnPtrs`; both
+  // outlive the open_reader call below (the glue copies the strings it needs).
+  OdpsColumnProjection projection;
+  if (state->schema.entry) {
+    if (enableColumnPruning) {
+      projection =
+          buildColumnProjection(state->schema.entry->columnNames,
+                                state->projectColumns, state->skipRows);
+    } else {
+      projection.columns = state->schema.entry->columnNames;
+      projection.isFullSchema = true;
+    }
+  }
+  physical_column_names_ = projection.columns;
+  std::vector<const char*> dataColumnPtrs;
+  if (!projection.isFullSchema) {
+    dataColumnPtrs.reserve(projection.columns.size());
+    for (const std::string& column : projection.columns) {
+      dataColumnPtrs.push_back(column.c_str());
+    }
+  }
+  readOptions.required_data_columns =
+      dataColumnPtrs.empty() ? nullptr : dataColumnPtrs.data();
+  readOptions.required_data_column_count = dataColumnPtrs.size();
 
   // Partition pruning (module 3, T302): pass the address/option partition specs
   // straight through to FilterOptions.mRequiredPartitions; each element is
@@ -192,8 +228,9 @@ std::shared_ptr<DataChunk> OdpsRecordBatchSupplier::GetNextChunk() {
 #else  // ODPS_SDK_ENABLE_ARROW not defined
 
 OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
-    std::shared_ptr<reader::ReadSharedState> state) {
+    std::shared_ptr<reader::ReadSharedState> state, bool enableColumnPruning) {
   (void) state;
+  (void) enableColumnPruning;
   THROW_INVALID_ARGUMENT_EXCEPTION(
       "ODPS_SCAN: reading ODPS tables requires the ODPS SDK build (configure "
       "with -DNEUG_WITH_ODPS_SDK=ON). The pure type-mapping core and the Arrow "

@@ -61,16 +61,19 @@ struct OdpsReadFunction {
   static execution::Context execFunc(
       std::shared_ptr<reader::ReadSharedState> state) {
     // Eager path (LOAD FROM ... RETURN). Stream every batch through the
-    // supplier and materialize it into a Context. Pushing column pruning /
-    // predicates down to the SDK is module 3 (T301/T303); here the scan reads
-    // all columns and then applies the engine-side projection/filter contract
-    // every reader honors (both are no-ops for `RETURN *` with no predicate),
-    // so ODPS behaves exactly like the CSV/parquet scans downstream.
+    // supplier and materialize it into a Context. The supplier pushes column
+    // pruning (T301), partition pruning (T302) and the filter predicate (T303)
+    // down to the SDK, so a batch carries only the pruned projection in schema
+    // order -- exactly what supplier->PhysicalColumnNames() reports. We decode
+    // against that list (not the full schema) and then re-apply the engine-side
+    // projection/filter contract every reader honors: filter_chunk enforces the
+    // full predicate (pushdown is best-effort, T304) and project_chunk narrows
+    // to the requested output columns. Both are no-ops for `RETURN *` with no
+    // predicate, so ODPS behaves exactly like the CSV/parquet scans downstream.
     auto supplier =
         std::make_shared<extension::odps::OdpsRecordBatchSupplier>(state);
-    const std::vector<std::string> columnNames =
-        state->schema.entry ? state->schema.entry->columnNames
-                            : std::vector<std::string>{};
+    const std::vector<std::string>& columnNames =
+        supplier->PhysicalColumnNames();
     execution::Context ctx;
     while (auto chunk = supplier->GetNextChunk()) {
       auto filtered = reader::filter_chunk(*chunk, state->skipRows, columnNames,
@@ -85,9 +88,11 @@ struct OdpsReadFunction {
       std::shared_ptr<reader::ReadSharedState> state) {
     // Lazy path (COPY ... FROM (LOAD FROM ...) fusion). Emits full-table
     // columns in schema order; the COPY insert operator maps columns by index
-    // downstream. `project_columns`/`skip_rows` are empty on this path in v1.
+    // downstream. Column pruning (T301) is therefore disabled here -- pruning
+    // to a subset would shift the by-index mapping -- so the supplier reads
+    // every column exactly as it did before T301.
     return std::make_shared<extension::odps::OdpsRecordBatchSupplier>(
-        std::move(state));
+        std::move(state), /*enableColumnPruning=*/false);
   }
 
   static std::shared_ptr<reader::EntrySchema> sniffFunc(
