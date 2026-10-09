@@ -62,6 +62,31 @@ Live-mode environment contract (all read at test time):
                               optional: JSON list of the rows expected in that
                               single partition (the ground truth that proves
                               partition pruning happened)
+
+Module 2 (COPY <table> FROM (LOAD FROM ...)) live-mode additions:
+  NEUG_ODPS_NODE_KEY          the node table's PRIMARY KEY column; edge COPY
+                              resolves its src/dst endpoints against it, so it
+                              must be the key the edge table references
+  NEUG_ODPS_EDGE_TABLE        odps:// address of the edge source table
+  NEUG_ODPS_EDGE_SRC          column of NEUG_ODPS_EDGE_TABLE holding the source
+                              node key (bound to the edge's FROM endpoint)
+  NEUG_ODPS_EDGE_DST          column of NEUG_ODPS_EDGE_TABLE holding the
+                              destination node key (bound to the TO endpoint)
+  NEUG_ODPS_EDGE_PROPS        optional: comma-separated edge property columns,
+                              appended after src, dst in the RETURN projection
+  NEUG_ODPS_REMAP_PROJECTION  optional: an explicit reordered/subset RETURN body
+                              for the remapping test; when unset it is derived
+                              from NEUG_ODPS_TEST_COLUMNS (first column kept as
+                              the auto-created table's key, the rest reversed)
+  NEUG_ODPS_TYPE_MISMATCH_SCHEMA
+                              required by the type-check test: a node-table DDL
+                              body whose column type deliberately cannot accept
+                              the source column (e.g. INT64 declared for a
+                              STRING column), so COPY must error rather than
+                              silently write wrong data (FR-010)
+  NEUG_ODPS_TYPE_MISMATCH_PROJECTION
+                              optional: RETURN body paired with the mismatched
+                              DDL (defaults to NEUG_ODPS_TEST_COLUMNS)
 """
 
 import json
@@ -71,6 +96,8 @@ from collections import Counter
 import pytest
 
 from neug.database import Database
+from neug.proto.error_pb2 import ERR_SCHEMA_MISMATCH
+from neug.proto.error_pb2 import ERR_TYPE_CONVERSION
 
 _TRUTHY = ("1", "true", "yes", "on")
 
@@ -170,6 +197,71 @@ def _live_partition_rows():
             "NEUG_ODPS_TEST_PARTITION_ROWS not set; cannot prove partition pruning."
         )
     return json.loads(raw)
+
+
+def _live_node_key():
+    """Node PRIMARY KEY column that edge endpoints resolve against."""
+    key = os.environ.get("NEUG_ODPS_NODE_KEY", "").strip()
+    if not key:
+        pytest.skip("NEUG_ODPS_NODE_KEY not set; cannot bind edge endpoints.")
+    return key
+
+
+def _live_edge_source():
+    """Edge table + src/dst key columns; skip unless all three are present."""
+    table = os.environ.get("NEUG_ODPS_EDGE_TABLE", "").strip()
+    src = os.environ.get("NEUG_ODPS_EDGE_SRC", "").strip()
+    dst = os.environ.get("NEUG_ODPS_EDGE_DST", "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("NEUG_ODPS_EDGE_TABLE", table),
+            ("NEUG_ODPS_EDGE_SRC", src),
+            ("NEUG_ODPS_EDGE_DST", dst),
+        )
+        if not value
+    ]
+    if missing:
+        pytest.skip(f"live edge source incomplete: {', '.join(missing)}")
+    return table, src, dst
+
+
+def _live_edge_props():
+    """Optional edge property columns appended after src, dst."""
+    raw = os.environ.get("NEUG_ODPS_EDGE_PROPS", "").strip()
+    if not raw:
+        return []
+    return [column.strip() for column in raw.split(",") if column.strip()]
+
+
+def _live_remap_projection(columns):
+    """A reordered/subset RETURN body that exercises column remapping.
+
+    Defaults to keeping the first column (so the auto-created node table gets a
+    valid primary key) and reversing the rest -- enough to prove the projection
+    is applied identically through COPY and a direct read. Set
+    NEUG_ODPS_REMAP_PROJECTION for a bespoke reorder/subset/alias scenario.
+    """
+    override = os.environ.get("NEUG_ODPS_REMAP_PROJECTION", "").strip()
+    if override:
+        return override
+    if len(columns) < 3:
+        pytest.skip(
+            "NEUG_ODPS_TEST_COLUMNS needs >= 3 columns to derive a remapping "
+            "projection (or set NEUG_ODPS_REMAP_PROJECTION)."
+        )
+    return ", ".join([columns[0]] + list(reversed(columns[1:])))
+
+
+def _live_type_mismatch_schema():
+    """A node DDL whose column type deliberately clashes with the source."""
+    schema = os.environ.get("NEUG_ODPS_TYPE_MISMATCH_SCHEMA", "").strip()
+    if not schema:
+        pytest.skip(
+            "NEUG_ODPS_TYPE_MISMATCH_SCHEMA not set; no incompatible target "
+            "type to check against."
+        )
+    return schema
 
 
 # --- Live integration tests (SDK-ON + real credentials) ----------------------
@@ -417,6 +509,171 @@ def test_odps_live_bad_credentials_reports_auth_failure_without_plaintext(
         db.close()
 
 
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_copy_edge_from_load_imports_edges(tmp_path):
+    """`COPY <edge> FROM (LOAD FROM "odps://...") (from=, to=)` imports edges.
+
+    T202 / Acceptance Scenario 2 (spec M2): the first two RETURN columns are
+    bound to the source/destination primary keys and resolved against the
+    already-imported node table; any remaining columns become edge properties.
+    The (src, dst) pairs read back with MATCH must equal a direct read of the
+    same ODPS edge table, proving every edge imported AND that the two key
+    columns mapped to the correct endpoints (no swap / misalignment).
+    """
+    _live_credentials()
+    node_table = _live_table()
+    node_columns = _live_columns()
+    node_schema = os.environ.get("NEUG_ODPS_TEST_SCHEMA", "").strip()
+    if node_columns is None or not node_schema:
+        pytest.skip(
+            "NEUG_ODPS_TEST_COLUMNS and NEUG_ODPS_TEST_SCHEMA are required to "
+            "import the edge endpoints' node table."
+        )
+    node_key = _live_node_key()
+    edge_table, edge_src, edge_dst = _live_edge_source()
+    edge_props = _live_edge_props()
+
+    node_projection = ", ".join(node_columns)
+    edge_projection = ", ".join([edge_src, edge_dst] + edge_props)
+
+    db = Database(db_path=str(tmp_path / "odps_live_edge"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        conn.execute(f"CREATE NODE TABLE person({node_schema});")
+        try:
+            # Endpoints first: the edge COPY resolves src/dst against person's
+            # primary key, so the node table must already hold those keys.
+            conn.execute(
+                f'COPY person FROM (LOAD FROM "{node_table}" '
+                f"RETURN {node_projection});"
+            )
+            conn.execute(
+                f'COPY knows FROM (LOAD FROM "{edge_table}" '
+                f'RETURN {edge_projection}) (from="person", to="person");'
+            )
+        except RuntimeError as error:
+            _skip_if_sdk_off(error)
+            raise
+
+        direct = [
+            [row[0], row[1]]
+            for row in conn.execute(
+                f'LOAD FROM "{edge_table}" RETURN {edge_src}, {edge_dst};'
+            )
+        ]
+        assert direct, f"live ODPS edge table {edge_table!r} returned no rows"
+        imported = [
+            [row[0], row[1]]
+            for row in conn.execute(
+                "MATCH (a:person)-[k:knows]->(b:person) "
+                f"RETURN a.{node_key}, b.{node_key};"
+            )
+        ]
+        _assert_same_rows(imported, direct)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_copy_from_load_remapping_matches_projection(tmp_path):
+    """A reordered/subset RETURN must map into the target without misalignment.
+
+    T203 / Acceptance Scenario 3 + FR-009 (spec M2): the RETURN projection
+    reorders and subsets the ODPS columns (applied by odps `execFunc`'s
+    project_chunk on the fallback COPY path); the auto-created node table takes
+    them positionally. Reading the graph back in the same projected order must
+    equal a direct LOAD FROM with that projection, proving no column drifted.
+    """
+    _live_credentials()
+    table = _live_table()
+    columns = _live_columns()
+    if columns is None:
+        pytest.skip("NEUG_ODPS_TEST_COLUMNS required for the remapping test.")
+    projection = _live_remap_projection(columns)
+
+    db = Database(db_path=str(tmp_path / "odps_live_remap"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        try:
+            conn.execute(
+                f'COPY remap_node FROM (LOAD FROM "{table}" RETURN {projection});'
+            )
+        except RuntimeError as error:
+            _skip_if_sdk_off(error)
+            raise
+
+        # Projected names come from the direct read, so aliases in a bespoke
+        # NEUG_ODPS_REMAP_PROJECTION are handled too; the auto-created
+        # remap_node table stores exactly these columns, positionally.
+        direct_result = conn.execute(f'LOAD FROM "{table}" RETURN {projection};')
+        projected_names = direct_result.column_names()
+        direct = [list(row) for row in direct_result]
+        readback = ", ".join(f"n.{name}" for name in projected_names)
+        imported = [
+            list(row)
+            for row in conn.execute(f"MATCH (n:remap_node) RETURN {readback};")
+        ]
+        assert imported, "remapping COPY imported no rows into the graph"
+        _assert_same_rows(imported, direct)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_copy_type_mismatch_reports_error(tmp_path):
+    """An incompatible target column type must error, never silently write.
+
+    T204 / FR-010 (spec M2): when the declared node-table column type cannot
+    accept the ODPS source column, COPY must fail with a type-conversion or
+    schema-mismatch error (locating the problem) rather than writing wrong
+    data. The mismatched DDL is supplied by the live config, which knows the
+    real source column types.
+    """
+    _live_credentials()
+    table = _live_table()
+    schema = _live_type_mismatch_schema()
+    projection = os.environ.get("NEUG_ODPS_TYPE_MISMATCH_PROJECTION", "").strip()
+    if not projection:
+        columns = _live_columns()
+        if columns is None:
+            pytest.skip(
+                "NEUG_ODPS_TEST_COLUMNS or NEUG_ODPS_TYPE_MISMATCH_PROJECTION "
+                "required to pair with the mismatched DDL."
+            )
+        projection = ", ".join(columns)
+
+    db = Database(db_path=str(tmp_path / "odps_live_typemismatch"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        conn.execute(f"CREATE NODE TABLE bad_typed({schema});")
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(
+                f'COPY bad_typed FROM (LOAD FROM "{table}" RETURN {projection});'
+            )
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        assert (
+            str(ERR_TYPE_CONVERSION) in message or str(ERR_SCHEMA_MISMATCH) in message
+        ), message
+    finally:
+        conn.close()
+        db.close()
+
+
 # --- Routing smoke tests (SDK-OFF host fallback) -----------------------------
 
 
@@ -493,6 +750,38 @@ def test_odps_scheme_routes_through_copy_from_load(tmp_path, monkeypatch):
             conn.execute(
                 'COPY item FROM (LOAD FROM "odps://my_project.default.my_table" '
                 "RETURN id, name);"
+            )
+        _assert_routed_to_odps_scan(str(excinfo.value))
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    _LIVE_ENABLED,
+    reason="NEUG_ODPS_LIVE=1: the live tests cover routing end-to-end.",
+)
+def test_odps_scheme_routes_through_copy_edge_from_load(tmp_path, monkeypatch):
+    """`COPY <edge> FROM (LOAD FROM "odps://...") (from=, to=)` reaches ODPS_SCAN.
+
+    T202 host-runnable half: the edge COPY-fusion entry point resolves the
+    from/to node tables, then binds (and sniffs) the LOAD FROM subquery before
+    any data lands, so the SDK-required error surfaces here exactly as for the
+    node COPY form. That proves the edge path routes to this extension's
+    ODPS_SCAN instead of mis-parsing the odps:// address as a file extension.
+    """
+    _set_dummy_credentials(monkeypatch)
+
+    db = Database(db_path=str(tmp_path / "odps_copy_edge_routing"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        conn.execute("CREATE NODE TABLE person(id INT64 PRIMARY KEY, name STRING);")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(
+                'COPY knows FROM (LOAD FROM "odps://my_project.default.my_edge" '
+                'RETURN src, dst, weight) (from="person", to="person");'
             )
         _assert_routed_to_odps_scan(str(excinfo.value))
     finally:
