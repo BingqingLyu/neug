@@ -282,6 +282,20 @@ TEST(OdpsOptionsSchemaTest, RejectsInvalidSplitSize) {
                exception::InvalidArgumentException);
 }
 
+TEST(OdpsOptionsSchemaTest, SplitSizeZeroIsUnset) {
+  // split_size_mb=0 is the "unset" boundary (T305): hasSplitSize() is false, so
+  // the reader keeps the SDK default split mode instead of forcing SIZE with a
+  // zero target. Omitting the option entirely lands on the same default.
+  reader::options_t zero = {{"split_size_mb", "0"}};
+  auto zeroDesc = OdpsOptions::fromFileSchema(makeSchema({"odps://t"}, zero));
+  EXPECT_EQ(zeroDesc.splitSizeMb, 0);
+  EXPECT_FALSE(zeroDesc.hasSplitSize());
+
+  auto omittedDesc = OdpsOptions::fromFileSchema(makeSchema({"odps://t"}, {}));
+  EXPECT_EQ(omittedDesc.splitSizeMb, 0);
+  EXPECT_FALSE(omittedDesc.hasSplitSize());
+}
+
 // ============================================================================
 // OdpsConnectionOptionsBuilder
 // ============================================================================

@@ -68,8 +68,22 @@
 
 ## [F008-T306] Module 3 单测 + 集成测
 
+**status**: DONE（覆盖审计 + 补漏）— 2026-10-09。单测范围大多已在 T301–T304 增量落地；本轮审计确认映射并补齐唯一宿主可测缺口（split_size_mb=0 未设边界）。宿主 SDK-OFF 完整 odps 套件 87/87（新增 1 例）。
+
 **description**: 覆盖下推判定、裁剪集合计算与结果等价（对齐 spec M3 Test Strategy）。
 
 **details**:
 * 单测（无网络）：可/不可下推谓词判定、列裁剪集合计算、分片划分参数、AST→IPredicate 翻译。
 * 集成测：下推前后结果一致性对拍；传输量/读取行数下降的可观测验证；并行分片读取正确性。
+
+**覆盖映射 · 单测（宿主 SDK-OFF 可跑，`extension/odps/tests/odps_test.cc`）**:
+* 可/不可下推谓词判定 + AST→IPredicate 翻译 → `OdpsPredicateConverterTest`（10 例）：比较算子（GT/GE/EQ/NE/LT/LE × i64/f64/str）、IS NULL/NOT、AND/OR、IN/NOT IN、AND 优先级、标识符引用与转义、字面量渲染（bool/i64/u64/f64/str + 转义）、非白名单字面量拒绝（blob/inf）、不支持构造回退（arith/param/scalar_func/嵌套属性/STARTSWITH/空 IN/空表达式）、单不支持子树禁用整体下推（whole-or-nothing）。
+* 列裁剪集合计算 → `OdpsColumnProjectionTest`（10 例）：schema 序投影、filter 列并入、空投影回退全列、复合/IN filter 收集 + 去重、全覆盖判定、三条拒绝路径（未知投影列 / 未知 filter 列 / 属性引用）。
+* 分片划分参数 → `OdpsOptionsSchemaTest`：`OptionsFillFieldsOmittedByAddress`（split_size_mb=256）、`RejectsInvalidSplitSize`（abc / -1）、**`SplitSizeZeroIsUnset`（本轮新增：0 与缺省 → `hasSplitSize()==false`，保留 SDK 默认分片模式）**。
+
+**覆盖映射 · 集成测（Python，`tools/python_bind/tests/test_odps_load_from.py`）**:
+* 下推前后结果一致性对拍 → `test_odps_live_predicate_pushdown_matches_engine_filter`（T304：pushable vs 等价 non-pushable → 相同行多重集；`len(pushed) <= len(full)` 作读取行数下降的可观测代理）。**live 门控**（`NEUG_ODPS_LIVE=1` + 真表 + 凭据 + `NEUG_ODPS_TEST_FILTER*`），宿主 skip。
+* 传输量 / 读取行数下降可观测 → supplier `RowNum()`（来自 `GetRecordCount()`）为已存在钩子；完整传输量指标需 SDK-ON instrumentation，列为 documented follow-up（见 T304 commit 的 Needs-Linux-SDK-ON-verification）。
+* 并行分片读取正确性 → 随 **T305 推迟**（NeuG 尚无 parallel scan 模型）。
+
+**两层测试纪律**（宿主可跑 vs live 门控）保持不变：路由 smoke 宿主可跑，live 数据验收凭据门控，互不重复计数。
