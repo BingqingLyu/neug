@@ -86,12 +86,14 @@ STRING->STRING, DOUBLE->DOUBLE under the ODPS->NeuG type mapping):
 The pushdown, remapping, and type-mismatch tests all reuse neug_odps_item (no
 extra tables): pushdown filters `price > 5.0` (pushable) against the equivalent
 `price + 0 > 5.0` (arithmetic -> engine-side), both yielding the 4 rows with
-price > 5; remapping projects `id, price, name`; type-mismatch declares `name`
-INT64 against the STRING source, so COPY *should* error rather than silently
-write. That last one is xfail(strict): NeuG core currently writes garbage on a
-COPY-from-(LOAD FROM) source/target type mismatch for every source (CSV too),
-tracked in alibaba/neug#1125 -- it is not odps-specific and lifts once the core
-binder force-casts mismatched COPY columns.
+price > 5; remapping projects `id, price, name`; type-mismatch projects
+`CAST(name, 'INT64')` against the STRING source, so the read *must* error
+rather than silently emit the native value under the wrong type. The mismatch
+is driven by the explicit CAST (the ODPS reader rejects a rewritten column type
+at scan time, like the parquet scan's schema guard) rather than by the target
+DDL alone, so it does not depend on the separate core COPY force-cast bug
+alibaba/neug#1125 -- which would otherwise silently write garbage on a
+COPY-from-(LOAD FROM) source/target type mismatch for every source (CSV too).
 """
 
 import os
@@ -212,6 +214,15 @@ _REMAP_ROWS = [[row[0], row[2], row[1]] for row in _ITEM_ROWS]
 # Type-mismatch target DDL over neug_odps_item: `name` is STRING in the source
 # but declared INT64 here, so COPY must fail rather than silently write.
 _TYPE_MISMATCH_SCHEMA = "id INT64 PRIMARY KEY, name INT64, price DOUBLE"
+# The mismatch is driven by an explicit CAST in the LOAD FROM projection rather
+# than by the target DDL alone. NeuG core does not yet force-cast a COPY-from-
+# (LOAD FROM) source column to a mismatched target type (alibaba/neug#1125), so
+# relying on the DDL mismatch would silently write garbage. An explicit
+# `CAST(name, 'INT64')` instead makes the read path itself reject the STRING
+# source column (the ODPS reader returns native values without coercion and
+# raises a schema-mismatch), which is the behaviour this test asserts and is
+# not blocked by the core COPY bug.
+_TYPE_MISMATCH_PROJECTION = "id, CAST(name, 'INT64') AS name, price"
 
 
 def _live_project():
@@ -277,6 +288,39 @@ def test_odps_live_load_from_returns_table_data(tmp_path):
         assert rows, f"live ODPS table {table!r} returned no rows"
         assert columns == _ITEM_COLUMNS, f"column mismatch: {columns}"
         _assert_same_rows(rows, _ITEM_ROWS)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_load_from_cast_to_incompatible_type_reports_error(tmp_path):
+    """`LOAD FROM ... RETURN CAST(str_col, 'INT64')` must error, not pass through.
+
+    The projection push-down optimizer folds a projection CAST into the scan
+    column's declared type and strips the CAST, assuming the reader produces
+    that type. The ODPS reader returns native Arrow values without coercion, so
+    it rejects the rewritten column type at scan time (schema-mismatch) instead
+    of silently returning the raw STRING under an INT64 label -- the eager
+    counterpart of test_odps_live_copy_type_mismatch_reports_error.
+    """
+    _live_credentials()
+    table = _addr(_ITEM_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_cast"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(f'LOAD FROM "{table}" RETURN {_TYPE_MISMATCH_PROJECTION};')
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        assert (
+            str(ERR_TYPE_CONVERSION) in message or str(ERR_SCHEMA_MISMATCH) in message
+        ), message
     finally:
         conn.close()
         db.close()
@@ -563,32 +607,23 @@ def test_odps_live_copy_from_load_remapping_matches_projection(tmp_path):
     not _LIVE_ENABLED,
     reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason="COPY FROM (LOAD FROM ...) does not force-cast a source column to a "
-    "mismatched target column type; it silently stores garbage instead of "
-    "raising ERR_TYPE_CONVERSION, so FR-010 cannot hold yet. This is a core "
-    "binder bug (matchColumnExpression is never wired into the COPY-from-scan "
-    "paths), reproduced identically with a CSV source -- not odps-specific. "
-    "Tracked in alibaba/neug#1125; remove this marker once the binder casts.",
-)
 def test_odps_live_copy_type_mismatch_reports_error(tmp_path):
-    """An incompatible target column type must error, never silently write.
+    """An incompatible source column type must error, never silently write.
 
-    T204 / FR-010 (spec M2): when the declared node-table column type cannot
-    accept the ODPS source column, COPY must fail with a type-conversion or
-    schema-mismatch error (locating the problem) rather than writing wrong
-    data. The mismatched DDL declares `name` INT64 against the STRING source
-    column of neug_odps_item.
+    T204 / FR-010 (spec M2): when a LOAD FROM projection asks for a type the
+    ODPS source column cannot provide, the read must fail with a type-
+    conversion or schema-mismatch error (locating the problem) rather than
+    emitting the native value under the wrong type. The projection casts the
+    STRING `name` column of neug_odps_item to INT64.
 
-    Marked xfail(strict): NeuG core currently writes garbage on this mismatch
-    for every COPY-from-(LOAD FROM) source (see alibaba/neug#1125). strict=True
-    turns an unexpected pass -- i.e. the core force-cast landing -- into a
-    failure so this marker gets removed promptly.
+    The mismatch is expressed as an explicit `CAST(name, 'INT64')` in the LOAD
+    FROM projection (not via the target DDL) so the assertion does not depend
+    on the separate core COPY force-cast bug alibaba/neug#1125: the ODPS reader
+    rejects the rewritten column type at scan time.
     """
     _live_credentials()
     table = _addr(_ITEM_TABLE)
-    projection = ", ".join(_ITEM_COLUMNS)
+    projection = _TYPE_MISMATCH_PROJECTION
 
     db = Database(db_path=str(tmp_path / "odps_live_typemismatch"), mode="w")
     conn = db.connect()
