@@ -83,6 +83,32 @@ STRING->STRING, DOUBLE->DOUBLE under the ODPS->NeuG type mapping):
   INSERT INTO neug_odps_item_pt PARTITION(pt='20260102') VALUES
     (3,'cherry',12.0),(4,'date',7.25),(5,'elderberry',3.75);
 
+  -- All supported scalar types, one column each (T401/T405 type-coverage
+  -- round-trip; the live analogue of example_dataset/comprehensive_graph's
+  -- node_a.csv). Each column reads back through the documented ODPS->NeuG
+  -- mapping: TINYINT/SMALLINT/INT->INT32, BIGINT->INT64, FLOAT->FLOAT,
+  -- DOUBLE->DOUBLE, DECIMAL->DOUBLE (lossy), BOOLEAN->BOOL,
+  -- STRING/VARCHAR/CHAR->STRING, DATE->DATE, DATETIME/TIMESTAMP->TIMESTAMP(ms).
+  -- Adjust the typed-literal syntax below to your project's SQL type settings.
+  CREATE TABLE neug_odps_all_types (
+    c_tinyint TINYINT, c_smallint SMALLINT, c_int INT, c_bigint BIGINT,
+    c_float FLOAT, c_double DOUBLE, c_decimal DECIMAL(10,2), c_boolean BOOLEAN,
+    c_string STRING, c_varchar VARCHAR(20), c_char CHAR(5),
+    c_date DATE, c_datetime DATETIME, c_timestamp TIMESTAMP);
+  INSERT INTO neug_odps_all_types VALUES (
+    -12, -1234, -123456789, 9223372036854775807,
+    CAST(3.1415927 AS FLOAT), 2.718281828459045, CAST(123.45 AS DECIMAL(10,2)),
+    true, 'test_string_0', 'vchar_a', 'chara',
+    DATE '2023-01-15', DATETIME '2023-01-15 09:15:30',
+    TIMESTAMP '2023-01-15 09:15:30.123');
+
+  -- Unsupported-type fixture (T404/FR-018): a JSON column must be rejected at
+  -- schema sniff with an actionable error (column name + MaxCompute type +
+  -- STRING workaround), never silently decoded. BINARY / ARRAY / MAP / STRUCT
+  -- behave the same; JSON is the one the spec calls out explicitly.
+  CREATE TABLE neug_odps_unsupported_json (id BIGINT, payload JSON);
+  INSERT INTO neug_odps_unsupported_json VALUES (1, JSON '{"k":"v"}');
+
 The pushdown, remapping, and type-mismatch tests all reuse neug_odps_item (no
 extra tables): pushdown filters `price > 5.0` (pushable) against the equivalent
 `price + 0 > 5.0` (arithmetic -> engine-side), both yielding the 4 rows with
@@ -223,6 +249,40 @@ _TYPE_MISMATCH_SCHEMA = "id INT64 PRIMARY KEY, name INT64, price DOUBLE"
 # raises a schema-mismatch), which is the behaviour this test asserts and is
 # not blocked by the core COPY bug.
 _TYPE_MISMATCH_PROJECTION = "id, CAST(name, 'INT64') AS name, price"
+
+# All-types coverage table: neug_odps_all_types, one column per supported
+# MaxCompute scalar type (the live analogue of node_a.csv's type sweep). Each
+# column reads back through the documented ODPS->NeuG mapping: TINYINT/
+# SMALLINT/INT -> INT32, BIGINT -> INT64, FLOAT -> FLOAT, DOUBLE -> DOUBLE,
+# DECIMAL -> DOUBLE (lossy), BOOLEAN -> BOOL, STRING/VARCHAR/CHAR -> STRING,
+# DATE -> DATE, DATETIME/TIMESTAMP -> TIMESTAMP(ms). The single fixture row's
+# expected values, in column order, are asserted by
+# test_odps_live_all_types_round_trip.
+_ALL_TYPES_TABLE = "neug_odps_all_types"
+_ALL_TYPES_COLUMNS = [
+    "c_tinyint",
+    "c_smallint",
+    "c_int",
+    "c_bigint",
+    "c_float",
+    "c_double",
+    "c_decimal",
+    "c_boolean",
+    "c_string",
+    "c_varchar",
+    "c_char",
+    "c_date",
+    "c_datetime",
+    "c_timestamp",
+]
+
+# Unsupported-type table (T404/FR-018): neug_odps_unsupported_json(id BIGINT,
+# payload JSON). Reading it must fail at schema sniff with an actionable error
+# naming the column ("payload"), the MaxCompute type ("JSON"), and the STRING
+# workaround -- the live counterpart of the host unit test
+# UnsupportedTypeMessageIsActionable.
+_UNSUPPORTED_JSON_TABLE = "neug_odps_unsupported_json"
+_UNSUPPORTED_JSON_COLUMN = "payload"
 
 
 def _live_project():
@@ -700,6 +760,100 @@ def test_odps_live_predicate_pushdown_matches_engine_filter(tmp_path):
         assert len(pushed) <= len(full), "filter returned more rows than the scan"
         # And both equal the fixture ground truth (the 4 rows with price > 5).
         _assert_same_rows(pushed, _FILTER_ROWS)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_all_types_round_trip(tmp_path):
+    """Every supported MaxCompute scalar type maps and decodes end-to-end.
+
+    T401/T405 (spec M4 Acceptance 1, SC-002): reads the neug_odps_all_types
+    fixture -- one column per supported MaxCompute scalar type, mirroring
+    node_a.csv's type sweep -- and asserts each comes back as the documented
+    NeuG type/value. This is the live counterpart of the host unit tests
+    (MapsDecimalToDouble / MapsTemporalTypes / ConvertsDecimal128ToDouble): it
+    proves the real Storage API Arrow encodings (decimal128 `d:p,s`, date32,
+    timestamp) flow through the bridge, which only a genuine MaxCompute read can
+    exercise. DECIMAL is read as a DOUBLE (lossy) and DATETIME/TIMESTAMP as
+    millisecond TIMESTAMPs, exactly as documented in
+    doc/source/extensions/odps.md.
+    """
+    _live_credentials()
+    table = _addr(_ALL_TYPES_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_all_types"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        try:
+            result = conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        except RuntimeError as error:
+            _skip_if_sdk_off(error)
+            raise
+
+        columns = result.column_names()
+        rows = [list(row) for row in result]
+        assert rows, f"live ODPS table {table!r} returned no rows"
+        assert columns == _ALL_TYPES_COLUMNS, f"column mismatch: {columns}"
+
+        row = rows[0]
+        # Integer widths narrower than 64 bits widen to INT32; BIGINT -> INT64.
+        assert row[0] == -12  # c_tinyint  -> INT32
+        assert row[1] == -1234  # c_smallint -> INT32
+        assert row[2] == -123456789  # c_int      -> INT32
+        assert row[3] == 9223372036854775807  # c_bigint   -> INT64 (max)
+        assert abs(row[4] - 3.1415927) < 1e-6  # c_float    -> FLOAT
+        assert abs(row[5] - 2.718281828459045) < 1e-9  # c_double -> DOUBLE
+        assert abs(row[6] - 123.45) < 1e-9  # c_decimal -> DOUBLE (lossy)
+        assert bool(row[7]) is True  # c_boolean -> BOOL
+        assert str(row[8]) == "test_string_0"  # c_string  -> STRING
+        assert str(row[9]) == "vchar_a"  # c_varchar -> STRING
+        assert str(row[10]) == "chara"  # c_char    -> STRING
+        assert str(row[11]) == "2023-01-15"  # c_date -> DATE
+        # DATETIME/TIMESTAMP -> millisecond TIMESTAMP; assert to the second so
+        # the check is robust to sub-second rendering (ms precision is covered
+        # by the host unit tests).
+        assert str(row[12]).startswith("2023-01-15 09:15:30")  # c_datetime
+        assert str(row[13]).startswith("2023-01-15 09:15:30")  # c_timestamp
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_unsupported_column_type_reports_error(tmp_path):
+    """An unsupported column type (JSON) must fail with an actionable error.
+
+    T404 / FR-018 (spec M4): reading a table with a JSON column must raise an
+    error that names the column, the MaxCompute type, and the STRING workaround,
+    rather than silently producing wrong data. The rejection happens at schema
+    sniff (off the ODPS column metadata), so it is deterministic regardless of
+    how the value would be Arrow-encoded. Live counterpart of the host unit test
+    UnsupportedTypeMessageIsActionable.
+    """
+    _live_credentials()
+    table = _addr(_UNSUPPORTED_JSON_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_unsupported"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        lowered = message.lower()
+        assert _UNSUPPORTED_JSON_COLUMN in lowered, message
+        assert "json" in lowered, message
+        assert "string" in lowered, message  # the documented workaround
     finally:
         conn.close()
         db.close()

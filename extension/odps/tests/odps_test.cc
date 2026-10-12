@@ -458,32 +458,77 @@ TEST(OdpsSchemaConverterTest, SupportedScalarClassification) {
        {OdpsTypeCode::kTinyint, OdpsTypeCode::kSmallint, OdpsTypeCode::kInteger,
         OdpsTypeCode::kBigint, OdpsTypeCode::kFloat, OdpsTypeCode::kDouble,
         OdpsTypeCode::kBoolean, OdpsTypeCode::kString, OdpsTypeCode::kVarchar,
-        OdpsTypeCode::kChar}) {
+        OdpsTypeCode::kChar, OdpsTypeCode::kDecimal, OdpsTypeCode::kDate,
+        OdpsTypeCode::kDatetime, OdpsTypeCode::kTimestamp,
+        OdpsTypeCode::kTimestampNtz}) {
     EXPECT_TRUE(OdpsSchemaConverter::isSupportedScalar(code(t)));
   }
-  for (auto t :
-       {OdpsTypeCode::kDecimal, OdpsTypeCode::kDate, OdpsTypeCode::kDatetime,
-        OdpsTypeCode::kTimestamp, OdpsTypeCode::kTimestampNtz,
-        OdpsTypeCode::kBinary, OdpsTypeCode::kArray, OdpsTypeCode::kMap,
-        OdpsTypeCode::kStruct, OdpsTypeCode::kJson,
-        OdpsTypeCode::kIntervalYearMonth, OdpsTypeCode::kIntervalDayTime,
-        OdpsTypeCode::kUnknown}) {
+  for (auto t : {OdpsTypeCode::kBinary, OdpsTypeCode::kArray,
+                 OdpsTypeCode::kMap, OdpsTypeCode::kStruct,
+                 OdpsTypeCode::kJson, OdpsTypeCode::kIntervalYearMonth,
+                 OdpsTypeCode::kIntervalDayTime, OdpsTypeCode::kUnknown}) {
     EXPECT_FALSE(OdpsSchemaConverter::isSupportedScalar(code(t)));
   }
 }
 
 TEST(OdpsSchemaConverterTest, UnsupportedTypesThrow) {
-  for (auto t :
-       {OdpsTypeCode::kDecimal, OdpsTypeCode::kDate, OdpsTypeCode::kDatetime,
-        OdpsTypeCode::kTimestamp, OdpsTypeCode::kTimestampNtz,
-        OdpsTypeCode::kBinary, OdpsTypeCode::kArray, OdpsTypeCode::kMap,
-        OdpsTypeCode::kStruct, OdpsTypeCode::kJson, OdpsTypeCode::kUnknown}) {
+  for (auto t : {OdpsTypeCode::kBinary, OdpsTypeCode::kArray,
+                 OdpsTypeCode::kMap, OdpsTypeCode::kStruct,
+                 OdpsTypeCode::kJson, OdpsTypeCode::kIntervalYearMonth,
+                 OdpsTypeCode::kIntervalDayTime, OdpsTypeCode::kUnknown}) {
     EXPECT_THROW(OdpsSchemaConverter::convertScalarType(code(t), "col"),
                  exception::InvalidArgumentException);
   }
   // An out-of-range raw code is treated as unknown, not silently mapped.
   EXPECT_THROW(OdpsSchemaConverter::convertScalarType(999, "col"),
                exception::InvalidArgumentException);
+}
+
+TEST(OdpsSchemaConverterTest, MapsDecimalToDouble) {
+  // MaxCompute DECIMAL has no exact NeuG read-path type; v1 reads it as a
+  // DOUBLE (lossy). See extension/odps/README.md, "Type mapping".
+  auto dt =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kDecimal), "c");
+  ASSERT_TRUE(dt->has_primitive_type());
+  EXPECT_EQ(dt->primitive_type(), ::common::PrimitiveType::DT_DOUBLE);
+}
+
+TEST(OdpsSchemaConverterTest, MapsTemporalTypes) {
+  // DATE -> NeuG date32.
+  auto date =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kDate), "c");
+  ASSERT_TRUE(date->has_temporal());
+  EXPECT_TRUE(date->temporal().has_date32());
+  // DATETIME/TIMESTAMP/TIMESTAMP_NTZ all collapse to NeuG timestamp (millis).
+  for (auto t : {OdpsTypeCode::kDatetime, OdpsTypeCode::kTimestamp,
+                 OdpsTypeCode::kTimestampNtz}) {
+    auto dt = OdpsSchemaConverter::convertScalarType(code(t), "c");
+    ASSERT_TRUE(dt->has_temporal());
+    EXPECT_TRUE(dt->temporal().has_timestamp());
+  }
+}
+
+TEST(OdpsSchemaConverterTest, UnsupportedTypeMessageIsActionable) {
+  // The error must name the column, the MaxCompute type, and a workaround so
+  // the failure is diagnosable without a stack trace (module 4, task T404).
+  try {
+    OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kJson),
+                                           "payload");
+    FAIL() << "expected InvalidArgumentException for JSON column";
+  } catch (const exception::InvalidArgumentException& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("payload"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("JSON"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("STRING"), std::string::npos) << msg;
+  }
+  try {
+    OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kBinary), "blob");
+    FAIL() << "expected InvalidArgumentException for BINARY column";
+  } catch (const exception::InvalidArgumentException& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("blob"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("BINARY"), std::string::npos) << msg;
+  }
 }
 
 TEST(OdpsSchemaConverterTest, TypeNameIsHumanReadable) {
@@ -538,9 +583,11 @@ TEST(OdpsSchemaConverterTest, ConvertColumnsRejectsDuplicateName) {
 }
 
 TEST(OdpsSchemaConverterTest, ConvertColumnsPropagatesUnsupportedType) {
+  // DECIMAL is now supported (read as DOUBLE), so use JSON -- an unsupported
+  // type -- to prove the per-column error still propagates.
   std::vector<OdpsColumnDesc> cols = {
       {"id", code(OdpsTypeCode::kBigint), false},
-      {"amount", code(OdpsTypeCode::kDecimal), true},
+      {"payload", code(OdpsTypeCode::kJson), true},
   };
   EXPECT_THROW(OdpsSchemaConverter::convertColumns(cols),
                exception::InvalidArgumentException);
@@ -812,6 +859,31 @@ class RecordBatchBuilder {
                     &Column::i64);
   }
 
+  // Arrow decimal128 column ("d:precision,scale"). Each value is the unscaled
+  // integer, encoded as a 16-byte little-endian two's-complement magnitude.
+  // The format string is owned by the Column so it outlives the built batch
+  // (the bridge only stores the pointer).
+  RecordBatchBuilder& addDecimal128(const char* name, int scale,
+                                    std::vector<int64_t> unscaled,
+                                    std::vector<bool> valid = {}) {
+    auto col = std::make_unique<Column>();
+    col->formatStr = "d:38," + std::to_string(scale);
+    col->dec128Bytes.assign(unscaled.size() * 16, 0);
+    for (size_t i = 0; i < unscaled.size(); ++i) {
+      const uint64_t lo = static_cast<uint64_t>(unscaled[i]);
+      const uint64_t hi = (unscaled[i] < 0) ? ~0ull : 0ull;  // sign-extend
+      uint8_t* p = col->dec128Bytes.data() + i * 16;
+      for (int b = 0; b < 8; ++b) {
+        p[b] = static_cast<uint8_t>((lo >> (8 * b)) & 0xffu);
+        p[8 + b] = static_cast<uint8_t>((hi >> (8 * b)) & 0xffu);
+      }
+    }
+    const void* data = col->dec128Bytes.data();
+    const char* format = col->formatStr.c_str();
+    finalize(format, name, valid, {data}, std::move(col));
+    return *this;
+  }
+
   // Bit-packed boolean column (Arrow format "b").
   RecordBatchBuilder& addBool(const char* name, const std::vector<bool>& values,
                               std::vector<bool> valid = {}) {
@@ -871,6 +943,10 @@ class RecordBatchBuilder {
     std::vector<uint8_t> boolBits;
     std::vector<int32_t> strOffsets;
     std::vector<char> strChars;
+    // decimal128 backing storage: `formatStr` owns the "d:p,s" format string
+    // and `dec128Bytes` holds the 16-byte little-endian values.
+    std::string formatStr;
+    std::vector<uint8_t> dec128Bytes;
   };
 
   template <typename T>
@@ -1051,6 +1127,26 @@ TEST(OdpsArrowBridgeTest, ConvertsDateAndTimestampColumns) {
             1234567890001LL);
 }
 
+TEST(OdpsArrowBridgeTest, ConvertsDecimal128ToDouble) {
+  // DECIMAL(38,2) unscaled values decode to doubles: 12345 -> 123.45,
+  // -67890 -> -678.90, 0 -> 0.0, plus a null. This mirrors the schema
+  // converter mapping MaxCompute DECIMAL to DOUBLE (lossy).
+  RecordBatchBuilder batch(4);
+  batch.addDecimal128("amount", 2, {12345, -67890, 0, 0},
+                      {true, true, true, false});
+
+  auto chunk = recordBatchToDataChunk(batch.schema(), batch.array());
+  ASSERT_NE(chunk, nullptr);
+  ASSERT_EQ(chunk->col_num(), 1u);
+  auto amount = chunk->get(0);
+  ASSERT_EQ(amount->size(), 4u);
+  EXPECT_TRUE(amount->is_optional());
+  EXPECT_NEAR(amount->get_elem(0).GetValue<double>(), 123.45, 1e-9);
+  EXPECT_NEAR(amount->get_elem(1).GetValue<double>(), -678.90, 1e-9);
+  EXPECT_NEAR(amount->get_elem(2).GetValue<double>(), 0.0, 1e-9);
+  EXPECT_TRUE(amount->get_elem(3).IsNull());
+}
+
 TEST(OdpsArrowBridgeTest, EmptyBatchYieldsEmptyColumn) {
   RecordBatchBuilder batch(0);
   batch.addInt64("id", {});
@@ -1133,7 +1229,21 @@ TEST(OdpsArrowBridgeTest, RejectsNullableRootStruct) {
 
 TEST(OdpsArrowBridgeTest, RejectsUnsupportedChildFormat) {
   SingleInt64Batch b;
-  b.childSchema.format = "d:38,10";  // decimal128 -> module 4 (T401)
+  b.childSchema.format = "+l";  // nested list: the reader decodes scalars only
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsMalformedDecimalFormat) {
+  SingleInt64Batch b;
+  b.childSchema.format = "d:38";  // missing ",scale" field
+  EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
+               exception::InvalidArgumentException);
+}
+
+TEST(OdpsArrowBridgeTest, RejectsNon128BitDecimal) {
+  SingleInt64Batch b;
+  b.childSchema.format = "d:9,2,64";  // only 128-bit decimals are supported
   EXPECT_THROW(recordBatchToDataChunk(b.schema, b.array),
                exception::InvalidArgumentException);
 }
