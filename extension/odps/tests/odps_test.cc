@@ -546,6 +546,57 @@ TEST(OdpsSchemaConverterTest, ConvertColumnsPropagatesUnsupportedType) {
                exception::InvalidArgumentException);
 }
 
+TEST(OdpsSchemaConverterTest, SameScalarTypeEquivalence) {
+  auto i64 =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kBigint), "c");
+  auto i32 =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kInteger), "c");
+  auto str =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kString), "c");
+  auto vch =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kVarchar), "c");
+  auto dbl =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kDouble), "c");
+  EXPECT_TRUE(OdpsSchemaConverter::sameScalarType(*i64, *i64));
+  // STRING/VARCHAR/CHAR collapse to one NeuG string type.
+  EXPECT_TRUE(OdpsSchemaConverter::sameScalarType(*str, *vch));
+  EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(*i64, *i32));
+  EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(*str, *i64));
+  EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(*dbl, *i64));
+}
+
+TEST(OdpsSchemaConverterTest, FindSchemaMismatchDetectsRewrittenCastType) {
+  // Native table: id BIGINT, name STRING, price DOUBLE.
+  const std::vector<OdpsColumnDesc> cols = {
+      {"id", code(OdpsTypeCode::kBigint), false},
+      {"name", code(OdpsTypeCode::kString), true},
+      {"price", code(OdpsTypeCode::kDouble), true},
+  };
+  auto native = OdpsSchemaConverter::convertColumns(cols);
+  // A `RETURN *` (no CAST) leaves the requested schema identical to native.
+  EXPECT_EQ(OdpsSchemaConverter::findSchemaMismatch(*native, *native), "");
+
+  // A `CAST(name, 'INT64')` in the projection is folded by the optimizer into
+  // the scan column's declared type; the reader must reject the mismatch
+  // instead of emitting the native STRING under an INT64 label.
+  auto requested = OdpsSchemaConverter::convertColumns(cols);
+  requested->columnTypes[1] =
+      OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kBigint),
+                                             "name");
+  EXPECT_EQ(OdpsSchemaConverter::findSchemaMismatch(*requested, *native),
+            "name");
+}
+
+TEST(OdpsSchemaConverterTest, FindSchemaMismatchIgnoresUnknownColumn) {
+  auto native = OdpsSchemaConverter::convertColumns(
+      {{"id", code(OdpsTypeCode::kBigint), false}});
+  auto requested = OdpsSchemaConverter::convertColumns(
+      {{"id", code(OdpsTypeCode::kBigint), false},
+       {"extra", code(OdpsTypeCode::kString), true}});
+  // "extra" is absent from the native schema, so it is not a type mismatch.
+  EXPECT_EQ(OdpsSchemaConverter::findSchemaMismatch(*requested, *native), "");
+}
+
 #if !defined(ODPS_SDK_ENABLE_ARROW)
 TEST(OdpsSchemaConverterTest, SniffWithoutSdkThrowsClearError) {
   OdpsConnectionOptions opts;

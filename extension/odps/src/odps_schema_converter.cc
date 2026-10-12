@@ -15,6 +15,7 @@
 
 #include "odps_schema_converter.h"
 
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -163,6 +164,53 @@ std::shared_ptr<reader::EntrySchema> OdpsSchemaConverter::convertColumns(
     entry->columnTypes.push_back(convertScalarType(col.typeCode, col.name));
   }
   return std::static_pointer_cast<reader::EntrySchema>(entry);
+}
+
+bool OdpsSchemaConverter::sameScalarType(const ::common::DataType& requested,
+                                         const ::common::DataType& native) {
+  // STRING/VARCHAR/CHAR all collapse to the same NeuG string type, so any two
+  // string types are equivalent regardless of the underlying item case.
+  if (requested.has_string() && native.has_string()) {
+    return true;
+  }
+  if (requested.item_case() != native.item_case()) {
+    return false;
+  }
+  switch (requested.item_case()) {
+  case ::common::DataType::kPrimitiveType:
+    return requested.primitive_type() == native.primitive_type();
+  default:
+    return requested.SerializeAsString() == native.SerializeAsString();
+  }
+}
+
+std::string OdpsSchemaConverter::findSchemaMismatch(
+    const reader::EntrySchema& requested, const reader::EntrySchema& native) {
+  // Index the native schema by column name: the requested schema preserves the
+  // sniffed column order but the optimizer may have rewritten individual column
+  // types in place, so match by name rather than position.
+  std::unordered_map<std::string, const ::common::DataType*> nativeByName;
+  nativeByName.reserve(native.columnNames.size());
+  for (size_t i = 0; i < native.columnNames.size(); ++i) {
+    if (i < native.columnTypes.size() && native.columnTypes[i]) {
+      nativeByName[native.columnNames[i]] = native.columnTypes[i].get();
+    }
+  }
+  for (size_t i = 0; i < requested.columnNames.size(); ++i) {
+    if (i >= requested.columnTypes.size() || !requested.columnTypes[i]) {
+      continue;
+    }
+    auto it = nativeByName.find(requested.columnNames[i]);
+    // A column absent from the native schema is not a type mismatch; leave it
+    // to the reader/projection to resolve (or reject) by name.
+    if (it == nativeByName.end()) {
+      continue;
+    }
+    if (!sameScalarType(*requested.columnTypes[i], *it->second)) {
+      return requested.columnNames[i];
+    }
+  }
+  return "";
 }
 
 std::shared_ptr<reader::EntrySchema> OdpsSchemaConverter::sniffTableSchema(

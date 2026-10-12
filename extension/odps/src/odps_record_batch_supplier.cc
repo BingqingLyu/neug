@@ -28,6 +28,7 @@
 #include "odps_error.h"
 #include "odps_options.h"
 #include "odps_predicate_converter.h"
+#include "odps_schema_converter.h"
 
 #if defined(ODPS_SDK_ENABLE_ARROW)
 #include "odps_sdk_glue.h"
@@ -88,6 +89,33 @@ OdpsRecordBatchSupplier::OdpsRecordBatchSupplier(
   if (glue == nullptr) {
     THROW_RUNTIME_ERROR(
         "ODPS_SCAN: ODPS connection is unavailable on this handle");
+  }
+
+  // Reject a projection whose declared column types were rewritten away from
+  // the table's native MaxCompute types before any data is read. The
+  // projection push-down optimizer folds a `CAST(col, T)` in a LOAD FROM
+  // projection into the scan column's declared type and then strips the CAST,
+  // on the assumption that the reader produces T. ODPS returns native Arrow
+  // values without coercion, so -- exactly like the parquet scan's sameSchema
+  // guard -- the mismatch must surface here instead of silently emitting the
+  // native data under the wrong type (which `RETURN` would show unchanged and
+  // `COPY` would write as garbage). `requested` is the optimizer-rewritten
+  // entry schema; `native` is re-sniffed from the authoritative table schema.
+  if (state->schema.entry) {
+    auto native = OdpsSchemaConverter::sniffTableSchema(*connection_, source);
+    if (native) {
+      const std::string mismatch = OdpsSchemaConverter::findSchemaMismatch(
+          *state->schema.entry, *native);
+      if (!mismatch.empty()) {
+        THROW_SCHEMA_MISMATCH(
+            "ODPS_SCAN: column \"" + mismatch + "\" of " + project + "." +
+            source.table +
+            " has a different MaxCompute type than the query declared. A CAST "
+            "in a LOAD FROM projection cannot be applied to an ODPS source "
+            "(it returns native values without coercion); remove the CAST or "
+            "declare the column with its native type.");
+      }
+    }
   }
 
   // Split/read knobs: a positive split_size_mb hint switches the session to

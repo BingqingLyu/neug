@@ -120,6 +120,34 @@ class OdpsSchemaConverter {
       const std::vector<OdpsColumnDesc>& columns);
 
   /**
+   * @brief Whether two v1 scalar NeuG proto types are equivalent for a read.
+   *
+   * Pure/SDK-free. Any two string types (STRING/VARCHAR/CHAR all collapse to
+   * the same NeuG string type) compare equal; primitives compare by
+   * `primitive_type`; anything else falls back to a serialized comparison.
+   */
+  static bool sameScalarType(const ::common::DataType& requested,
+                             const ::common::DataType& native);
+
+  /**
+   * @brief Find the first column whose requested type differs from native.
+   *
+   * Pure/SDK-free. `requested` is the schema the query declared (the sniffed
+   * table schema, possibly with individual column types rewritten by the
+   * projection push-down optimizer from a `CAST(col, T)` in a LOAD FROM
+   * projection); `native` is the authoritative MaxCompute schema. Columns are
+   * matched by name (the optimizer preserves order but rewrites types in
+   * place). Returns the offending column name, or an empty string when every
+   * requested column is compatible with (or absent from) the native schema.
+   *
+   * The reader uses this to reject a mismatch instead of silently emitting
+   * native Arrow values under the rewritten type -- ODPS does not coerce at
+   * read time, so this mirrors the parquet scan's `sameSchema` guard.
+   */
+  static std::string findSchemaMismatch(const reader::EntrySchema& requested,
+                                        const reader::EntrySchema& native);
+
+  /**
    * @brief Fetch the live table schema and convert it (SDK-gated).
    *
    * Uses the ODPS core API (`IODPS::Create(conf, project)` ->
