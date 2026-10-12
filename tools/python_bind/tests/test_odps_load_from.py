@@ -42,70 +42,58 @@ Gated by NEUG_RUN_EXTENSION_TESTS like the other extension tests, because they
 need the locally built libodps.neug_extension under the build root (published
 wheels omit extensions).
 
-Live-mode environment contract (all read at test time):
+Live-mode environment contract (only four variables, all read at test time):
   NEUG_ODPS_LIVE=1            master switch for the live tests
   ODPS_ACCESS_KEY_ID          real credentials, resolved by the C++ connection
   ODPS_ACCESS_KEY_SECRET      options builder (aliases also accepted)
   ODPS_ENDPOINT               service endpoint (VPC/intranet for the SDK build)
-  NEUG_ODPS_TEST_TABLE        required: odps://[project.][schema.]table address
-  NEUG_ODPS_TEST_COLUMNS      optional: the full ordered column list of the
-                              table, comma-separated (validated against
-                              RETURN * and reused as the COPY projection)
-  NEUG_ODPS_TEST_SCHEMA       optional: node-table DDL body for the COPY test
-                              (e.g. "id INT64 PRIMARY KEY, name STRING")
-  NEUG_ODPS_TEST_ROWS         optional: JSON list of expected rows
-                              (e.g. [[1,"alpha"],[2,"beta"]])
-  NEUG_ODPS_TEST_PARTITION    optional: partition spec for the partition-limited
-                              read (e.g. "pt=20260921"), appended to the table
-                              address as "?<spec>"
-  NEUG_ODPS_TEST_PARTITION_ROWS
-                              optional: JSON list of the rows expected in that
-                              single partition (the ground truth that proves
-                              partition pruning happened)
+  NEUG_ODPS_TEST_PROJECT      the MaxCompute project that already holds the
+                              fixed fixture tables documented below
 
-Module 2 (COPY <table> FROM (LOAD FROM ...)) live-mode additions:
-  NEUG_ODPS_NODE_KEY          the node table's PRIMARY KEY column; edge COPY
-                              resolves its src/dst endpoints against it, so it
-                              must be the key the edge table references
-  NEUG_ODPS_EDGE_TABLE        odps:// address of the edge source table
-  NEUG_ODPS_EDGE_SRC          column of NEUG_ODPS_EDGE_TABLE holding the source
-                              node key (bound to the edge's FROM endpoint)
-  NEUG_ODPS_EDGE_DST          column of NEUG_ODPS_EDGE_TABLE holding the
-                              destination node key (bound to the TO endpoint)
-  NEUG_ODPS_EDGE_PROPS        optional: comma-separated edge property columns,
-                              appended after src, dst in the RETURN projection
-  NEUG_ODPS_REMAP_PROJECTION  optional: an explicit reordered/subset RETURN body
-                              for the remapping test; when unset it is derived
-                              from NEUG_ODPS_TEST_COLUMNS (first column kept as
-                              the auto-created table's key, the rest reversed)
-  NEUG_ODPS_TYPE_MISMATCH_SCHEMA
-                              required by the type-check test: a node-table DDL
-                              body whose column type deliberately cannot accept
-                              the source column (e.g. INT64 declared for a
-                              STRING column), so COPY must error rather than
-                              silently write wrong data (FR-010)
-  NEUG_ODPS_TYPE_MISMATCH_PROJECTION
-                              optional: RETURN body paired with the mismatched
-                              DDL (defaults to NEUG_ODPS_TEST_COLUMNS)
+Everything else -- table names, column lists, target DDL, expected rows, the
+partition spec, and the pushdown predicates -- is hardcoded in this file (see
+the "Fixed live fixtures" block after the imports). That keeps the live config
+down to credentials + endpoint + project and lets the whole suite run in one
+pytest session against a single known dataset.
 
-Module 3 (predicate-pushdown equivalence, T304) live-mode additions:
-  NEUG_ODPS_TEST_FILTER       required by the pushdown-equivalence test: a WHERE
-                              clause the converter CAN push down (whitelisted
-                              comparisons / IN / IS NULL / AND / OR / NOT over
-                              plain columns and literals), e.g. "age > 30"
-  NEUG_ODPS_TEST_FILTER_UNPUSHABLE
-                              required by the same test: a WHERE clause that is
-                              semantically EQUIVALENT to NEUG_ODPS_TEST_FILTER
-                              but that the converter will NOT push (arithmetic,
-                              CAST, CASE, a scalar function, or a dynamic
-                              param), e.g. "age + 0 > 30". Forcing the
-                              engine-side fallback is what makes the two reads a
-                              fair equivalence check.
-  NEUG_ODPS_TEST_FILTER_ROWS  optional: JSON list of the rows the filter should
-                              yield (the ground truth both reads are held to)
+Create these fixtures in NEUG_ODPS_TEST_PROJECT before running (BIGINT->INT64,
+STRING->STRING, DOUBLE->DOUBLE under the ODPS->NeuG type mapping):
+
+  -- Point/node table (5 rows).
+  CREATE TABLE neug_odps_item (id BIGINT, name STRING, price DOUBLE);
+  INSERT INTO neug_odps_item VALUES
+    (1,'apple',9.5),(2,'banana',5.5),(3,'cherry',12.0),
+    (4,'date',7.25),(5,'elderberry',3.75);
+
+  -- Edge table: src/dst reference neug_odps_item.id. Only the (src,dst) pairs
+  -- are asserted (against the edges read back out of the graph), so the `since`
+  -- values are free.
+  CREATE TABLE neug_odps_knows (src BIGINT, dst BIGINT, since STRING);
+  INSERT INTO neug_odps_knows VALUES
+    (1,2,'2020'),(2,3,'2021'),(3,4,'2022'),(4,5,'2023'),(1,5,'2024');
+
+  -- Partitioned table (PARTITIONED BY pt STRING). pt=20260101 holds the first
+  -- two item rows; pt=20260102 holds the other three. The partition-limited
+  -- read asserts only pt=20260101 -> those two rows, which is what proves
+  -- pruning reached ODPS instead of scanning every partition.
+  CREATE TABLE neug_odps_item_pt (id BIGINT, name STRING, price DOUBLE)
+    PARTITIONED BY (pt STRING);
+  INSERT INTO neug_odps_item_pt PARTITION(pt='20260101') VALUES
+    (1,'apple',9.5),(2,'banana',5.5);
+  INSERT INTO neug_odps_item_pt PARTITION(pt='20260102') VALUES
+    (3,'cherry',12.0),(4,'date',7.25),(5,'elderberry',3.75);
+
+The pushdown, remapping, and type-mismatch tests all reuse neug_odps_item (no
+extra tables): pushdown filters `price > 5.0` (pushable) against the equivalent
+`price + 0 > 5.0` (arithmetic -> engine-side), both yielding the 4 rows with
+price > 5; remapping projects `id, price, name`; type-mismatch declares `name`
+INT64 against the STRING source, so COPY *should* error rather than silently
+write. That last one is xfail(strict): NeuG core currently writes garbage on a
+COPY-from-(LOAD FROM) source/target type mismatch for every source (CSV too),
+tracked in alibaba/neug#1125 -- it is not odps-specific and lifts once the core
+binder force-casts mismatched COPY columns.
 """
 
-import json
 import os
 from collections import Counter
 
@@ -159,15 +147,87 @@ def _assert_same_rows(actual, expected):
     assert Counter(map(_freeze, actual)) == Counter(map(_freeze, expected))
 
 
-# --- Live configuration helpers ---------------------------------------------
+# --- Fixed live fixtures ----------------------------------------------------
+#
+# Every live test reads from these hardcoded tables, which must pre-exist in the
+# project named by NEUG_ODPS_TEST_PROJECT with exactly the schema and rows
+# documented in the module docstring. Fixing them here (instead of threading a
+# dozen env vars) keeps the live config down to credentials + endpoint + project
+# and lets the whole suite run in one pytest session against a known dataset.
+
+# Point/node table: neug_odps_item(id BIGINT, name STRING, price DOUBLE), 5 rows.
+_ITEM_TABLE = "neug_odps_item"
+_ITEM_COLUMNS = ["id", "name", "price"]
+_ITEM_SCHEMA = "id INT64 PRIMARY KEY, name STRING, price DOUBLE"
+_ITEM_ROWS = [
+    [1, "apple", 9.5],
+    [2, "banana", 5.5],
+    [3, "cherry", 12.0],
+    [4, "date", 7.25],
+    [5, "elderberry", 3.75],
+]
+_NODE_KEY = "id"
+
+# Edge table: neug_odps_knows(src BIGINT, dst BIGINT, since STRING); src/dst are
+# neug_odps_item.id endpoints. Only the (src, dst) pairs are asserted (against
+# the edges read back out of the graph), so the `since` values are unconstrained.
+_EDGE_TABLE = "neug_odps_knows"
+_EDGE_SRC = "src"
+_EDGE_DST = "dst"
+_EDGE_PROPS = ["since"]
+_EDGE_PAIRS = [[1, 2], [2, 3], [3, 4], [4, 5], [1, 5]]
+
+# Partitioned table: neug_odps_item_pt(id BIGINT, name STRING, price DOUBLE)
+# PARTITIONED BY (pt STRING). The partition-limited read projects the three data
+# columns explicitly, so the partition column never enters the compared rows
+# regardless of how the reader surfaces it. pt=20260101 holds these two rows.
+_PARTITION_TABLE = "neug_odps_item_pt"
+_PARTITION_DATA_COLUMNS = ["id", "name", "price"]
+_PARTITION_SPEC = "pt=20260101"
+_PARTITION_ROWS = [
+    [1, "apple", 9.5],
+    [2, "banana", 5.5],
+]
+
+# Predicate-pushdown pair over neug_odps_item: `price > 5.0` is pushable (plain
+# column vs literal); `price + 0 > 5.0` is semantically identical but has
+# arithmetic, so the converter refuses it and NeuG filters engine-side. Both must
+# yield exactly the four rows with price > 5 (elderberry 3.75 excluded).
+_FILTER_PUSHABLE = "price > 5.0"
+_FILTER_UNPUSHABLE = "price + 0 > 5.0"
+_FILTER_ROWS = [
+    [1, "apple", 9.5],
+    [2, "banana", 5.5],
+    [3, "cherry", 12.0],
+    [4, "date", 7.25],
+]
+
+# Remapping projection over neug_odps_item: keep the key column first, reverse
+# the rest -- proves COPY maps a reordered RETURN positionally without drift.
+_REMAP_COLUMNS = ["id", "price", "name"]
+_REMAP_PROJECTION = ", ".join(_REMAP_COLUMNS)
+# The item rows reordered into the remapped column order (id, price, name).
+_REMAP_ROWS = [[row[0], row[2], row[1]] for row in _ITEM_ROWS]
+
+# Type-mismatch target DDL over neug_odps_item: `name` is STRING in the source
+# but declared INT64 here, so COPY must fail rather than silently write.
+_TYPE_MISMATCH_SCHEMA = "id INT64 PRIMARY KEY, name INT64, price DOUBLE"
 
 
-def _live_table():
-    """The odps:// address under test; required for every live test."""
-    table = os.environ.get("NEUG_ODPS_TEST_TABLE", "").strip()
-    if not table:
-        pytest.skip("NEUG_ODPS_TEST_TABLE not set; live test needs a real table.")
-    return table
+def _live_project():
+    """The ODPS project holding the fixed fixtures; skip when unset."""
+    project = os.environ.get("NEUG_ODPS_TEST_PROJECT", "").strip()
+    if not project:
+        pytest.skip(
+            "NEUG_ODPS_TEST_PROJECT not set; live tests need the ODPS project "
+            "that holds the fixture tables."
+        )
+    return project
+
+
+def _addr(table):
+    """Build the odps:// address for a fixture table in the live project."""
+    return f"odps://{_live_project()}.{table}"
 
 
 def _live_credentials():
@@ -179,132 +239,6 @@ def _live_credentials():
     ]
     if missing:
         pytest.skip(f"live ODPS credentials missing: {', '.join(missing)}")
-
-
-def _live_columns():
-    """Optional projected column list, or None when not configured."""
-    raw = os.environ.get("NEUG_ODPS_TEST_COLUMNS", "").strip()
-    if not raw:
-        return None
-    return [column.strip() for column in raw.split(",") if column.strip()]
-
-
-def _live_expected_rows():
-    """Optional expected rows decoded from NEUG_ODPS_TEST_ROWS JSON."""
-    raw = os.environ.get("NEUG_ODPS_TEST_ROWS", "").strip()
-    if not raw:
-        return None
-    return json.loads(raw)
-
-
-def _live_partition():
-    """Partition spec for the partition-limited read; skip when not set."""
-    partition = os.environ.get("NEUG_ODPS_TEST_PARTITION", "").strip()
-    if not partition:
-        pytest.skip("NEUG_ODPS_TEST_PARTITION not set; no partition to limit to.")
-    return partition.lstrip("?")
-
-
-def _live_partition_rows():
-    """Ground-truth rows of the single partition under test."""
-    raw = os.environ.get("NEUG_ODPS_TEST_PARTITION_ROWS", "").strip()
-    if not raw:
-        pytest.skip(
-            "NEUG_ODPS_TEST_PARTITION_ROWS not set; cannot prove partition pruning."
-        )
-    return json.loads(raw)
-
-
-def _live_node_key():
-    """Node PRIMARY KEY column that edge endpoints resolve against."""
-    key = os.environ.get("NEUG_ODPS_NODE_KEY", "").strip()
-    if not key:
-        pytest.skip("NEUG_ODPS_NODE_KEY not set; cannot bind edge endpoints.")
-    return key
-
-
-def _live_edge_source():
-    """Edge table + src/dst key columns; skip unless all three are present."""
-    table = os.environ.get("NEUG_ODPS_EDGE_TABLE", "").strip()
-    src = os.environ.get("NEUG_ODPS_EDGE_SRC", "").strip()
-    dst = os.environ.get("NEUG_ODPS_EDGE_DST", "").strip()
-    missing = [
-        name
-        for name, value in (
-            ("NEUG_ODPS_EDGE_TABLE", table),
-            ("NEUG_ODPS_EDGE_SRC", src),
-            ("NEUG_ODPS_EDGE_DST", dst),
-        )
-        if not value
-    ]
-    if missing:
-        pytest.skip(f"live edge source incomplete: {', '.join(missing)}")
-    return table, src, dst
-
-
-def _live_edge_props():
-    """Optional edge property columns appended after src, dst."""
-    raw = os.environ.get("NEUG_ODPS_EDGE_PROPS", "").strip()
-    if not raw:
-        return []
-    return [column.strip() for column in raw.split(",") if column.strip()]
-
-
-def _live_remap_projection(columns):
-    """A reordered/subset RETURN body that exercises column remapping.
-
-    Defaults to keeping the first column (so the auto-created node table gets a
-    valid primary key) and reversing the rest -- enough to prove the projection
-    is applied identically through COPY and a direct read. Set
-    NEUG_ODPS_REMAP_PROJECTION for a bespoke reorder/subset/alias scenario.
-    """
-    override = os.environ.get("NEUG_ODPS_REMAP_PROJECTION", "").strip()
-    if override:
-        return override
-    if len(columns) < 3:
-        pytest.skip(
-            "NEUG_ODPS_TEST_COLUMNS needs >= 3 columns to derive a remapping "
-            "projection (or set NEUG_ODPS_REMAP_PROJECTION)."
-        )
-    return ", ".join([columns[0]] + list(reversed(columns[1:])))
-
-
-def _live_type_mismatch_schema():
-    """A node DDL whose column type deliberately clashes with the source."""
-    schema = os.environ.get("NEUG_ODPS_TYPE_MISMATCH_SCHEMA", "").strip()
-    if not schema:
-        pytest.skip(
-            "NEUG_ODPS_TYPE_MISMATCH_SCHEMA not set; no incompatible target "
-            "type to check against."
-        )
-    return schema
-
-
-def _live_filter():
-    """A pushable WHERE clause for the pushdown-equivalence test."""
-    clause = os.environ.get("NEUG_ODPS_TEST_FILTER", "").strip()
-    if not clause:
-        pytest.skip("NEUG_ODPS_TEST_FILTER not set; no pushable predicate.")
-    return clause
-
-
-def _live_filter_unpushable():
-    """An equivalent-but-non-pushable WHERE clause (forces engine filtering)."""
-    clause = os.environ.get("NEUG_ODPS_TEST_FILTER_UNPUSHABLE", "").strip()
-    if not clause:
-        pytest.skip(
-            "NEUG_ODPS_TEST_FILTER_UNPUSHABLE not set; no engine-side equivalent "
-            "to compare the pushed read against."
-        )
-    return clause
-
-
-def _live_filter_rows():
-    """Optional ground-truth rows the filter should yield, or None."""
-    raw = os.environ.get("NEUG_ODPS_TEST_FILTER_ROWS", "").strip()
-    if not raw:
-        return None
-    return json.loads(raw)
 
 
 # --- Live integration tests (SDK-ON + real credentials) ----------------------
@@ -322,7 +256,7 @@ def test_odps_live_load_from_returns_table_data(tmp_path):
     chain must agree with what MaxCompute holds.
     """
     _live_credentials()
-    table = _live_table()
+    table = _addr(_ITEM_TABLE)
 
     db = Database(db_path=str(tmp_path / "odps_live_load"), mode="w")
     conn = db.connect()
@@ -338,17 +272,11 @@ def test_odps_live_load_from_returns_table_data(tmp_path):
         columns = result.column_names()
         rows = [list(row) for row in result]
 
-        # Real data actually came back -- not an empty sniff-only result.
+        # Real data actually came back -- not an empty sniff-only result -- and
+        # both the column names and every row match the neug_odps_item fixture.
         assert rows, f"live ODPS table {table!r} returned no rows"
-        assert columns, "LOAD FROM RETURN * produced no column names"
-
-        expected_columns = _live_columns()
-        if expected_columns is not None:
-            assert columns == expected_columns, f"column mismatch: {columns}"
-
-        expected_rows = _live_expected_rows()
-        if expected_rows is not None:
-            _assert_same_rows(rows, expected_rows)
+        assert columns == _ITEM_COLUMNS, f"column mismatch: {columns}"
+        _assert_same_rows(rows, _ITEM_ROWS)
     finally:
         conn.close()
         db.close()
@@ -366,23 +294,15 @@ def test_odps_live_copy_from_load_imports_rows(tmp_path):
     parsed or sniffed.
     """
     _live_credentials()
-    table = _live_table()
-
-    columns = _live_columns()
-    if columns is None:
-        pytest.skip("NEUG_ODPS_TEST_COLUMNS required for the COPY import test.")
-    schema = os.environ.get("NEUG_ODPS_TEST_SCHEMA", "").strip()
-    if not schema:
-        pytest.skip("NEUG_ODPS_TEST_SCHEMA required for the COPY import test.")
-
-    projection = ", ".join(columns)
-    readback_projection = ", ".join(f"n.{column}" for column in columns)
+    table = _addr(_ITEM_TABLE)
+    projection = ", ".join(_ITEM_COLUMNS)
+    readback_projection = ", ".join(f"n.{column}" for column in _ITEM_COLUMNS)
 
     db = Database(db_path=str(tmp_path / "odps_live_copy"), mode="w")
     conn = db.connect()
     try:
         _load_odps(conn)
-        conn.execute(f"CREATE NODE TABLE item({schema});")
+        conn.execute(f"CREATE NODE TABLE item({_ITEM_SCHEMA});")
 
         try:
             conn.execute(f'COPY item FROM (LOAD FROM "{table}" RETURN {projection});')
@@ -390,24 +310,14 @@ def test_odps_live_copy_from_load_imports_rows(tmp_path):
             _skip_if_sdk_off(error)
             raise
 
-        # Read back from the graph: this is the "data really imported" check.
+        # Read back from the graph: this is the "data really imported" check,
+        # held against the neug_odps_item ground-truth rows.
         imported = [
             list(row)
             for row in conn.execute(f"MATCH (n:item) RETURN {readback_projection};")
         ]
         assert imported, "COPY FROM (LOAD FROM) imported no rows into the graph"
-
-        expected_rows = _live_expected_rows()
-        if expected_rows is not None:
-            _assert_same_rows(imported, expected_rows)
-        else:
-            # No fixed expectation: the graph must agree with a direct read of
-            # the same table, so the import is self-consistent (rows + count).
-            direct = [
-                list(row)
-                for row in conn.execute(f'LOAD FROM "{table}" RETURN {projection};')
-            ]
-            _assert_same_rows(imported, direct)
+        _assert_same_rows(imported, _ITEM_ROWS)
     finally:
         conn.close()
         db.close()
@@ -418,32 +328,32 @@ def test_odps_live_copy_from_load_imports_rows(tmp_path):
     reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
 )
 def test_odps_live_partition_limited_read(tmp_path):
-    """`LOAD FROM "odps://...?<partition>" RETURN *` reads only that partition.
+    """`LOAD FROM "odps://...?<partition>" RETURN id, name, price` reads one pt.
 
     T109 / Acceptance Scenario 2 (spec M1 Integration Tests: partition-limited
     read): a partition-qualified address must return exactly the rows of that
-    single partition. Comparing against the known per-partition ground truth is
-    what proves the partition filter reached ODPS (pruning) instead of scanning
-    the whole table.
+    single partition. The projection names the three data columns explicitly, so
+    the partition column never enters the comparison. Comparing against the
+    known per-partition ground truth (neug_odps_item_pt, pt=20260101) is what
+    proves the partition filter reached ODPS (pruning) instead of scanning every
+    partition.
     """
     _live_credentials()
-    table = _live_table()
-    partition = _live_partition()
-    expected_rows = _live_partition_rows()
-    address = f"{table}?{partition}"
+    address = f"{_addr(_PARTITION_TABLE)}?{_PARTITION_SPEC}"
+    projection = ", ".join(_PARTITION_DATA_COLUMNS)
 
     db = Database(db_path=str(tmp_path / "odps_live_partition"), mode="w")
     conn = db.connect()
     try:
         _load_odps(conn)
         try:
-            result = conn.execute(f'LOAD FROM "{address}" RETURN *;')
+            result = conn.execute(f'LOAD FROM "{address}" RETURN {projection};')
         except RuntimeError as error:
             _skip_if_sdk_off(error)
             raise
         rows = [list(row) for row in result]
-        assert rows, f"partition {partition!r} of {table!r} returned no rows"
-        _assert_same_rows(rows, expected_rows)
+        assert rows, f"partition {_PARTITION_SPEC!r} of {address!r} returned no rows"
+        _assert_same_rows(rows, _PARTITION_ROWS)
     finally:
         conn.close()
         db.close()
@@ -463,9 +373,8 @@ def test_odps_live_missing_table_reports_not_found(tmp_path):
     AccessKey secret.
     """
     _live_credentials()
-    table = _live_table()
     secret = os.environ.get("ODPS_ACCESS_KEY_SECRET", "")
-    missing = f"{table}_neug_t109_missing"
+    missing = _addr(f"{_ITEM_TABLE}_neug_t109_missing")
 
     db = Database(db_path=str(tmp_path / "odps_live_missing"), mode="w")
     conn = db.connect()
@@ -509,7 +418,7 @@ def test_odps_live_bad_credentials_reports_auth_failure_without_plaintext(
     failure (OdpsError Authentication -> PermissionDeniedException in C++) and
     must not contain the supplied secret in clear text.
     """
-    table = _live_table()
+    table = _addr(_ITEM_TABLE)
     endpoint = os.environ.get("ODPS_ENDPOINT", "").strip()
     if not endpoint:
         pytest.skip("ODPS_ENDPOINT required to reach a real auth failure.")
@@ -562,31 +471,21 @@ def test_odps_live_copy_edge_from_load_imports_edges(tmp_path):
     T202 / Acceptance Scenario 2 (spec M2): the first two RETURN columns are
     bound to the source/destination primary keys and resolved against the
     already-imported node table; any remaining columns become edge properties.
-    The (src, dst) pairs read back with MATCH must equal a direct read of the
-    same ODPS edge table, proving every edge imported AND that the two key
-    columns mapped to the correct endpoints (no swap / misalignment).
+    The (src, dst) pairs read back with MATCH must equal the neug_odps_knows
+    fixture pairs, proving every edge imported AND that the two key columns
+    mapped to the correct endpoints (no swap / misalignment).
     """
     _live_credentials()
-    node_table = _live_table()
-    node_columns = _live_columns()
-    node_schema = os.environ.get("NEUG_ODPS_TEST_SCHEMA", "").strip()
-    if node_columns is None or not node_schema:
-        pytest.skip(
-            "NEUG_ODPS_TEST_COLUMNS and NEUG_ODPS_TEST_SCHEMA are required to "
-            "import the edge endpoints' node table."
-        )
-    node_key = _live_node_key()
-    edge_table, edge_src, edge_dst = _live_edge_source()
-    edge_props = _live_edge_props()
-
-    node_projection = ", ".join(node_columns)
-    edge_projection = ", ".join([edge_src, edge_dst] + edge_props)
+    node_table = _addr(_ITEM_TABLE)
+    edge_table = _addr(_EDGE_TABLE)
+    node_projection = ", ".join(_ITEM_COLUMNS)
+    edge_projection = ", ".join([_EDGE_SRC, _EDGE_DST] + _EDGE_PROPS)
 
     db = Database(db_path=str(tmp_path / "odps_live_edge"), mode="w")
     conn = db.connect()
     try:
         _load_odps(conn)
-        conn.execute(f"CREATE NODE TABLE person({node_schema});")
+        conn.execute(f"CREATE NODE TABLE person({_ITEM_SCHEMA});")
         try:
             # Endpoints first: the edge COPY resolves src/dst against person's
             # primary key, so the node table must already hold those keys.
@@ -602,21 +501,15 @@ def test_odps_live_copy_edge_from_load_imports_edges(tmp_path):
             _skip_if_sdk_off(error)
             raise
 
-        direct = [
-            [row[0], row[1]]
-            for row in conn.execute(
-                f'LOAD FROM "{edge_table}" RETURN {edge_src}, {edge_dst};'
-            )
-        ]
-        assert direct, f"live ODPS edge table {edge_table!r} returned no rows"
         imported = [
             [row[0], row[1]]
             for row in conn.execute(
                 "MATCH (a:person)-[k:knows]->(b:person) "
-                f"RETURN a.{node_key}, b.{node_key};"
+                f"RETURN a.{_NODE_KEY}, b.{_NODE_KEY};"
             )
         ]
-        _assert_same_rows(imported, direct)
+        assert imported, f"live ODPS edge table {edge_table!r} imported no edges"
+        _assert_same_rows(imported, _EDGE_PAIRS)
     finally:
         conn.close()
         db.close()
@@ -632,15 +525,13 @@ def test_odps_live_copy_from_load_remapping_matches_projection(tmp_path):
     T203 / Acceptance Scenario 3 + FR-009 (spec M2): the RETURN projection
     reorders and subsets the ODPS columns (applied by odps `execFunc`'s
     project_chunk on the fallback COPY path); the auto-created node table takes
-    them positionally. Reading the graph back in the same projected order must
-    equal a direct LOAD FROM with that projection, proving no column drifted.
+    them positionally. Reading the graph back in that projected order must equal
+    the item rows reordered the same way, proving no column drifted.
     """
     _live_credentials()
-    table = _live_table()
-    columns = _live_columns()
-    if columns is None:
-        pytest.skip("NEUG_ODPS_TEST_COLUMNS required for the remapping test.")
-    projection = _live_remap_projection(columns)
+    table = _addr(_ITEM_TABLE)
+    projection = _REMAP_PROJECTION  # "id, price, name"
+    readback = ", ".join(f"n.{name}" for name in _REMAP_COLUMNS)
 
     db = Database(db_path=str(tmp_path / "odps_live_remap"), mode="w")
     conn = db.connect()
@@ -654,19 +545,15 @@ def test_odps_live_copy_from_load_remapping_matches_projection(tmp_path):
             _skip_if_sdk_off(error)
             raise
 
-        # Projected names come from the direct read, so aliases in a bespoke
-        # NEUG_ODPS_REMAP_PROJECTION are handled too; the auto-created
-        # remap_node table stores exactly these columns, positionally.
-        direct_result = conn.execute(f'LOAD FROM "{table}" RETURN {projection};')
-        projected_names = direct_result.column_names()
-        direct = [list(row) for row in direct_result]
-        readback = ", ".join(f"n.{name}" for name in projected_names)
+        # The auto-created remap_node table stores the projected columns
+        # positionally (id, price, name); reading them back in that order must
+        # equal the item rows reordered the same way -- no column drifted.
         imported = [
             list(row)
             for row in conn.execute(f"MATCH (n:remap_node) RETURN {readback};")
         ]
         assert imported, "remapping COPY imported no rows into the graph"
-        _assert_same_rows(imported, direct)
+        _assert_same_rows(imported, _REMAP_ROWS)
     finally:
         conn.close()
         db.close()
@@ -676,33 +563,38 @@ def test_odps_live_copy_from_load_remapping_matches_projection(tmp_path):
     not _LIVE_ENABLED,
     reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
 )
+@pytest.mark.xfail(
+    strict=True,
+    reason="COPY FROM (LOAD FROM ...) does not force-cast a source column to a "
+    "mismatched target column type; it silently stores garbage instead of "
+    "raising ERR_TYPE_CONVERSION, so FR-010 cannot hold yet. This is a core "
+    "binder bug (matchColumnExpression is never wired into the COPY-from-scan "
+    "paths), reproduced identically with a CSV source -- not odps-specific. "
+    "Tracked in alibaba/neug#1125; remove this marker once the binder casts.",
+)
 def test_odps_live_copy_type_mismatch_reports_error(tmp_path):
     """An incompatible target column type must error, never silently write.
 
     T204 / FR-010 (spec M2): when the declared node-table column type cannot
     accept the ODPS source column, COPY must fail with a type-conversion or
     schema-mismatch error (locating the problem) rather than writing wrong
-    data. The mismatched DDL is supplied by the live config, which knows the
-    real source column types.
+    data. The mismatched DDL declares `name` INT64 against the STRING source
+    column of neug_odps_item.
+
+    Marked xfail(strict): NeuG core currently writes garbage on this mismatch
+    for every COPY-from-(LOAD FROM) source (see alibaba/neug#1125). strict=True
+    turns an unexpected pass -- i.e. the core force-cast landing -- into a
+    failure so this marker gets removed promptly.
     """
     _live_credentials()
-    table = _live_table()
-    schema = _live_type_mismatch_schema()
-    projection = os.environ.get("NEUG_ODPS_TYPE_MISMATCH_PROJECTION", "").strip()
-    if not projection:
-        columns = _live_columns()
-        if columns is None:
-            pytest.skip(
-                "NEUG_ODPS_TEST_COLUMNS or NEUG_ODPS_TYPE_MISMATCH_PROJECTION "
-                "required to pair with the mismatched DDL."
-            )
-        projection = ", ".join(columns)
+    table = _addr(_ITEM_TABLE)
+    projection = ", ".join(_ITEM_COLUMNS)
 
     db = Database(db_path=str(tmp_path / "odps_live_typemismatch"), mode="w")
     conn = db.connect()
     try:
         _load_odps(conn)
-        conn.execute(f"CREATE NODE TABLE bad_typed({schema});")
+        conn.execute(f"CREATE NODE TABLE bad_typed({_TYPE_MISMATCH_SCHEMA});")
         with pytest.raises(RuntimeError) as excinfo:
             conn.execute(
                 f'COPY bad_typed FROM (LOAD FROM "{table}" RETURN {projection});'
@@ -736,11 +628,10 @@ def test_odps_live_predicate_pushdown_matches_engine_filter(tmp_path):
     predicates alike return the expected rows.
     """
     _live_credentials()
-    table = _live_table()
-    pushable = _live_filter()
-    unpushable = _live_filter_unpushable()
-    columns = _live_columns()
-    projection = ", ".join(columns) if columns else "*"
+    table = _addr(_ITEM_TABLE)
+    pushable = _FILTER_PUSHABLE
+    unpushable = _FILTER_UNPUSHABLE
+    projection = ", ".join(_ITEM_COLUMNS)
 
     db = Database(db_path=str(tmp_path / "odps_live_pushdown"), mode="w")
     conn = db.connect()
@@ -772,10 +663,8 @@ def test_odps_live_predicate_pushdown_matches_engine_filter(tmp_path):
         # A filter can only remove rows, never add them: the pushed read is a
         # subset of the unfiltered scan (SC-004 rows-read reduction observable).
         assert len(pushed) <= len(full), "filter returned more rows than the scan"
-
-        ground_truth = _live_filter_rows()
-        if ground_truth is not None:
-            _assert_same_rows(pushed, ground_truth)
+        # And both equal the fixture ground truth (the 4 rows with price > 5).
+        _assert_same_rows(pushed, _FILTER_ROWS)
     finally:
         conn.close()
         db.close()
