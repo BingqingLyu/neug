@@ -23,7 +23,17 @@ STRING/VARCHAR/CHAR→VARCHAR、DATE→date32、DATETIME/TIMESTAMP/TIMESTAMP_NTZ
 **DECIMAL(p,s)→DOUBLE（有损，见 extension/odps/README.md）**；arrow_bridge 新增 `d:p,s` decimal128→double
 解码（portable hi/lo，非 __int128）。BINARY/INTERVAL_*/ARRAY/MAP/STRUCT/JSON 一律精确报错（见 T404），
 **不做**复杂/嵌套类型映射。单测：`MapsDecimalToDouble`/`MapsTemporalTypes`/`ConvertsDecimal128ToDouble` 等，
-odps_extension_test 96/96 全绿。全类型样表端到端对拍属 SDK-ON live 验证（见 T405）。
+odps_extension_test 全绿。全类型样表端到端对拍属 SDK-ON live 验证（见 T405）。
+
+**状态（SDK-ON 容器真连验证，已通过）**：全类型样表 `neug_odps_all_types` 端到端逐列命中——14 列
+（TINYINT/SMALLINT/INT→INT32、BIGINT→INT64、FLOAT/DOUBLE、DECIMAL→DOUBLE、BOOLEAN、STRING/VARCHAR/CHAR、
+DATE、DATETIME、TIMESTAMP）值全部正确，`test_odps_live_all_types_round_trip` PASSED。真连暴露并修复一处
+schema-guard 误报：NeuG 两个 internal→proto temporal 发射器不一致（inferCommonType 发 `temporal.timestamp`、
+gopt 发 `temporal.date_time`），且 DATE 的 canonical 是 `temporal.date` 而非 `temporal.date32`；遂将
+`convertScalarType` 的 kDate 改为 `mutable_date()`，并新增 `temporalClass()` 归一化 + `sameScalarType` 按
+temporal 语义类比较，使 `RETURN *` 不再被误判为 CAST 改写（新增单测 `SameScalarTypeNormalizesTemporalEmitters`）。
+odps_extension_test：SDK-OFF 宿主 **97/97**、SDK-ON 容器 **95/95** 全绿（差 2 个
+`#if !defined(ODPS_SDK_ENABLE_ARROW)` 的 skeleton-only 用例）。
 
 ## [F008-T402] 精度与时区约定
 
@@ -37,8 +47,17 @@ odps_extension_test 96/96 全绿。全类型样表端到端对拍属 SDK-ON live
 **状态（arm64 宿主 SDK-OFF）**：约定已固化到代码注释 + `extension/odps/README.md`（Type mapping /
 Precision and timezone / Unsupported types）：DECIMAL→DOUBLE 有损（double ~15-17 位有效数字，
 DECIMAL(38,18) 高精度值静默丢精度，需用户在 MaxCompute 侧转标量 BIGINT/STRING）；TIMESTAMP 亚毫秒
-**截断**（ns/1e6、us/1e3）非四舍五入；**不做时区偏移**，TIMESTAMP_NTZ 与 TIMESTAMP 同等处理；秒级
-TIMESTAMP 溢出毫秒范围、date64 超 32 位天范围→显式报错。用户已确认接受 DECIMAL→DOUBLE 方案并要求文档写明。
+**截断**（ns/1e6、us/1e3）非四舍五入；秒级 TIMESTAMP 溢出毫秒范围、date64 超 32 位天范围→显式报错。
+用户已确认接受 DECIMAL→DOUBLE 方案并要求文档写明。
+
+**状态（SDK-ON 容器真连验证，已修正时区约定）**：真连核实 DATETIME/TIMESTAMP 的时区行为，**推翻了原
+「不做时区偏移」的表述**——MaxCompute 按 project 时区（`odps.sql.timezone`，本例 graphscope_dev=Asia/Shanghai
+UTC+8）把 DATETIME/TIMESTAMP 存为 instant，Storage API 以带 tz 注解的 Arrow `timestamp` 传输、其 int64 载荷
+即 UTC epoch；bridge 读原始 epoch 值渲染为 NeuG 无时区 `TIMESTAMP` 并**丢弃 Arrow tz 注解**，故呈现为 **UTC
+挂钟**。实测：插入 `09:15:30`（+08:00）读回 `01:15:30` UTC——**同一 instant、非数据损坏**，`.123` 毫秒保留；
+DATE（date32，纯日历日）**不偏移**。已据此修正 `doc/source/extensions/odps.md`、`extension/odps/README.md`
+与 `odps_schema_converter.cc` 注释（原「no timezone shift」表述错误），并把
+`test_odps_live_all_types_round_trip` 的时间戳断言改为按 project tz→UTC 推导期望 instant。
 
 ## [F008-T403] 聚簇表 / Delta / 物化视图读取支持验证
 
@@ -69,6 +88,11 @@ ARRAY/MAP/STRUCT/JSON 各给出「NeuG 限制原因 + MaxCompute 侧 workaround�
 当前 `odps_glue_sniff_schema` 只回传列信息、无表类型字段，需扩 glue + SDK 元数据才能在 sniff/建会话阶段
 判别外部表/视图并给出「改读 OSS 底层文件（httpfs + parquet/csv）」的替代路径提示。
 
+**状态（SDK-ON 容器真连验证，列类型已通过）**：`neug_odps_unsupported_json`（payload JSON）真连读取在
+schema sniff 阶段即被拒，`test_odps_live_unsupported_column_type_reports_error` PASSED——错误消息含列名
+（payload）、类型（JSON）、STRING workaround，证明 T404 列类型拒绝在真连数据面有效。**表类型**识别
+（外部表/逻辑视图）仍 DEFERRED（需扩 glue + SDK 元数据回传表类型）。
+
 ## [F008-T405] Module 4 单测 + 集成测
 
 **description**: 覆盖完整类型映射、精度/时区边界与不支持项（对齐 spec M4 Test Strategy）。
@@ -81,7 +105,7 @@ ARRAY/MAP/STRUCT/JSON 各给出「NeuG 限制原因 + MaxCompute 侧 workaround�
 `UnsupportedTypeMessageIsActionable`（converter）+ `ConvertsDecimal128ToDouble`/`RejectsMalformedDecimalFormat`/
 `RejectsNon128BitDecimal`（bridge，含 addDecimal128 builder），并同步更新受 DECIMAL/temporal 现被支持影响的
 `SupportedScalarClassification`/`UnsupportedTypesThrow`/`ConvertColumnsPropagatesUnsupportedType`/
-`RejectsUnsupportedChildFormat`；odps_extension_test 96/96 全绿。**集成测（全类型样表端到端、外部表/视图/JSON
+`RejectsUnsupportedChildFormat`；odps_extension_test SDK-OFF 宿主 97/97 全绿。**集成测（全类型样表端到端、外部表/视图/JSON
 拒绝、聚簇/Delta/物化视图）DEFERRED 到 SDK-ON 容器 + 真凭证轮次。**
 
 **集成测 fixture 已写入（gated，待容器验证）**：`tools/python_bind/tests/test_odps_load_from.py` 新增两张 live
@@ -91,3 +115,11 @@ fixture 表与对应用例——`neug_odps_all_types`（每种受支持标量类
 含列名/类型/STRING workaround 的可诊断错误）；建表 DDL 已写入模块 docstring，用例经 `NEUG_ODPS_LIVE=1` 门控，
 arm64 宿主 SDK-OFF 自动 skip（15 collected / 3 routing passed / 12 skipped）。真连行为（尤其 DECIMAL 的 Arrow
 `d:p,s` 编码、DATETIME/TIMESTAMP 的实际 Arrow 类型、JSON 列的 SDK type_code）需容器 + 真凭证核实。
+
+**状态（SDK-ON 容器 + 真凭证，集成测已通过）**：在 arm64 容器 `neug-odps-arm64`（`NEUG_WITH_ODPS_SDK=ON`
+构建 `/root/neug-build`）以真凭证跑通 live 集成测——`test_odps_load_from.py` **12 passed / 3 skipped**
+（3 个 routing smoke 在 SDK-ON 下按设计自动 skip，避免与 live 重复计数）。其中 T405 的两张 fixture 表
+`neug_odps_all_types`（全类型端到端逐列对拍）与 `neug_odps_unsupported_json`（JSON 列拒绝）均 PASSED。
+真连核实：DECIMAL 的 Arrow `d:p,s` decimal128 正确解码为 DOUBLE；DATETIME/TIMESTAMP 经 Storage API 为
+UTC instant（见 T402 修正）；JSON 列 SDK type_code 触发列类型拒绝。C++ odps_extension_test SDK-ON 95/95。
+聚簇表/Delta/物化视图与外部表/逻辑视图仍 DEFERRED（见 T403/T404）。

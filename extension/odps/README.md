@@ -80,10 +80,17 @@ rejected with a clear error.
 - Sub-millisecond precision is **truncated**, not rounded: nanosecond values
   are divided by 1,000,000 and microsecond values by 1,000, dropping the
   remainder.
-- **No timezone shift is applied.** The wall-clock value emitted by MaxCompute
-  is interpreted as-is (UTC-normalized milliseconds); the reader does not
-  convert between local time and UTC. `TIMESTAMP_NTZ` (no time zone) is
-  treated identically to `TIMESTAMP`.
+- **Timestamps are returned as UTC instants.** MaxCompute stores `DATETIME` /
+  `TIMESTAMP` as instants and the Storage API transmits them as Arrow
+  `timestamp` columns annotated with the project timezone (`odps.sql.timezone`,
+  e.g. `Asia/Shanghai`); the raw payload is the epoch instant in UTC. The bridge
+  decodes that instant into NeuG's timezone-naive millisecond `TIMESTAMP` and
+  drops the Arrow timezone annotation, so values render as a **UTC wall-clock**.
+  A value written as `2023-01-15 09:15:30` in a `UTC+8` project therefore reads
+  back as `2023-01-15 01:15:30` — the *same instant*, sub-second fraction
+  intact, only rendered in UTC rather than the project's local zone. `DATE` is a
+  pure calendar date and is **not** shifted. `TIMESTAMP_NTZ` carries no timezone
+  annotation, so its wall-clock value is preserved unchanged.
 - A `TIMESTAMP` in seconds that would overflow NeuG's millisecond range is
   rejected with an explicit error rather than wrapping around.
 
