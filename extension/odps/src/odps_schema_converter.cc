@@ -138,6 +138,31 @@ std::string unsupportedReason(int typeCode) {
   }
 }
 
+// NeuG's two internal->proto temporal emitters disagree on the oneof case for
+// the same logical type (inferCommonType: kTimestampMs -> temporal.timestamp;
+// gopt: kTimestampMs -> temporal.date_time), while the read path folds both
+// date32/date -> kDate and timestamp/date_time -> kTimestampMs. So the schema
+// guard must compare temporal columns by normalized class, not raw proto
+// bytes, or a plain `RETURN *` false-positives when the optimizer-rewritten
+// requested schema and the re-sniffed native schema used different emitters.
+int temporalClass(const ::common::Temporal& temporal) {
+  switch (temporal.item_case()) {
+  case ::common::Temporal::kDate:
+  case ::common::Temporal::kDate32:
+    return 1;  // DATE (int32 days since epoch)
+  case ::common::Temporal::kTimestamp:
+  case ::common::Temporal::kDateTime:
+    return 2;  // TIMESTAMP (int64 milliseconds since epoch)
+  case ::common::Temporal::kTime:
+  case ::common::Temporal::kTime32:
+    return 3;  // TIME (int32 milliseconds past midnight)
+  case ::common::Temporal::kInterval:
+    return 4;  // INTERVAL
+  default:
+    return 0;  // unset / unknown
+  }
+}
+
 }  // namespace
 
 std::shared_ptr<::common::DataType> OdpsSchemaConverter::convertScalarType(
@@ -181,12 +206,19 @@ std::shared_ptr<::common::DataType> OdpsSchemaConverter::convertScalarType(
     type->set_primitive_type(::common::PrimitiveType::DT_DOUBLE);
     return type;
   // Temporal types: DATE -> NeuG kDate; DATETIME/TIMESTAMP/TIMESTAMP_NTZ ->
-  // NeuG kTimestampMs (millisecond precision). The arrow_bridge already decodes
-  // the Arrow date32 (`tdD`) and timestamp (`ts{s,m,u,n}`) layouts; TIMESTAMP
-  // nanos/micros are truncated to milliseconds and no timezone shift is
-  // applied (see extension/odps/README.md, "Precision and timezone").
+  // NeuG kTimestampMs (millisecond precision). Emit the SAME canonical proto
+  // NeuG's inferCommonType produces (kDate -> temporal.date, kTimestampMs ->
+  // temporal.timestamp) so the sniffed scan schema survives the planner's
+  // proto->internal->proto round-trip byte-identically; a non-canonical
+  // temporal.date32 here would make the M3 schema-mismatch guard
+  // (findSchemaMismatch) false-positive on a plain `RETURN *`. The arrow_bridge
+  // decodes the physical Arrow date32 (`tdD`) / timestamp (`ts{s,m,u,n}`)
+  // layouts independently of this declared type; TIMESTAMP nanos/micros are
+  // truncated to milliseconds, and the reader drops the Arrow timezone
+  // annotation so a tz-annotated DATETIME/TIMESTAMP renders as its UTC instant
+  // (see extension/odps/README.md, "Precision and timezone").
   case OdpsTypeCode::kDate:
-    type->mutable_temporal()->mutable_date32();
+    type->mutable_temporal()->mutable_date();
     return type;
   case OdpsTypeCode::kDatetime:
   case OdpsTypeCode::kTimestamp:
@@ -243,6 +275,12 @@ bool OdpsSchemaConverter::sameScalarType(const ::common::DataType& requested,
   switch (requested.item_case()) {
   case ::common::DataType::kPrimitiveType:
     return requested.primitive_type() == native.primitive_type();
+  case ::common::DataType::kTemporal:
+    // Compare by normalized class: NeuG's inferCommonType and gopt emitters
+    // pick different oneof cases (timestamp vs date_time) for the same logical
+    // TIMESTAMP, so raw-byte equality would false-positive on `RETURN *`.
+    return temporalClass(requested.temporal()) ==
+           temporalClass(native.temporal());
   default:
     return requested.SerializeAsString() == native.SerializeAsString();
   }
