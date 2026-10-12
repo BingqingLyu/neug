@@ -15,10 +15,12 @@
 
 #include "odps_arrow_bridge.h"
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "neug/common/columns/value_columns.h"
 #include "neug/utils/exception/exception.h"
@@ -257,6 +259,116 @@ std::shared_ptr<IContextColumn> convertTimestamp(const OdpsArrowSchema& schema,
   return builder.finish();
 }
 
+// Parses a non-negative integer from a decimal-format field. Returns false on
+// an empty or non-digit field (no sign, no whitespace).
+bool parseFormatInt(const std::string_view& field, int& out) {
+  if (field.empty()) {
+    return false;
+  }
+  int value = 0;
+  for (char c : field) {
+    if (c < '0' || c > '9') {
+      return false;
+    }
+    value = value * 10 + (c - '0');
+  }
+  out = value;
+  return true;
+}
+
+// Parses an Arrow decimal format string "d:precision,scale[,bitWidth]".
+// Returns false when malformed. `bitWidth` defaults to 128 (the only width
+// ODPS / Arrow 1.0.0 emits for DECIMAL). `precision` is not needed to decode
+// to a double, so it is validated but discarded.
+bool parseDecimalFormat(const std::string_view& format, int& scale,
+                        int& bitWidth) {
+  scale = 0;
+  bitWidth = 128;
+  if (format.size() < 2 || format[0] != 'd' || format[1] != ':') {
+    return false;
+  }
+  std::vector<std::string_view> fields;
+  size_t start = 2;
+  while (true) {
+    const size_t comma = format.find(',', start);
+    if (comma == std::string_view::npos) {
+      fields.push_back(format.substr(start));
+      break;
+    }
+    fields.push_back(format.substr(start, comma - start));
+    start = comma + 1;
+  }
+  if (fields.size() < 2 || fields.size() > 3) {
+    return false;
+  }
+  int precision = 0;
+  int parsedScale = 0;
+  if (!parseFormatInt(fields[0], precision) ||
+      !parseFormatInt(fields[1], parsedScale)) {
+    return false;
+  }
+  scale = parsedScale;
+  if (fields.size() == 3) {
+    int parsedWidth = 0;
+    if (!parseFormatInt(fields[2], parsedWidth)) {
+      return false;
+    }
+    bitWidth = parsedWidth;
+  }
+  return true;
+}
+
+// Decodes an Arrow decimal128 column (`d:precision,scale`) into a DOUBLE
+// column. This is LOSSY: decimal128 holds up to 38 significant digits while a
+// double holds ~15-17, so high-precision DECIMAL values lose significance.
+// This matches OdpsSchemaConverter mapping MaxCompute DECIMAL to DT_DOUBLE
+// (see extension/odps/README.md, "Type mapping"). Each value is a 16-byte
+// little-endian two's-complement integer, divided by 10^scale. The 128-bit
+// magnitude is assembled from its high/low 64-bit words rather than __int128
+// so this stays portable to compilers without a 128-bit integer type.
+std::shared_ptr<IContextColumn> convertDecimal128(const OdpsArrowSchema& schema,
+                                                  const OdpsArrowArray& array,
+                                                  const std::string& path,
+                                                  int scale) {
+  const uint64_t offset = validateArray(schema, array, path, 2);
+  if (array.length > 0 && !array.buffers[1]) {
+    throwColumnError(path, "non-empty decimal column has no data buffer");
+  }
+
+  constexpr double kTwoPow64 = 18446744073709551616.0;  // 2^64, exact in double
+  const double divisor = std::pow(10.0, static_cast<double>(scale));
+  const auto* data = static_cast<const uint8_t*>(array.buffers[1]);
+  ValueColumnBuilder<double> builder;
+  builder.reserve(static_cast<size_t>(array.length));
+  for (uint64_t i = 0; i < static_cast<uint64_t>(array.length); ++i) {
+    const uint64_t sourceIndex = offset + i;
+    if (!isValid(array, sourceIndex)) {
+      builder.push_back_null();
+      continue;
+    }
+    const uint8_t* p = data + sourceIndex * 16;
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+    for (int b = 7; b >= 0; --b) {
+      lo = (lo << 8) | static_cast<uint64_t>(p[b]);
+    }
+    for (int b = 15; b >= 8; --b) {
+      hi = (hi << 8) | static_cast<uint64_t>(p[b]);
+    }
+    double magnitude;
+    if ((hi >> 63) != 0) {  // negative: two's-complement negate (hi:lo)
+      const uint64_t nlo = ~lo + 1;
+      const uint64_t nhi = ~hi + (lo == 0 ? 1 : 0);
+      magnitude = -(static_cast<double>(nhi) * kTwoPow64 +
+                    static_cast<double>(nlo));
+    } else {
+      magnitude = static_cast<double>(hi) * kTwoPow64 + static_cast<double>(lo);
+    }
+    builder.push_back_opt(magnitude / divisor);
+  }
+  return builder.finish();
+}
+
 std::shared_ptr<IContextColumn> convertScalarColumn(
     const OdpsArrowSchema& schema, const OdpsArrowArray& array,
     const std::string& path) {
@@ -321,9 +433,22 @@ std::shared_ptr<IContextColumn> convertScalarColumn(
       format[3] == ':') {
     return convertTimestamp(schema, array, path, format[2]);
   }
+  if (format.size() >= 2 && format[0] == 'd' && format[1] == ':') {
+    int scale = 0;
+    int bitWidth = 128;
+    if (!parseDecimalFormat(format, scale, bitWidth)) {
+      throwColumnError(path, "malformed decimal format \"" +
+                                 std::string(format) + "\"");
+    }
+    if (bitWidth != 128) {
+      throwColumnError(path, "only 128-bit decimals are supported (got " +
+                                 std::to_string(bitWidth) + "-bit)");
+    }
+    return convertDecimal128(schema, array, path, scale);
+  }
   throwColumnError(path, "unsupported Arrow C format \"" + std::string(format) +
-                             "\" (decimal and nested types are planned for "
-                             "module 4, task T401)");
+                             "\" (nested types are planned for a later "
+                             "module)");
 }
 
 }  // namespace

@@ -95,11 +95,50 @@ bool OdpsSchemaConverter::isSupportedScalar(int typeCode) {
   case OdpsTypeCode::kString:
   case OdpsTypeCode::kVarchar:
   case OdpsTypeCode::kChar:
+  // Module 4 (T401): temporal types map to NeuG kDate/kTimestampMs and DECIMAL
+  // maps to DOUBLE (lossy; see convertScalarType).
+  case OdpsTypeCode::kDecimal:
+  case OdpsTypeCode::kDate:
+  case OdpsTypeCode::kDatetime:
+  case OdpsTypeCode::kTimestamp:
+  case OdpsTypeCode::kTimestampNtz:
     return true;
   default:
     return false;
   }
 }
+
+namespace {
+
+// Actionable, per-type explanation for a MaxCompute type the ODPS reader
+// cannot materialize (module 4, task T404). Each message names the concrete
+// NeuG limitation and, where one exists, a workaround the user can apply on
+// the MaxCompute side.
+std::string unsupportedReason(int typeCode) {
+  switch (static_cast<OdpsTypeCode>(typeCode)) {
+  case OdpsTypeCode::kBinary:
+    return "NeuG's read path has no binary/blob type (DataTypeId::kBlob is "
+           "unavailable), so raw bytes cannot be decoded losslessly; encode "
+           "the column as STRING (e.g. BASE64) in MaxCompute to read it";
+  case OdpsTypeCode::kIntervalYearMonth:
+  case OdpsTypeCode::kIntervalDayTime:
+    return "INTERVAL values are not decoded from the ODPS Arrow stream yet; "
+           "cast the column to a numeric or STRING in MaxCompute to read it";
+  case OdpsTypeCode::kArray:
+  case OdpsTypeCode::kMap:
+  case OdpsTypeCode::kStruct:
+    return "complex/nested types are not supported by the ODPS reader, which "
+           "decodes flat scalar columns only; flatten or extract the needed "
+           "fields into scalar columns in MaxCompute";
+  case OdpsTypeCode::kJson:
+    return "the Storage API read path does not support JSON columns; cast the "
+           "column to STRING in MaxCompute to read it";
+  default:
+    return "this MaxCompute type is not recognized by the ODPS reader";
+  }
+}
+
+}  // namespace
 
 std::shared_ptr<::common::DataType> OdpsSchemaConverter::convertScalarType(
     int typeCode, const std::string& columnName) {
@@ -130,15 +169,40 @@ std::shared_ptr<::common::DataType> OdpsSchemaConverter::convertScalarType(
   case OdpsTypeCode::kChar:
     type->mutable_string()->mutable_var_char();
     return type;
+  // MaxCompute DECIMAL(p,s) has no exact NeuG read-path representation: the
+  // proto->internal converter (NeuGTypeConverter::convert) has no decimal case
+  // and DataTypeId has neither a decimal nor a kBlob, so a Decimal128 cannot
+  // flow through a LOAD FROM scan. v1 maps DECIMAL to DOUBLE so such columns
+  // stay readable; this is LOSSY -- values with more than ~15-17 significant
+  // digits (ODPS DECIMAL defaults to (38,18)) lose precision. See
+  // extension/odps/README.md ("Type mapping"). The arrow_bridge decodes the
+  // Arrow `d:p,s` decimal128 column to a double to match this declared type.
+  case OdpsTypeCode::kDecimal:
+    type->set_primitive_type(::common::PrimitiveType::DT_DOUBLE);
+    return type;
+  // Temporal types: DATE -> NeuG kDate; DATETIME/TIMESTAMP/TIMESTAMP_NTZ ->
+  // NeuG kTimestampMs (millisecond precision). The arrow_bridge already decodes
+  // the Arrow date32 (`tdD`) and timestamp (`ts{s,m,u,n}`) layouts; TIMESTAMP
+  // nanos/micros are truncated to milliseconds and no timezone shift is
+  // applied (see extension/odps/README.md, "Precision and timezone").
+  case OdpsTypeCode::kDate:
+    type->mutable_temporal()->mutable_date32();
+    return type;
+  case OdpsTypeCode::kDatetime:
+  case OdpsTypeCode::kTimestamp:
+  case OdpsTypeCode::kTimestampNtz:
+    type->mutable_temporal()->mutable_timestamp();
+    return type;
   default:
     break;
   }
   THROW_INVALID_ARGUMENT_EXCEPTION(
       "ODPS_SCAN: column \"" + columnName + "\" has MaxCompute type " +
-      typeName(typeCode) +
-      ", which is not supported in v1 (only integer/float/double/boolean/"
-      "string types are; decimal, temporal, binary and complex types are "
-      "planned for module 4, task T401)");
+      typeName(typeCode) + ", which the ODPS reader cannot read: " +
+      unsupportedReason(typeCode) +
+      ". Supported types: integer widths (TINYINT/SMALLINT/INT/BIGINT), "
+      "FLOAT, DOUBLE, BOOLEAN, STRING/VARCHAR/CHAR, DATE, "
+      "DATETIME/TIMESTAMP, and DECIMAL (read as DOUBLE, lossy).");
 }
 
 std::shared_ptr<reader::EntrySchema> OdpsSchemaConverter::convertColumns(

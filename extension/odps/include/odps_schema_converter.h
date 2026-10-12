@@ -87,17 +87,23 @@ struct OdpsColumnDesc {
  *  - an SDK-gated `sniffTableSchema` that pulls the live `IODPSTableSchema`
  *    through the ODPS core API and feeds it into the pure core.
  *
- * v1 supports the basic scalar types only (integer widths, float, double,
- * boolean, string/varchar/char). Decimal, temporal, binary and complex types
- * (array/map/struct/json) are deferred to module 4 (T401) and raise a clear
- * "not yet supported" error rather than silently coercing.
+ * Supported MaxCompute types: integer widths (TINYINT/SMALLINT/INT/BIGINT),
+ * FLOAT, DOUBLE, BOOLEAN, STRING/VARCHAR/CHAR, DATE, DATETIME/TIMESTAMP/
+ * TIMESTAMP_NTZ, and DECIMAL. DECIMAL is read as DOUBLE (lossy beyond ~15-17
+ * significant digits) and TIMESTAMP nanos/micros are truncated to
+ * milliseconds with no timezone shift -- see extension/odps/README.md
+ * ("Type mapping" / "Precision and timezone"). Binary, interval and complex
+ * types (array/map/struct/json) have no NeuG read-path representation and
+ * raise a clear, actionable "unsupported" error rather than silently coercing.
  */
 class OdpsSchemaConverter {
  public:
   // Human-readable MaxCompute type name for error messages (e.g. "DECIMAL").
   static std::string typeName(int typeCode);
 
-  // Whether a type code is handled by the v1 scalar mapping.
+  // Whether a type code maps to a NeuG read-path type (integer/float/double/
+  // boolean/string/date/timestamp, plus decimal-as-double). Binary, interval
+  // and complex types (array/map/struct/json) return false.
   static bool isSupportedScalar(int typeCode);
 
   /**
