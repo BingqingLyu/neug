@@ -494,11 +494,13 @@ TEST(OdpsSchemaConverterTest, MapsDecimalToDouble) {
 }
 
 TEST(OdpsSchemaConverterTest, MapsTemporalTypes) {
-  // DATE -> NeuG date32.
+  // DATE -> NeuG canonical temporal.date (matches inferCommonType(kDate), so
+  // the sniffed schema round-trips through the planner byte-identically and
+  // the schema-mismatch guard does not false-positive on `RETURN *`).
   auto date =
       OdpsSchemaConverter::convertScalarType(code(OdpsTypeCode::kDate), "c");
   ASSERT_TRUE(date->has_temporal());
-  EXPECT_TRUE(date->temporal().has_date32());
+  EXPECT_TRUE(date->temporal().has_date());
   // DATETIME/TIMESTAMP/TIMESTAMP_NTZ all collapse to NeuG timestamp (millis).
   for (auto t : {OdpsTypeCode::kDatetime, OdpsTypeCode::kTimestamp,
                  OdpsTypeCode::kTimestampNtz}) {
@@ -610,6 +612,30 @@ TEST(OdpsSchemaConverterTest, SameScalarTypeEquivalence) {
   EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(*i64, *i32));
   EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(*str, *i64));
   EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(*dbl, *i64));
+}
+
+TEST(OdpsSchemaConverterTest, SameScalarTypeNormalizesTemporalEmitters) {
+  // The ODPS reader declares DATE/TIMESTAMP in inferCommonType's dialect
+  // (temporal.date / temporal.timestamp), but the optimizer rewrites the scan
+  // schema via gopt, which emits temporal.date_time for the same logical
+  // TIMESTAMP. sameScalarType must normalize these so a plain `RETURN *` on a
+  // temporal column is not falsely rejected as a rewritten-CAST mismatch.
+  ::common::DataType dateC;  // inferCommonType/gopt DATE
+  dateC.mutable_temporal()->mutable_date();
+  ::common::DataType date32;  // Arrow-flavored DATE
+  date32.mutable_temporal()->mutable_date32();
+  ::common::DataType tsC;  // inferCommonType TIMESTAMP
+  tsC.mutable_temporal()->mutable_timestamp();
+  ::common::DataType tsG;  // gopt TIMESTAMP (date_time)
+  tsG.mutable_temporal()->mutable_date_time();
+
+  // Same logical type across the two emitters compares equal.
+  EXPECT_TRUE(OdpsSchemaConverter::sameScalarType(dateC, date32));
+  EXPECT_TRUE(OdpsSchemaConverter::sameScalarType(tsC, tsG));
+  EXPECT_TRUE(OdpsSchemaConverter::sameScalarType(tsG, tsC));
+  // Different logical temporal types are still distinguished.
+  EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(dateC, tsC));
+  EXPECT_FALSE(OdpsSchemaConverter::sameScalarType(tsG, date32));
 }
 
 TEST(OdpsSchemaConverterTest, FindSchemaMismatchDetectsRewrittenCastType) {

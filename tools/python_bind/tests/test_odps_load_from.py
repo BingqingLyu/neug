@@ -124,6 +124,9 @@ COPY-from-(LOAD FROM) source/target type mismatch for every source (CSV too).
 
 import os
 from collections import Counter
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 
 import pytest
 
@@ -814,12 +817,22 @@ def test_odps_live_all_types_round_trip(tmp_path):
         assert str(row[8]) == "test_string_0"  # c_string  -> STRING
         assert str(row[9]) == "vchar_a"  # c_varchar -> STRING
         assert str(row[10]) == "chara"  # c_char    -> STRING
-        assert str(row[11]) == "2023-01-15"  # c_date -> DATE
-        # DATETIME/TIMESTAMP -> millisecond TIMESTAMP; assert to the second so
-        # the check is robust to sub-second rendering (ms precision is covered
-        # by the host unit tests).
-        assert str(row[12]).startswith("2023-01-15 09:15:30")  # c_datetime
-        assert str(row[13]).startswith("2023-01-15 09:15:30")  # c_timestamp
+        assert str(row[11]) == "2023-01-15"  # c_date -> DATE (no tz shift)
+        # DATETIME/TIMESTAMP -> millisecond TIMESTAMP. MaxCompute stores them as
+        # instants in the project timezone (odps.sql.timezone; the fixture
+        # project graphscope_dev is Asia/Shanghai, UTC+8) and the Storage API
+        # transmits the epoch instant, which the reader renders as a UTC
+        # wall-clock (it drops the Arrow tz annotation; NeuG's TIMESTAMP is
+        # timezone-naive). So the inserted 09:15:30 (+08:00) reads back as
+        # 01:15:30 UTC -- the SAME instant, not a corrupted value -- with the
+        # .123 ms fraction preserved on c_timestamp. See the extension docs,
+        # "Precision and timezone".
+        project_tz = timezone(timedelta(hours=8))
+        inserted = datetime(2023, 1, 15, 9, 15, 30, tzinfo=project_tz)
+        expected_utc = inserted.astimezone(timezone.utc).replace(tzinfo=None)
+        assert row[12] == expected_utc  # c_datetime -> UTC instant (to second)
+        # c_timestamp keeps millisecond precision (.123 -> 123000 microseconds).
+        assert row[13] == expected_utc.replace(microsecond=123000)
     finally:
         conn.close()
         db.close()
