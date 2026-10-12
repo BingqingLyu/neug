@@ -13,6 +13,7 @@ The following extensions are currently supported or planned to be supported in N
 | Category        | Extension                        | Description                                                               |
 | --------------- | -------------------------------- | ------------------------------------------------------------------------- |
 | Data Source     | [PARQUET](load_parquet.md)          | Import and export data in Parquet format                                  |
+| Data Source     | [ODPS / MaxCompute](odps.md)        | Read Alibaba Cloud MaxCompute (ODPS) tables via the Storage API (read-only, requires the ODPS SDK build) |
 | File System     | [HTTP/HTTPS/S3/OSS](load_httpfs.md) | Provide data sources over HTTP, HTTPS, S3, and OSS                         |
 | Graph Algorithm | [GDS](load_gds.md)                  | Graph Data Science algorithms (PageRank, BFS, SSSP, WCC, LCC, K-Core, Label Propagation, Louvain, Leiden) |
 | Graph Query     | [Pattern Match](pattern_match.md)    | Subgraph pattern matching with exact DAF matching and sampled FaSTest matching |
