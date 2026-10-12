@@ -32,3 +32,15 @@ diff --git a/util/crc32c.cpp b/util/crc32c.cpp
  }
  
  } // namespace util
+diff --git a/cmake/deps/Arrow.cmake b/cmake/deps/Arrow.cmake
+--- a/cmake/deps/Arrow.cmake
++++ b/cmake/deps/Arrow.cmake
+@@ -24,6 +24,8 @@
+         -DARROW_JEMALLOC=OFF
+         -DARROW_MIMALLOC=OFF
+         -DARROW_WITH_SNAPPY=OFF
++        -DARROW_WITH_LZ4=ON
++        -DARROW_WITH_ZSTD=ON
+         -DARROW_BUILD_TESTS=OFF
+         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+         -DCMAKE_CXX_FLAGS=${ODPS_DEP_CXX_ABI_FLAGS}

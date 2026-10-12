@@ -76,6 +76,7 @@ struct Reader {
   ITableReadSessionPtr session;
   ISplitsPtr splits;
   ReadOptions readOptions;
+  std::vector<ISplitPtr> splitList;  // splits materialized per the session mode
   int32_t splitCount = 0;
   int32_t splitIndex = 0;      // next split to open
   IArrowReadStreamPtr stream;  // currently-open stream (null between splits)
@@ -325,11 +326,33 @@ extern "C" OdpsGlueReader* odps_glue_open_reader(
       return nullptr;
     }
 
+    // Materialize the splits according to the session's split mode, because the
+    // two modes expose disjoint accessors:
+    //   SIZE / BUCKET: GetSplitCount() + GetSplit(index).
+    //   ROW_OFFSET (the SDK default, used when no split_size_mb hint is given):
+    //     GetSplitCount()/GetSplit(index) throw; the whole read is one split
+    //     over [0, GetRecordCount()), matching the SDK's instance_read example.
+    // Caching the split list here keeps next_batch mode-agnostic.
+    std::vector<ISplitPtr> splitList;
+    if (splits->GetSplitMode() == SplitMode::ROW_OFFSET) {
+      const int64_t recordCount = splits->GetRecordCount();
+      if (recordCount > 0) {
+        splitList.push_back(splits->GetSplit(0, recordCount));
+      }
+    } else {
+      const int32_t count = splits->GetSplitCount();
+      splitList.reserve(count > 0 ? count : 0);
+      for (int32_t i = 0; i < count; ++i) {
+        splitList.push_back(splits->GetSplit(i));
+      }
+    }
+
     OdpsGlueReader* reader = new OdpsGlueReader();
     reader->session = session;
     reader->splits = splits;
     reader->readOptions = readOptions;
-    reader->splitCount = splits->GetSplitCount();
+    reader->splitList = std::move(splitList);
+    reader->splitCount = static_cast<int32_t>(reader->splitList.size());
     reader->splitIndex = 0;
     return reader;
   } catch (const OdpsException& e) {
@@ -403,7 +426,7 @@ extern "C" int odps_glue_reader_next_batch(OdpsGlueReader* reader,
         if (reader->splitIndex >= reader->splitCount) {
           return 0;  // end of data: every split exhausted
         }
-        ISplitPtr split = reader->splits->GetSplit(reader->splitIndex);
+        ISplitPtr split = reader->splitList[reader->splitIndex];
         ++reader->splitIndex;
         reader->stream = reader->session->BuildTableReadStream()
                              ->SetSplit(split)
