@@ -315,6 +315,27 @@ std::string OdpsSchemaConverter::findSchemaMismatch(
   return "";
 }
 
+std::string OdpsSchemaConverter::unsupportedTableKindReason(
+    int isExternalTable, int isVirtualView, const std::string& tableName) {
+  if (isExternalTable != 0) {
+    return "ODPS_SCAN: \"" + tableName +
+           "\" is an EXTERNAL TABLE: its data lives in external object "
+           "storage (e.g. OSS), not in MaxCompute-managed storage, so the "
+           "Storage API read path cannot materialize it. Read the underlying "
+           "files directly instead (e.g. LOAD FROM \"oss://...\" via the "
+           "httpfs + parquet/csv extensions).";
+  }
+  if (isVirtualView != 0) {
+    return "ODPS_SCAN: \"" + tableName +
+           "\" is a LOGICAL VIEW: it stores no physical data of its own (it "
+           "is a saved SELECT the engine would have to run), so the Storage "
+           "API read path cannot materialize it. Materialize it first "
+           "(CREATE TABLE ... AS SELECT, or a MATERIALIZED VIEW) and read "
+           "that table instead.";
+  }
+  return "";
+}
+
 std::shared_ptr<reader::EntrySchema> OdpsSchemaConverter::sniffTableSchema(
     OdpsConnection& connection, const OdpsSourceDesc& source) {
 #if defined(ODPS_SDK_ENABLE_ARROW)
@@ -358,6 +379,18 @@ std::shared_ptr<reader::EntrySchema> OdpsSchemaConverter::sniffTableSchema(
             "." + source.table,
         message,
         {connection.options().accessId, connection.options().accessKey});
+  }
+
+  // Reject table shapes the Storage API read path cannot materialize before
+  // any read is attempted (module 4, task T404). An external table keeps its
+  // data in object storage and a logical view has no physical data, so both
+  // would otherwise fail as an empty/garbage scan; surface an actionable error
+  // naming the kind and a workaround instead. Free the glue result first.
+  const std::string tableKindReason = unsupportedTableKindReason(
+      result.is_external_table, result.is_virtual_view, source.table);
+  if (!tableKindReason.empty()) {
+    odps_glue_schema_free(&result);
+    THROW_INVALID_ARGUMENT_EXCEPTION(tableKindReason);
   }
 
   std::vector<OdpsColumnDesc> columns;

@@ -154,6 +154,26 @@ class OdpsSchemaConverter {
                                         const reader::EntrySchema& native);
 
   /**
+   * @brief Rejection reason for a table shape the Storage API cannot read.
+   *
+   * Pure/SDK-free. The Storage API read path materializes only a physical,
+   * MaxCompute-managed table, so two shapes are rejected before any read is
+   * attempted: an EXTERNAL TABLE (its data lives in external object storage,
+   * e.g. OSS, not in MaxCompute storage) and a LOGICAL VIEW (a saved SELECT
+   * with no physical data of its own). The two flags come from
+   * `IODPSTable::IsExternalTable()` / `IsVirtualView()` via the glue schema
+   * sniff. Returns an actionable message naming the table kind and a
+   * workaround, or an empty string when the table is readable (standard /
+   * partitioned / clustered / Delta / materialized-view tables all return
+   * empty, since only external tables and virtual views carry these flags).
+   * Kept SDK-free so the message is unit-testable on a host built without the
+   * SDK, where `sniffTableSchema` cannot reach a live table.
+   */
+  static std::string unsupportedTableKindReason(int isExternalTable,
+                                                int isVirtualView,
+                                                const std::string& tableName);
+
+  /**
    * @brief Fetch the live table schema and convert it (SDK-gated).
    *
    * Uses the ODPS core API (`IODPS::Create(conf, project)` ->

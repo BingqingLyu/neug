@@ -67,13 +67,29 @@ typedef struct OdpsGlueColumn {
   int nullable;      // 0 or 1
 } OdpsGlueColumn;
 
-// Result of a schema sniff.
-//  - success: columns/count filled, error == NULL;
-//  - failure: columns == NULL, count == 0, error == heap message.
-// Release with odps_glue_schema_free in both cases.
+// Result of a schema sniff. Three outcomes, all released with
+// odps_glue_schema_free:
+//  - readable table (rc 0): columns/count filled, both table-kind flags 0,
+//    error == NULL;
+//  - rejected kind (rc 0): is_external_table / is_virtual_view set, columns ==
+//    NULL and count == 0 (the caller rejects on the kind alone, so the column
+//    schema is never read);
+//  - failure (rc != 0): columns == NULL, count == 0, error == heap message.
 typedef struct OdpsGlueSchema {
   OdpsGlueColumn* columns;
   size_t count;
+  // Table-kind flags from IODPSTable (module 4, task T404). The Storage API
+  // read path materializes only a physical MaxCompute-managed table, so the
+  // caller rejects these two kinds at sniff with an actionable error:
+  //   is_external_table != 0 -> EXTERNAL TABLE (data lives in OSS, not in
+  //     MaxCompute storage); read the underlying object-storage files instead.
+  //   is_virtual_view != 0 -> logical VIEW (no physical data; a stored SELECT
+  //     the engine would have to run); materialize it and read that instead.
+  // Both stay 0 for standard / partitioned / clustered / Delta /
+  // materialized-view tables, which are all readable. Meaningful only on
+  // success (rc == 0).
+  int is_external_table;
+  int is_virtual_view;
   char* error;
 } OdpsGlueSchema;
 

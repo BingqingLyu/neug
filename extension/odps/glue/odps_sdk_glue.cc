@@ -160,6 +160,8 @@ extern "C" int odps_glue_sniff_schema(OdpsGlueConnection* conn,
   if (out != nullptr) {
     out->columns = nullptr;
     out->count = 0;
+    out->is_external_table = 0;
+    out->is_virtual_view = 0;
     out->error = nullptr;
   }
   if (conn == nullptr || out == nullptr) {
@@ -176,6 +178,19 @@ extern "C" int odps_glue_sniff_schema(OdpsGlueConnection* conn,
           dupString(std::string("table not found: ") + orEmpty(project) + "." +
                     orEmpty(schema) + "." + orEmpty(table));
       return 1;
+    }
+    // Resolve the table kind before reading the column schema (module 4, task
+    // T404). The caller rejects external tables and logical views at sniff, and
+    // for those we must not depend on GetSchema() succeeding -- a view or an
+    // external table may not expose a readable column schema through this path.
+    // Both flags come from metadata already loaded by Get(), so checking them
+    // here is cheap and triggers no extra round-trip. On a rejected kind we
+    // return success with the flags set and no columns; the caller throws
+    // before it ever looks at the (empty) column list.
+    out->is_external_table = tablePtr->IsExternalTable() ? 1 : 0;
+    out->is_virtual_view = tablePtr->IsVirtualView() ? 1 : 0;
+    if (out->is_external_table != 0 || out->is_virtual_view != 0) {
+      return 0;
     }
     IODPSTableSchemaPtr tableSchema = tablePtr->GetSchema();
     if (!tableSchema) {
@@ -203,6 +218,8 @@ extern "C" int odps_glue_sniff_schema(OdpsGlueConnection* conn,
     }
     out->columns = arr;
     out->count = count;
+    // The table-kind flags were already resolved above; a readable table keeps
+    // both at 0, so only the columns remain to publish here.
     return 0;
   } catch (const OdpsException& e) {
     out->error = dupString(formatOdpsException(e));
