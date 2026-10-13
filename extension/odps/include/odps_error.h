@@ -39,6 +39,7 @@ enum class OdpsErrorCategory {
   kSessionTimeout,  // request or read-session timeout / expiry
   kQuota,           // Storage API quota or throttling exceeded
   kBadRequest,      // SDK rejected the address/parameters as malformed
+  kUnsupported,     // table shape / operation not supported by the read path
 };
 
 /**
@@ -74,8 +75,8 @@ class OdpsError {
 
   // Convenience: redact, attribute and throw the NeuG exception that matches
   // the category (authentication -> PermissionDenied, not-found -> NotFound,
-  // network -> Connection, bad-request -> InvalidArgument, else IO). Marked
-  // [[noreturn]] so callers need no dead-code path after it.
+  // network -> Connection, bad-request/unsupported -> InvalidArgument, else
+  // IO). Marked [[noreturn]] so callers need no dead-code path after it.
   [[noreturn]] static void throwAttributed(
       const std::string& operation, const std::string& glueMessage,
       const std::vector<std::string>& secrets = {});

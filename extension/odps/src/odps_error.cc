@@ -68,6 +68,11 @@ const char* categoryHint(OdpsErrorCategory category) {
   case OdpsErrorCategory::kBadRequest:
     return "ODPS rejected the request as malformed -- check the odps:// "
            "address, project/schema/table and partition spec";
+  case OdpsErrorCategory::kUnsupported:
+    return "the target table shape or operation is not supported by the ODPS "
+           "Storage API read path -- e.g. a transactional (Delta 2.0) table "
+           "cannot be split by row count in this version; see the "
+           "ODPS-reported reason for the specific limitation";
   case OdpsErrorCategory::kUnknown:
   default:
     return "the ODPS request failed";
@@ -117,6 +122,13 @@ OdpsErrorCategory OdpsError::classify(const std::string& glueMessage) {
                          "odps-0130131", "odps-0110061"})) {
     return OdpsErrorCategory::kNotFound;
   }
+  // Tested before kQuota: ODPS-0420411 ("split by row count is not supported
+  // for transactional2.0 table") would otherwise be swept into the quota bucket
+  // by the broad "odps-0420" prefix and misdirect the user to check quotas.
+  if (containsAny(text, {"notsupported", "transactional2.0",
+                         "splitbyrowcount", "odps-0420411"})) {
+    return OdpsErrorCategory::kUnsupported;
+  }
   if (containsAny(text, {"quota", "flowexceeded", "flowcontrol", "throttl",
                          "toomanyrequests", "ratelimit", "requestthrottled",
                          "resourcenotenough", "limitexceeded", "odps-0420"})) {
@@ -156,6 +168,8 @@ const char* OdpsError::categoryName(OdpsErrorCategory category) {
     return "Quota";
   case OdpsErrorCategory::kBadRequest:
     return "BadRequest";
+  case OdpsErrorCategory::kUnsupported:
+    return "Unsupported";
   case OdpsErrorCategory::kUnknown:
   default:
     return "Unknown";
@@ -202,6 +216,7 @@ void OdpsError::throwAttributed(const std::string& operation,
   case OdpsErrorCategory::kNetwork:
     THROW_CONNECTION_EXCEPTION(message);
   case OdpsErrorCategory::kBadRequest:
+  case OdpsErrorCategory::kUnsupported:
     THROW_INVALID_ARGUMENT_EXCEPTION(message);
   case OdpsErrorCategory::kSessionTimeout:
   case OdpsErrorCategory::kQuota:
