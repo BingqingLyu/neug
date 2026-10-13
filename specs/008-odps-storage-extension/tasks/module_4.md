@@ -71,6 +71,39 @@ DATE（date32，纯日历日）**不偏移**。已据此修正 `doc/source/exten
 **状态**：**DEFERRED 到 SDK-ON 容器轮次**——聚簇表/Delta/物化视图的读取验证依赖真连 MaxCompute 与 SDK
 数据面（`ODPS_SDK_ENABLE_ARROW` 门控），arm64 宿主 SDK-OFF 构建不编译、不可验证。
 
+**状态（聚簇读取 live 用例已写，Delta/物化视图待探测）**：聚簇表读取 live 用例
+`test_odps_live_clustered_table_read` 已写（gated）——读 `neug_odps_clustered`（`CLUSTERED BY (id) INTO 4
+BUCKETS`，与 neug_odps_item 同 5 行），断言列名/行集合与 item 一致，证明全量扫描读遍所有桶、桶布局不改变
+可见行（不设 `mRequiredBucketIds` 即读全部桶）。Delta 表 `neug_odps_delta`（transactional）与物化视图
+`neug_odps_mv` 的建表 DDL 已写入模块 docstring，但**读取断言暂不接线**：Storage API 能否物化读取 Delta/物化
+视图属真连才能确认的行为，须待用户建表后先探测实际行为再决定归为「支持」还是「限制」，避免对未观测行为写死
+断言。三张表的真连读取验证待用户建 `neug_odps_clustered`/`neug_odps_delta`/`neug_odps_mv`。
+
+**状态（SDK-ON 容器真连验证完成：物化视图可读、Delta 归限制、聚簇表待数据）**：用户建好 `neug_odps_view`/
+`neug_odps_delta`/`neug_odps_mv` 三表后，真连探测 + live 用例验证（`neug_odps_clustered` 建成空壳、
+`neug_odps_external` 未建成，二者本轮不测）：
+* **物化视图 `neug_odps_mv` 可读**——`IsVirtualView()` 对物化视图返回 false（它是物理表），不被表类型门控误拒，
+  Storage API 像普通表一样读回同 neug_odps_item 的 5 行；`test_odps_live_materialized_view_read` PASSED，是
+  `test_odps_live_logical_view_is_rejected`（逻辑视图被拒）的正向对照——两种视图被正确区分。
+* **逻辑视图 `neug_odps_view` 正确拒绝**——真连报精确的 "LOGICAL VIEW … Materialize it first" 消息
+  （`test_odps_live_logical_view_is_rejected` PASSED），证明 T404 表类型门控在真连数据面有效。
+* **Delta（transactional2.0）`neug_odps_delta` 读取失败，归为限制**——真连报 `[ODPS-0420411] split by row
+  count is not supported for transactional2.0 table`：v1 对未配 split_size 的读走 ROW_OFFSET（按行切分，glue
+  open_reader 取 GetRecordCount/GetSplit(0,n)），而 transactional2.0 表不支持按 row count 切分。
+  `test_odps_live_transactional_delta_table_reports_error` 钉住当前「可诊断报错」行为（断言消息含
+  transactional/split），注明将来若改走 SIZE split 使其可读则翻转为行断言。修复需 glue 对 transactional 表改用
+  SIZE split mode（有回退风险、须重验所有已通过表），待用户拍板。
+* **附带发现（错误分类误导，已本轮修复）**：Delta 原始码 `ODPS-0420411` 因 `odps_error.cc` classify 的 kQuota 词表含过宽前缀
+  `odps-0420` 被误归「quota exceeded」，误导用户查配额（真实是 split 不兼容）。已新增 `OdpsErrorCategory::kUnsupported`
+  分类，在 kQuota 之前匹配 `transactional2.0`/`splitbyrowcount`/`odps-0420411`/`notsupported`，`throwAttributed`
+  把它与 kBadRequest 一并映射为 `InvalidArgumentException`（错误码 1014→1009）。真连实测 delta 报错现为
+  「the target table shape or operation is not supported … transactional (Delta 2.0) table cannot be split by row
+  count …」并保留原始 `(ODPS reported: [ODPS-0420411 …])`，不再出现 quota 字样。新增单测
+  `ClassifiesTransactionalDeltaAsUnsupportedNotQuota`（钉住分类为 kUnsupported 而非 kQuota + hint/原始消息）与
+  `ThrowAttributedMapsCategoryToExceptionType` 的 InvalidArgument 断言。
+* **聚簇表 `neug_odps_clustered`**：CREATE 成功但 INSERT 未落数据（疑走不支持写入的交互式 quota），live 用例对
+  空表 skip（数据就绪即自动纳入验证）；外部表 `neug_odps_external` 未建成，live 用例对 not-found skip。
+
 ## [F008-T404] 不支持项显式报错
 
 **description**: 对外部表、逻辑视图、JSON 列返回明确"不支持"错误，指明原因 + 可行替代路径，绝不静默产出错误数据
@@ -93,6 +126,21 @@ schema sniff 阶段即被拒，`test_odps_live_unsupported_column_type_reports_e
 （payload）、类型（JSON）、STRING workaround，证明 T404 列类型拒绝在真连数据面有效。**表类型**识别
 （外部表/逻辑视图）仍 DEFERRED（需扩 glue + SDK 元数据回传表类型）。
 
+**状态（表类型识别已实现，arm64 双构建验证通过）**：外部表/逻辑视图识别已落地。扩 glue ABI 缝
+`OdpsGlueSchema` 加 `is_external_table`/`is_virtual_view`；`odps_glue_sniff_schema` 在 `Get()` 之后、
+`GetSchema()` **之前**用 `IODPSTable::IsExternalTable()`/`IsVirtualView()` 解析表类型，命中即早返回、不读列
+schema（使拒绝不依赖视图/外部表的 `GetSchema()` 行为，`schema_free` 对 columns=NULL 安全）。`OdpsSchemaConverter`
+新增 **SDK-free** 纯函数 `unsupportedTableKindReason(isExternalTable, isVirtualView, tableName)`（返回非空即拒绝
+原因），`sniffTableSchema` 在错误检查后、构造列前调用，命中则先 `odps_glue_schema_free` 再抛
+`InvalidArgumentException`。错误消息含表名 + 表类型 + 替代路径（外部表→改读 OSS 底层文件经 httpfs+parquet/csv；
+逻辑视图→先物化 `CREATE TABLE AS SELECT` / 物化视图），并点明源于 Storage API 只读物化托管表的限制（对齐
+details）。因该函数 SDK-free，新增单测 `UnsupportedTableKindMessageIsActionable` 在 **SDK-OFF 宿主可跑**（校验消息
+含表名/`EXTERNAL TABLE`/`OSS` 与 `LOGICAL VIEW`/`MATERIALIZED VIEW`，且可读类型返回空）。odps_extension_test：
+SDK-OFF 宿主 **99/99**、SDK-ON 容器 **97/97** 全绿。文档：`extension/odps/README.md` 加「Table kinds」节、
+`doc/source/extensions/odps.md` 加「Unsupported Table Kinds」节 + Limitations 补「Managed tables only」。live 用例
+`test_odps_live_logical_view_is_rejected`/`test_odps_live_external_table_is_rejected` 已写（gated），**真连拒绝验证
+待用户建 `neug_odps_view`/`neug_odps_external` 两表**。
+
 ## [F008-T405] Module 4 单测 + 集成测
 
 **description**: 覆盖完整类型映射、精度/时区边界与不支持项（对齐 spec M4 Test Strategy）。
@@ -105,7 +153,8 @@ schema sniff 阶段即被拒，`test_odps_live_unsupported_column_type_reports_e
 `UnsupportedTypeMessageIsActionable`（converter）+ `ConvertsDecimal128ToDouble`/`RejectsMalformedDecimalFormat`/
 `RejectsNon128BitDecimal`（bridge，含 addDecimal128 builder），并同步更新受 DECIMAL/temporal 现被支持影响的
 `SupportedScalarClassification`/`UnsupportedTypesThrow`/`ConvertColumnsPropagatesUnsupportedType`/
-`RejectsUnsupportedChildFormat`；odps_extension_test SDK-OFF 宿主 97/97 全绿。**集成测（全类型样表端到端、外部表/视图/JSON
+`RejectsUnsupportedChildFormat`。T403 错误分类精确化再补 `ClassifiesTransactionalDeltaAsUnsupportedNotQuota`
+（kUnsupported，SDK-free）。odps_extension_test：**SDK-OFF 宿主 99/99、SDK-ON 容器 97/97** 全绿。**集成测（全类型样表端到端、外部表/视图/JSON
 拒绝、聚簇/Delta/物化视图）DEFERRED 到 SDK-ON 容器 + 真凭证轮次。**
 
 **集成测 fixture 已写入（gated，待容器验证）**：`tools/python_bind/tests/test_odps_load_from.py` 新增两张 live
@@ -123,3 +172,29 @@ arm64 宿主 SDK-OFF 自动 skip（15 collected / 3 routing passed / 12 skipped�
 真连核实：DECIMAL 的 Arrow `d:p,s` decimal128 正确解码为 DOUBLE；DATETIME/TIMESTAMP 经 Storage API 为
 UTC instant（见 T402 修正）；JSON 列 SDK type_code 触发列类型拒绝。C++ odps_extension_test SDK-ON 95/95。
 聚簇表/Delta/物化视图与外部表/逻辑视图仍 DEFERRED（见 T403/T404）。
+
+**状态（表类型/聚簇 live 用例补入，套件扩容至 18）**：本轮为 T403/T404 新增 3 个 gated live 用例
+（`test_odps_live_clustered_table_read`、`test_odps_live_logical_view_is_rejected`、
+`test_odps_live_external_table_is_rejected`）+ 5 张 fixture 表 DDL（clustered/delta/mv/view/external）写入模块
+docstring。Python 套件由 15 扩到 **18 collected**；SDK-OFF 宿主 3 routing passed / 15 skipped（新 live 用例正确
+gated skip）、black/isort/flake8 clean。C++ odps_extension_test 加 `UnsupportedTableKindMessageIsActionable` 后
+SDK-OFF 宿主 **98/98**、SDK-ON 容器 **96/96**。新 live 用例的真连通过待用户建表（见 T403/T404）。
+
+**状态（Delta/物化视图 live 用例补入，套件扩容至 20，真连 15 passed / 5 skipped / 0 failed）**：据真连探测为 T403
+再补 2 个 gated live 用例——`test_odps_live_materialized_view_read`（物化视图读回 5 行，正向）与
+`test_odps_live_transactional_delta_table_reports_error`（Delta transactional2.0 读取失败的可诊断报错，钉住当前
+限制）；并给 clustered/view/external/mv/delta 五个「可选 fixture」用例加双层门控——`_skip_if_table_missing`（表
+not-found 则 skip）+ 空表 skip（clustered 建成空壳时），使未就绪的可选表优雅跳过而非 fail。Python 套件由 18 扩到
+**20 collected**；arm64 容器 SDK-ON 真连 **15 passed / 5 skipped / 0 failed**（skipped = clustered 空表 + external
+未建 + 3 routing smoke）；black/isort/flake8 clean。C++ 本轮未改动，odps_extension_test 仍 SDK-OFF 98/98、SDK-ON
+96/96。文档据真连更正：物化视图确认可读、Delta 由「支持」改归「限制」（README「Table kinds」+ odps.md
+「Unsupported Table Kinds」/Limitations）。
+
+**状态（Delta 错误分类精确化，Module 4 收尾）**：据用户拍板「Delta 归限制 + 错误分类本轮修精确」，新增
+`OdpsErrorCategory::kUnsupported`（详见 T403「附带发现」条）消除 `ODPS-0420411` 被误归 quota 的误导，delta 报错
+错误码由 1014（IO）变 1009（InvalidArgument）、提示直指「transactional (Delta 2.0) 表不能按 row count 切分」。
+odps_extension_test 加 `ClassifiesTransactionalDeltaAsUnsupportedNotQuota` 后：**SDK-OFF 宿主 99/99、SDK-ON 容器
+97/97**；arm64 容器 live 全套重跑仍 **15 passed / 5 skipped / 0 failed**（delta 用例断言消息关键词、不断言错误码，
+分类改动不影响）。此计数取代上一条块的 98/98、96/96。至此 Module 4（T401–T405）功能项全部落地；仅剩两类
+**非本轮代码**待办：① `neug_odps_clustered` 建成空壳、`neug_odps_external` 未建成——数据/表就绪后 live 用例自动纳入
+（当前优雅 skip）；② T305 分片并行读取仍 DEFERRED（阻塞于 NeuG 执行引擎尚无并行 scan / morsel 模型，见 module_3.md）。

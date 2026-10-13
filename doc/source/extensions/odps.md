@@ -184,6 +184,31 @@ rather than silently producing wrong values:
 | `ARRAY` / `MAP` / `STRUCT` | Complex/nested types are not supported; the reader decodes flat scalar columns only. | Flatten or extract the needed fields into scalar columns. |
 | `JSON` | The Storage API read path does not support JSON columns. | Cast the column to `STRING` in MaxCompute. |
 
+## Unsupported Table Kinds
+
+The Storage API read path materializes only a physical, MaxCompute-managed
+table. Standard, partitioned and hash-clustered tables, as well as materialized
+views, are readable. Two table kinds are rejected at schema sniff — before any
+data is read — with an actionable error, because the reader cannot materialize
+them:
+
+| Table kind | Why it is rejected | Workaround |
+| ---------- | ------------------ | ---------- |
+| Logical view (`CREATE VIEW`) | It stores no physical data of its own; it is a saved `SELECT` the engine would have to run. | Materialize it first (`CREATE TABLE ... AS SELECT`, or a materialized view) and read that table instead. |
+| External table (`CREATE EXTERNAL TABLE`) | Its data lives in external object storage (e.g. OSS), not in MaxCompute-managed storage. | Read the underlying files directly instead (e.g. `LOAD FROM "oss://..."` via the `httpfs` + `parquet`/`csv` extensions). |
+
+Both are rejected at sniff, so the failure is deterministic and does not depend
+on the external location being populated. This is a Storage API limitation: it
+reads MaxCompute-managed table storage, not arbitrary external files or stored
+queries.
+
+A **Delta (transactional 2.0) table** is a separate case: it clears the sniff
+but the read fails when a session is opened, because v1 splits an unconfigured
+read by row offset and ODPS rejects that for a transactional2.0 table ("split by
+row count is not supported for transactional2.0 table"). The real reason is
+surfaced rather than a silent partial scan; reading Delta tables needs a
+size-based split path that is not implemented yet.
+
 ## Limitations
 
 - **Read-only.** Import from MaxCompute is supported; export/write back is not.
@@ -191,6 +216,13 @@ rather than silently producing wrong values:
   enabled; the Storage API endpoint is normally VPC/intranet only.
 - **Flat scalar columns only.** Nested and unsupported types must be reshaped on
   the MaxCompute side (see [Unsupported Types](#unsupported-types)).
+- **Managed tables only.** Logical views and external tables are rejected at
+  schema sniff (see [Unsupported Table Kinds](#unsupported-table-kinds));
+  materialize a view, or read an external table's underlying OSS files, instead.
+- **Delta (transactional 2.0) tables not readable yet.** They pass the sniff but
+  fail at read-session open, because row-offset split is unsupported for
+  transactional2.0 tables; see
+  [Unsupported Table Kinds](#unsupported-table-kinds).
 
 For the source-level type mapping and build details, see
 `extension/odps/README.md` in the repository.

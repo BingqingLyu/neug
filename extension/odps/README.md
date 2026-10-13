@@ -49,6 +49,39 @@ rather than silently producing wrong values:
 | `ARRAY` / `MAP` / `STRUCT` | Complex/nested types are not supported; the reader decodes flat scalar columns only. | Flatten or extract the needed fields into scalar columns. |
 | `JSON` | The Storage API read path does not support JSON columns. | Cast the column to `STRING` in MaxCompute. |
 
+## Table kinds
+
+The Storage API read path materializes only a physical, MaxCompute-managed
+table. Most table shapes are readable; two are rejected at schema sniff (before
+any data is read) because the reader cannot materialize them. The rejection is
+an actionable error, never a silent empty/garbage scan:
+
+| Table kind | Readable | Why / workaround |
+|------------|----------|------------------|
+| Standard table | Yes | |
+| Partitioned table | Yes | Partition columns act as filters (`?partition=...`), not row columns. |
+| Hash-clustered table | Yes | A full scan reads every bucket; clustering is a physical layout detail only. |
+| Delta (transactional 2.0) table | No | Clears the kind gate but fails at read-session open: v1 splits by row offset, which ODPS rejects for transactional2.0 tables ("split by row count is not supported"). Needs a size-based split path (not yet implemented). |
+| Materialized view | Yes | Physically stores its result, so it reads like a standard table (it is *not* a virtual view). |
+| Logical view (`CREATE VIEW`) | No | Stores no physical data of its own (a saved SELECT the engine would have to run). Materialize it first (`CREATE TABLE ... AS SELECT`, or a materialized view) and read that table instead. |
+| External table (`CREATE EXTERNAL TABLE`) | No | Its data lives in external object storage (e.g. OSS), not in MaxCompute-managed storage. Read the underlying files directly instead (e.g. `LOAD FROM "oss://..."` via the `httpfs` + `parquet`/`csv` extensions). |
+
+The gate is driven by `IODPSTable::IsExternalTable()` / `IsVirtualView()`,
+surfaced through the glue schema sniff (`OdpsGlueSchema.is_external_table` /
+`is_virtual_view`) and turned into an error by
+`OdpsSchemaConverter::unsupportedTableKindReason`. It fires at sniff, so it is
+deterministic and never depends on the external location being populated.
+
+Two clarifications on the shapes above. A **materialized view** is *not* a
+virtual view (`IsVirtualView()` is false — it physically stores its result), so
+it clears the gate and reads like a standard table; only a logical
+`CREATE VIEW` is rejected. A **Delta (transactional 2.0) table** is a third
+case: it clears this gate (it is a physical table) but the read fails when the
+session opens, because v1 splits an unconfigured read by row offset and ODPS
+rejects that for transactional2.0 tables ("split by row count is not supported
+for transactional2.0 table"). The reader surfaces the real reason rather than a
+silent partial scan; supporting Delta needs a size-based split path.
+
 ## Precision and timezone
 
 ### DECIMAL precision
