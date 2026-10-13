@@ -533,6 +533,30 @@ TEST(OdpsSchemaConverterTest, UnsupportedTypeMessageIsActionable) {
   }
 }
 
+TEST(OdpsSchemaConverterTest, UnsupportedTableKindMessageIsActionable) {
+  // External tables and logical views cannot be materialized by the Storage
+  // API read path; the rejection must name the table and the kind and point
+  // at a workaround (module 4, task T404). The reason builder is SDK-free, so
+  // this also runs on the SDK-OFF host where sniffTableSchema cannot reach a
+  // live table.
+  const std::string external = OdpsSchemaConverter::unsupportedTableKindReason(
+      1, 0, "neug_odps_external");
+  EXPECT_NE(external.find("neug_odps_external"), std::string::npos) << external;
+  EXPECT_NE(external.find("EXTERNAL TABLE"), std::string::npos) << external;
+  EXPECT_NE(external.find("OSS"), std::string::npos) << external;
+
+  const std::string view =
+      OdpsSchemaConverter::unsupportedTableKindReason(0, 1, "neug_odps_view");
+  EXPECT_NE(view.find("neug_odps_view"), std::string::npos) << view;
+  EXPECT_NE(view.find("LOGICAL VIEW"), std::string::npos) << view;
+  EXPECT_NE(view.find("MATERIALIZED VIEW"), std::string::npos) << view;
+
+  // Readable kinds (standard / partitioned / clustered / Delta / materialized
+  // view) carry neither flag, so there is no rejection reason.
+  EXPECT_TRUE(
+      OdpsSchemaConverter::unsupportedTableKindReason(0, 0, "t").empty());
+}
+
 TEST(OdpsSchemaConverterTest, TypeNameIsHumanReadable) {
   EXPECT_EQ(OdpsSchemaConverter::typeName(code(OdpsTypeCode::kBigint)),
             "BIGINT");
@@ -739,6 +763,26 @@ TEST(OdpsErrorTest, ClassifiesTimeoutQuotaAndBadRequest) {
             OdpsError::classify("[InvalidParameter] bad partition spec"));
 }
 
+TEST(OdpsErrorTest, ClassifiesTransactionalDeltaAsUnsupportedNotQuota) {
+  // The real read-session failure for a Delta (transactional2.0) table. Its
+  // ODPS-0420411 code shares the broad "odps-0420" prefix with quota errors, so
+  // it must be tested before the quota bucket and land in kUnsupported instead
+  // of misdirecting the user to check quotas.
+  const std::string delta =
+      "[ODPS-0420411: Invalid argument - ] split by row count is not "
+      "supported for transactional2.0 table";
+  EXPECT_EQ(OdpsErrorCategory::kUnsupported, OdpsError::classify(delta));
+  EXPECT_NE(OdpsErrorCategory::kQuota, OdpsError::classify(delta));
+  EXPECT_STREQ("Unsupported",
+               OdpsError::categoryName(OdpsErrorCategory::kUnsupported));
+  // The attributed message keeps an actionable hint plus the original reason.
+  const std::string msg = OdpsError::attribute("ODPS_SCAN: open read session",
+                                               delta);
+  EXPECT_NE(msg.find("not supported by the ODPS Storage API read path"),
+            std::string::npos);
+  EXPECT_NE(msg.find("transactional2.0 table"), std::string::npos);
+}
+
 TEST(OdpsErrorTest, UnknownCodeFallsBackToUnknown) {
   EXPECT_EQ(OdpsErrorCategory::kUnknown,
             OdpsError::classify("[SomethingWeird] huh"));
@@ -777,6 +821,13 @@ TEST(OdpsErrorTest, ThrowAttributedMapsCategoryToExceptionType) {
                exception::ConnectionException);
   EXPECT_THROW(OdpsError::throwAttributed("op", "[InvalidParameter] bad"),
                exception::InvalidArgumentException);
+  // An unsupported table shape (Delta split-by-row-count) is an argument-level
+  // failure, not an IO/quota one.
+  EXPECT_THROW(
+      OdpsError::throwAttributed(
+          "op", "[ODPS-0420411] split by row count is not supported for "
+                "transactional2.0 table"),
+      exception::InvalidArgumentException);
   // Timeout / quota / unknown all surface as IO errors.
   EXPECT_THROW(OdpsError::throwAttributed("op", "[RequestTimeout] slow"),
                exception::IOException);

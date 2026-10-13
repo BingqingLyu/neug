@@ -109,6 +109,57 @@ STRING->STRING, DOUBLE->DOUBLE under the ODPS->NeuG type mapping):
   CREATE TABLE neug_odps_unsupported_json (id BIGINT, payload JSON);
   INSERT INTO neug_odps_unsupported_json VALUES (1, JSON '{"k":"v"}');
 
+  -- Clustered table (T403): same schema and 5 rows as neug_odps_item, but
+  -- physically hash-bucketed by id. The Storage API read path requests no
+  -- specific bucket ids, so a full scan reads every bucket and returns all 5
+  -- rows unchanged -- clustering is a physical layout detail only. OPTIONAL
+  -- fixture: skip-guarded, so a project without it still runs the suite.
+  CREATE TABLE neug_odps_clustered (id BIGINT, name STRING, price DOUBLE)
+    CLUSTERED BY (id) INTO 4 BUCKETS;
+  INSERT INTO neug_odps_clustered VALUES
+    (1,'apple',9.5),(2,'banana',5.5),(3,'cherry',12.0),
+    (4,'date',7.25),(5,'elderberry',3.75);
+
+  -- Logical view (T404): a stored SELECT with no physical data of its own. It
+  -- must be rejected at schema sniff (IsVirtualView() is true) with an
+  -- actionable "materialize it first" error, never silently read. VERIFIED
+  -- live: the read is rejected with exactly that message.
+  CREATE VIEW neug_odps_view AS
+    SELECT id, name, price FROM neug_odps_item;
+
+  -- External table (T404): its data lives in OSS, not in MaxCompute-managed
+  -- storage, so it must be rejected at schema sniff (IsExternalTable() is
+  -- true) with an actionable "read the underlying files" error. The rejection
+  -- happens before any data read, so the OSS location need not be populated to
+  -- exercise this path. OPTIONAL fixture: creating it needs OSS plus role
+  -- authorization, so it is skip-guarded when absent. Replace
+  -- <your-bucket>/<path> with a real OSS location your role can access.
+  CREATE EXTERNAL TABLE neug_odps_external (
+    id BIGINT, name STRING, price DOUBLE)
+    STORED AS PARQUET
+    LOCATION 'oss://<your-bucket>/<path>/';
+
+  -- MATERIALIZED VIEW (T403): VERIFIED readable live. Unlike a logical view it
+  -- stores physical data, so IsVirtualView() is false and the Storage API reads
+  -- it like a plain table -- the live read returned the same 5 rows as
+  -- neug_odps_item (test_odps_live_materialized_view_read). OPTIONAL fixture.
+  CREATE MATERIALIZED VIEW neug_odps_mv AS
+    SELECT id, name, price FROM neug_odps_item;
+
+  -- Delta / transactional 2.0 table (T403): VERIFIED *unreadable* live, so it
+  -- is documented as a limitation. An unconfigured read is split by row offset,
+  -- which ODPS rejects for a transactional2.0 table ("split by row count is not
+  -- supported for transactional2.0 table"); the read fails with a diagnosable
+  -- error instead of returning rows
+  -- (test_odps_live_transactional_delta_table_reports_error). Reading it needs
+  -- a size-based split path v1 does not implement yet. OPTIONAL fixture.
+  CREATE TABLE neug_odps_delta (
+    id BIGINT NOT NULL PRIMARY KEY, name STRING, price DOUBLE)
+    TBLPROPERTIES("transactional"="true");
+  INSERT INTO neug_odps_delta VALUES
+    (1,'apple',9.5),(2,'banana',5.5),(3,'cherry',12.0),
+    (4,'date',7.25),(5,'elderberry',3.75);
+
 The pushdown, remapping, and type-mismatch tests all reuse neug_odps_item (no
 extra tables): pushdown filters `price > 5.0` (pushable) against the equivalent
 `price + 0 > 5.0` (arithmetic -> engine-side), both yielding the 4 rows with
@@ -287,6 +338,36 @@ _ALL_TYPES_COLUMNS = [
 _UNSUPPORTED_JSON_TABLE = "neug_odps_unsupported_json"
 _UNSUPPORTED_JSON_COLUMN = "payload"
 
+# Clustered table (T403): neug_odps_clustered(id BIGINT, name STRING, price
+# DOUBLE) CLUSTERED BY (id) INTO 4 BUCKETS, holding the same 5 rows as
+# neug_odps_item. A full Storage API read scans every bucket, so it returns
+# _ITEM_COLUMNS / _ITEM_ROWS unchanged (clustering is a physical layout only).
+_CLUSTERED_TABLE = "neug_odps_clustered"
+
+# Logical view (T404): neug_odps_view is a stored SELECT with no physical data.
+# Reading it must fail at schema sniff with an actionable "materialize it"
+# error naming the view -- the live counterpart of the host unit test
+# UnsupportedTableKindMessageIsActionable.
+_VIEW_TABLE = "neug_odps_view"
+
+# External table (T404): neug_odps_external keeps its data in OSS, not in
+# MaxCompute storage. Reading it must fail at schema sniff with an actionable
+# "read the underlying files" error naming the external table.
+_EXTERNAL_TABLE = "neug_odps_external"
+
+# Materialized view (T403): neug_odps_mv is CREATE MATERIALIZED VIEW ... AS
+# SELECT id, name, price FROM neug_odps_item. Unlike a logical view it stores
+# physical data, so IsVirtualView() is false and the Storage API reads it like
+# a plain table; the live read returned the same 5 rows as neug_odps_item.
+_MV_TABLE = "neug_odps_mv"
+
+# Delta / transactional 2.0 table (T403): neug_odps_delta is a transactional2.0
+# table holding the same 5 rows as neug_odps_item. The live read is *unsupported*
+# in v1: an unconfigured read splits by row offset, which ODPS rejects for a
+# transactional2.0 table, so it fails with a diagnosable error rather than
+# returning rows (test_odps_live_transactional_delta_table_reports_error).
+_DELTA_TABLE = "neug_odps_delta"
+
 
 def _live_project():
     """The ODPS project holding the fixed fixtures; skip when unset."""
@@ -313,6 +394,21 @@ def _live_credentials():
     ]
     if missing:
         pytest.skip(f"live ODPS credentials missing: {', '.join(missing)}")
+
+
+def _skip_if_table_missing(error, table):
+    """Skip an optional-fixture live test when its table is not provisioned.
+
+    Fixtures beyond the core item/knows/partition set (clustered, external,
+    materialized view, delta) may not exist in every live project -- creating
+    some needs extra setup (OSS + role for an external table, the transactional
+    feature for a delta table). ODPS surfaces an absent table as a not-found
+    error, which is distinct from the read or rejection each test asserts, so an
+    unprovisioned optional table skips instead of failing the whole suite.
+    """
+    text = str(error).lower().replace(" ", "")
+    if any(m in text for m in ("doesnotexist", "notfound", "nosuch")):
+        pytest.skip(f"optional live fixture table not provisioned: {table}")
 
 
 # --- Live integration tests (SDK-ON + real credentials) ----------------------
@@ -867,6 +963,198 @@ def test_odps_live_unsupported_column_type_reports_error(tmp_path):
         assert _UNSUPPORTED_JSON_COLUMN in lowered, message
         assert "json" in lowered, message
         assert "string" in lowered, message  # the documented workaround
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_clustered_table_read(tmp_path):
+    """A hash-clustered table must read back all rows across every bucket.
+
+    T403 (spec M4): neug_odps_clustered is CLUSTERED BY (id) INTO 4 BUCKETS but
+    holds the same 5 rows as neug_odps_item. The Storage API read path requests
+    no specific bucket ids, so it scans all buckets and returns the full table;
+    clustering is a physical layout detail that must not change the rows seen.
+    """
+    _live_credentials()
+    table = _addr(_CLUSTERED_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_clustered"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        try:
+            result = conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        except RuntimeError as error:
+            _skip_if_sdk_off(error)
+            _skip_if_table_missing(error, _CLUSTERED_TABLE)
+            raise
+        columns = result.column_names()
+        rows = [list(row) for row in result]
+        # An optional clustered fixture may exist as an empty shell: its CREATE
+        # succeeded but the INSERT did not (e.g. an interactive/MCQA quota that
+        # only allows SELECT). With no rows the "scans every bucket" property
+        # cannot be exercised, so skip until its data is provisioned rather than
+        # fail -- this fixture is opt-in by data, like the not-found guard.
+        if not rows:
+            pytest.skip(
+                f"optional fixture {table!r} has no rows; load its data to "
+                "enable the clustered-read check"
+            )
+        assert columns == _ITEM_COLUMNS, f"column mismatch: {columns}"
+        _assert_same_rows(rows, _ITEM_ROWS)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_logical_view_is_rejected(tmp_path):
+    """A logical view must be rejected at sniff, never silently read.
+
+    T404 (spec M4 / FR-018): neug_odps_view stores no physical data (it is a
+    saved SELECT), so the Storage API read path cannot materialize it. The
+    reader detects IsVirtualView() during the schema sniff and raises an
+    actionable error telling the user to materialize it first. Live counterpart
+    of the host unit test UnsupportedTableKindMessageIsActionable.
+    """
+    _live_credentials()
+    table = _addr(_VIEW_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_view"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        _skip_if_table_missing(excinfo.value, _VIEW_TABLE)
+        lowered = message.lower()
+        assert _VIEW_TABLE in lowered, message
+        assert "view" in lowered, message
+        assert "materialize" in lowered, message  # the documented workaround
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_external_table_is_rejected(tmp_path):
+    """An external table must be rejected at sniff with an actionable error.
+
+    T404 (spec M4 / FR-018): neug_odps_external keeps its data in OSS rather
+    than in MaxCompute-managed storage, so the Storage API read path cannot
+    materialize it. The reader detects IsExternalTable() during the schema sniff
+    and raises an actionable error pointing at reading the underlying
+    object-storage files instead. The rejection happens before any data read, so
+    it is deterministic even if the OSS location is empty. Live counterpart of
+    the host unit test UnsupportedTableKindMessageIsActionable.
+    """
+    _live_credentials()
+    table = _addr(_EXTERNAL_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_external"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        _skip_if_table_missing(excinfo.value, _EXTERNAL_TABLE)
+        lowered = message.lower()
+        assert _EXTERNAL_TABLE in lowered, message
+        assert "external table" in lowered, message
+        assert "oss" in lowered, message  # the documented workaround target
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_materialized_view_read(tmp_path):
+    """A materialized view must read back like a plain table.
+
+    T403 (spec M4): neug_odps_mv is CREATE MATERIALIZED VIEW ... AS SELECT id,
+    name, price FROM neug_odps_item. Unlike a logical view it stores physical
+    data, so the reader's IsVirtualView() check is false and the Storage API
+    reads it normally -- the live read returned the same 5 rows as
+    neug_odps_item. This is the positive counterpart to
+    test_odps_live_logical_view_is_rejected: the two view kinds must be told
+    apart, rejecting only the logical one.
+    """
+    _live_credentials()
+    table = _addr(_MV_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_mv"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        try:
+            result = conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        except RuntimeError as error:
+            _skip_if_sdk_off(error)
+            _skip_if_table_missing(error, _MV_TABLE)
+            raise
+        columns = result.column_names()
+        rows = [list(row) for row in result]
+        assert rows, f"live materialized view {table!r} returned no rows"
+        assert columns == _ITEM_COLUMNS, f"column mismatch: {columns}"
+        _assert_same_rows(rows, _ITEM_ROWS)
+    finally:
+        conn.close()
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _LIVE_ENABLED,
+    reason="live ODPS test; set NEUG_ODPS_LIVE=1 with real credentials to run.",
+)
+def test_odps_live_transactional_delta_table_reports_error(tmp_path):
+    """A transactional (Delta 2.0) table read must fail with a diagnosable error.
+
+    T403 (spec M4): neug_odps_delta is a transactional2.0 table. The Storage API
+    read path cannot materialize it in v1 -- an unconfigured read is split by row
+    offset, which ODPS rejects for a transactional2.0 table ("split by row count
+    is not supported for transactional2.0 table"). The read must surface that
+    reason rather than hang or silently return partial rows.
+
+    NOTE: this pins the current *unsupported* behaviour. If a future change splits
+    transactional2.0 tables by size instead of row count, the fixture becomes
+    readable and these assertions should flip to a row check like
+    test_odps_live_materialized_view_read.
+    """
+    _live_credentials()
+    table = _addr(_DELTA_TABLE)
+
+    db = Database(db_path=str(tmp_path / "odps_live_delta"), mode="w")
+    conn = db.connect()
+    try:
+        _load_odps(conn)
+        with pytest.raises(RuntimeError) as excinfo:
+            conn.execute(f'LOAD FROM "{table}" RETURN *;')
+        message = str(excinfo.value)
+        _skip_if_sdk_off(excinfo.value)
+        _skip_if_table_missing(excinfo.value, _DELTA_TABLE)
+        lowered = message.lower()
+        assert _DELTA_TABLE in lowered, message
+        # The real cause is the row-offset split, not a quota problem; assert the
+        # transactional/split reason survives in the attributed message.
+        assert "transactional" in lowered or "split" in lowered, message
     finally:
         conn.close()
         db.close()
