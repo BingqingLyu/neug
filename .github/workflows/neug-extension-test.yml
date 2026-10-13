@@ -28,6 +28,7 @@ on:
       - 'tools/python_bind/tests/test_graphalytics.py'
       - 'tools/python_bind/tests/test_fts_index.py'
       - 'tools/python_bind/tests/test_fts_index_tp.py'
+      - 'tools/python_bind/tests/test_odps_load_from.py'
       - 'tools/python_bind/tests/resources/graphalytics/**'
       - 'tools/python_bind/example/complex_test.py'
   workflow_dispatch:  # Manual trigger (must exist on default branch to see "Run workflow")
@@ -122,7 +123,7 @@ jobs:
         export USE_NINJA=OFF
         export WITH_MIMALLOC=OFF
         export CMAKE_INSTALL_PREFIX=/opt/neug-install/
-        export BUILD_EXTENSIONS="parquet;httpfs;gds;pattern_matching;vector_search;fts;test_out_of_tree"
+        export BUILD_EXTENSIONS="parquet;httpfs;gds;pattern_matching;vector_search;fts;test_out_of_tree;odps"
         sudo mkdir -p /opt/neug-install
         sudo chown -R $USER:$USER /opt/neug-install/
         export CMAKE_C_COMPILER_LAUNCHER=ccache
@@ -148,6 +149,11 @@ jobs:
         ctest -R httpfs_extension_test -V
         ctest -R pattern_matching_extension_test -V
         ctest -R fts_extension_test -V
+        # odps builds SDK-free (NEUG_WITH_ODPS_SDK=OFF by default): the SDK is
+        # x86_64-only and the Storage API endpoint is VPC/intranet-only, so CI
+        # exercises the SDK-free unit tests (options, connection, schema
+        # converter, error classification, Arrow bridge, odps:// routing).
+        ctest -R odps_extension_test -V
         export FLEX_DATA_DIR=${GITHUB_WORKSPACE}/example_dataset/tinysnb
         ctest -R test_extension -V
 
@@ -173,6 +179,9 @@ jobs:
         NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_hnsw_index.py
         NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_hnsw_index_tp.py
         NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_fts_index.py tests/test_fts_index_tp.py
+        # odps:// routing smoke tests run SDK-OFF; the live data-plane cases
+        # stay skipped unless NEUG_ODPS_LIVE=1 with real VPC credentials is set.
+        NEUG_RUN_EXTENSION_TESTS=true python3 -m pytest -sv tests/test_odps_load_from.py
 
     - name: Run GDS Tests
       run: |
