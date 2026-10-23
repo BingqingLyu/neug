@@ -17,12 +17,17 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/checkpoint_manifest.h"
@@ -1160,6 +1165,498 @@ TEST_F(ChunkedColumnTest, SpanReadersCoverSplitPagesAndIndependentTraversal) {
   PropertyColumnReader<int64_t> gathered(*ref);
   for (size_t row : {3, 1, 9, 5, 8, 0, 10})
     EXPECT_EQ(gathered.get_view(row), row * 10);
+}
+
+// ---------------------------------------------------------------------------
+// DEMO (not an assertion suite): materialize real on-disk checkpoint files
+// under /tmp/neug_chunk_demo and print them, so the object-file layout can be
+// inspected directly. It shows:
+//   (1) two columns packing into ONE shared payload object (cross-column);
+//   (2) an update writing ONLY the dirty 4 KiB page into a NEW object, while
+//       the clean column keeps referencing the OLD object by ObjectSlice;
+//   (3) the per-column chunk directory mapping each physical page to a slice.
+TEST(ChunkDiskDemo, PrintRealCheckpointFiles) {
+  namespace fs = std::filesystem;
+  const fs::path demo = "/tmp/neug_chunk_demo";
+  std::error_code ec;
+  fs::remove_all(demo, ec);
+  fs::create_directories(demo, ec);
+  const fs::path objects = demo / "checkpoint" / "objects";
+
+  auto list_objects = [&](const char* tag) {
+    std::printf("\n[objects/] %s\n", tag);
+    std::vector<fs::path> files;
+    for (auto& e : fs::directory_iterator(objects, ec))
+      if (e.is_regular_file()) files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    uint64_t total = 0;
+    for (auto& f : files) {
+      const auto sz = fs::file_size(f, ec);
+      total += sz;
+      std::printf("  %-38s %8llu bytes\n", f.filename().string().c_str(),
+                  static_cast<unsigned long long>(sz));
+    }
+    std::printf("  -> %zu files, %llu bytes total\n", files.size(),
+                static_cast<unsigned long long>(total));
+  };
+
+  auto dump_dir = [&](const std::shared_ptr<Checkpoint>& ckp,
+                      const std::string& col) {
+    const auto* mod = ckp->manifest().FindModule(col);
+    auto path = mod->get_path(kChunkDirPath);
+    auto file = ckp->OpenFile(*path, MemoryLevel::kInMemory);
+    auto d = DecodeChunkDirectory(file->GetData(), file->GetDataSize());
+    std::printf("  column '%s': row_width=%u rows_per_chunk=%llu "
+                "rows_per_page=%llu row_count=%llu\n",
+                col.c_str(), d.row_width,
+                static_cast<unsigned long long>(d.rows_per_chunk),
+                static_cast<unsigned long long>(d.rows_per_page),
+                static_cast<unsigned long long>(d.row_count));
+    for (size_t i = 0; i < d.object_ids.size(); ++i)
+      std::printf("      object_ids[%zu] = %s\n", i, d.object_ids[i].c_str());
+    for (size_t i = 0; i < d.pages.size(); ++i) {
+      const auto& p = d.pages[i];
+      std::printf("      page[%zu]: prefix_rows=%u -> ObjectSlice{obj_idx=%llu,"
+                  " offset=%llu, length=%u, crc=%08x}\n",
+                  i, p.prefix_rows,
+                  static_cast<unsigned long long>(p.prefix.object_id),
+                  static_cast<unsigned long long>(p.prefix.offset),
+                  static_cast<unsigned>(p.prefix.length),
+                  static_cast<unsigned>(p.prefix.crc32c));
+    }
+  };
+
+  CheckpointManager mgr;
+  mgr.Open(demo.string());
+
+  // ---- Checkpoint 1: two INT64 columns dumped into ONE checkpoint ----
+  std::shared_ptr<Checkpoint> cp1;
+  {
+    auto staging = mgr.CreateStaging();
+    auto ckp = staging.checkpoint();
+    CheckpointManifest meta;
+    meta.SetSchema(Schema());
+    ChunkedColumn<int64_t> age, score;  // production sizing => 4 KiB pages
+    age.Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+    score.Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+    age.resize(8);
+    score.resize(8);
+    for (size_t i = 0; i < 8; ++i) {
+      age.set_value(i, static_cast<int64_t>(100 + i));
+      score.set_value(i, static_cast<int64_t>(200 + i));
+    }
+    age.Dump(*ckp, meta, "age");
+    score.Dump(*ckp, meta, "score");
+    ckp->SetManifest(std::move(meta));
+    cp1 = staging.Publish();
+  }
+  std::printf("\n============ CHECKPOINT 1: fresh age + score ============\n");
+  list_objects("after checkpoint 1");
+  std::printf("\n[chunk directories @ cp1]\n");
+  dump_dir(cp1, "age");
+  dump_dir(cp1, "score");
+
+  // ---- Update ONE value in 'age', leave 'score' clean, checkpoint again ----
+  std::shared_ptr<Checkpoint> cp2;
+  {
+    ChunkedColumn<int64_t> age, score;
+    age.Open(*cp1, *cp1->manifest().FindModule("age"), MemoryLevel::kInMemory);
+    score.Open(*cp1, *cp1->manifest().FindModule("score"),
+               MemoryLevel::kInMemory);
+    age.set_value(3, 999);  // forks ONLY the 4 KiB page holding row 3
+    std::printf("\n======== UPDATE: age[3] = 999 (score untouched) ========\n");
+    std::printf("  age.cow_bytes_copied() = %zu bytes (one 4 KiB page)\n",
+                age.cow_bytes_copied());
+
+    auto staging = mgr.CreateStaging();
+    auto ckp = staging.checkpoint();
+    CheckpointManifest meta;
+    meta.SetSchema(Schema());
+    age.Dump(*ckp, meta, "age");
+    score.Dump(*ckp, meta, "score");
+    ckp->SetManifest(std::move(meta));
+    cp2 = staging.Publish();
+  }
+  std::printf("\n============ CHECKPOINT 2: after update ============\n");
+  list_objects("after checkpoint 2 (cp1 objects persist until GC)");
+  std::printf("\n[chunk directories @ cp2]\n");
+  dump_dir(cp2, "age");
+  dump_dir(cp2, "score");
+
+  mgr.Close();
+  std::printf("\n(demo files left under %s for inspection)\n", demo.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// DEMO 2: ONE column spanning MULTIPLE physical pages (600 rows / 512 rows per
+// page = 2 pages), then a single-value update that dirties ONLY the 2nd page.
+// Shows (a) a directory holding MANY page pointers, and (b) within ONE column,
+// clean pages keep referencing the OLD object while the dirty page moves to a
+// NEW object.
+TEST(ChunkDiskDemo, PrintMultiPageDirectory) {
+  namespace fs = std::filesystem;
+  const fs::path demo = "/tmp/neug_chunk_demo2";
+  std::error_code ec;
+  fs::remove_all(demo, ec);
+  fs::create_directories(demo, ec);
+  const fs::path objects = demo / "checkpoint" / "objects";
+
+  auto list_objects = [&](const char* tag) {
+    std::printf("\n[objects/] %s\n", tag);
+    std::vector<fs::path> files;
+    for (auto& e : fs::directory_iterator(objects, ec))
+      if (e.is_regular_file()) files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    for (auto& f : files)
+      std::printf("  %-38s %8llu bytes\n", f.filename().string().c_str(),
+                  static_cast<unsigned long long>(fs::file_size(f, ec)));
+    std::printf("  -> %zu files\n", files.size());
+  };
+  auto dump_dir = [&](const std::shared_ptr<Checkpoint>& ckp,
+                      const std::string& col) {
+    const auto* mod = ckp->manifest().FindModule(col);
+    auto path = mod->get_path(kChunkDirPath);
+    auto file = ckp->OpenFile(*path, MemoryLevel::kInMemory);
+    auto d = DecodeChunkDirectory(file->GetData(), file->GetDataSize());
+    std::printf("  column '%s': rows_per_page=%llu row_count=%llu PAGES=%zu\n",
+                col.c_str(), static_cast<unsigned long long>(d.rows_per_page),
+                static_cast<unsigned long long>(d.row_count), d.pages.size());
+    for (size_t i = 0; i < d.object_ids.size(); ++i)
+      std::printf("      object_ids[%zu] = %s\n", i, d.object_ids[i].c_str());
+    for (size_t i = 0; i < d.pages.size(); ++i) {
+      const auto& p = d.pages[i];
+      std::printf("      page[%zu]: prefix_rows=%u -> ObjectSlice{obj_idx=%llu,"
+                  " offset=%llu, length=%u, crc=%08x}\n",
+                  i, p.prefix_rows,
+                  static_cast<unsigned long long>(p.prefix.object_id),
+                  static_cast<unsigned long long>(p.prefix.offset),
+                  static_cast<unsigned>(p.prefix.length),
+                  static_cast<unsigned>(p.prefix.crc32c));
+    }
+  };
+
+  CheckpointManager mgr;
+  mgr.Open(demo.string());
+
+  // ---- CP1: one INT64 column, 600 rows => 2 physical pages (512 rows each) --
+  std::shared_ptr<Checkpoint> cp1;
+  {
+    auto staging = mgr.CreateStaging();
+    auto ckp = staging.checkpoint();
+    CheckpointManifest meta;
+    meta.SetSchema(Schema());
+    ChunkedColumn<int64_t> age;
+    age.Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+    age.resize(600);
+    for (size_t i = 0; i < 600; ++i) age.set_value(i, static_cast<int64_t>(i));
+    age.Dump(*ckp, meta, "age");
+    ckp->SetManifest(std::move(meta));
+    cp1 = staging.Publish();
+  }
+  std::printf("\n===== DEMO2 CP1: one column, 600 rows (2 pages) =====\n");
+  list_objects("cp1");
+  dump_dir(cp1, "age");
+
+  // ---- Update ONE value in the 2nd page (row 550); page 0 stays clean ----
+  std::shared_ptr<Checkpoint> cp2;
+  {
+    ChunkedColumn<int64_t> age;
+    age.Open(*cp1, *cp1->manifest().FindModule("age"), MemoryLevel::kInMemory);
+    age.set_value(550, 99999);  // row 550 lives in page 1 (rows 512..1023)
+    std::printf("\n== UPDATE age[550]=99999 (page1 dirty, page0 clean) ==\n");
+    std::printf("  age.cow_bytes_copied() = %zu bytes\n", age.cow_bytes_copied());
+    auto staging = mgr.CreateStaging();
+    auto ckp = staging.checkpoint();
+    CheckpointManifest meta;
+    meta.SetSchema(Schema());
+    age.Dump(*ckp, meta, "age");
+    ckp->SetManifest(std::move(meta));
+    cp2 = staging.Publish();
+  }
+  std::printf("\n===== DEMO2 CP2: after update =====\n");
+  list_objects("cp2");
+  dump_dir(cp2, "age");
+
+  mgr.Close();
+  std::printf("\n(demo2 files left under %s)\n", demo.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// DEMO 3: the prefix + suffix split of ONE physical page. A page is filled
+// with 300 rows and checkpointed (all prefix). Then 100 MORE rows are appended
+// into the SAME page: PrepareForInsert splits it into an immutable prefix
+// (rows 0..299, reused by reference) and a writable suffix (rows 300..511).
+// The cp2 directory then shows ONE page carrying TWO ObjectSlices.
+TEST(ChunkDiskDemo, PrintAppendPrefixSuffix) {
+  namespace fs = std::filesystem;
+  const fs::path demo = "/tmp/neug_chunk_demo3";
+  std::error_code ec;
+  fs::remove_all(demo, ec);
+  fs::create_directories(demo, ec);
+  const fs::path objects = demo / "checkpoint" / "objects";
+
+  auto list_objects = [&](const char* tag) {
+    std::printf("\n[objects/] %s\n", tag);
+    std::vector<fs::path> files;
+    for (auto& e : fs::directory_iterator(objects, ec))
+      if (e.is_regular_file()) files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    for (auto& f : files)
+      std::printf("  %-38s %8llu bytes\n", f.filename().string().c_str(),
+                  static_cast<unsigned long long>(fs::file_size(f, ec)));
+    std::printf("  -> %zu files\n", files.size());
+  };
+  auto dump_dir = [&](const std::shared_ptr<Checkpoint>& ckp,
+                      const std::string& col) {
+    const auto* mod = ckp->manifest().FindModule(col);
+    auto path = mod->get_path(kChunkDirPath);
+    auto file = ckp->OpenFile(*path, MemoryLevel::kInMemory);
+    auto d = DecodeChunkDirectory(file->GetData(), file->GetDataSize());
+    std::printf("  column '%s': rows_per_page=%llu row_count=%llu PAGES=%zu\n",
+                col.c_str(), static_cast<unsigned long long>(d.rows_per_page),
+                static_cast<unsigned long long>(d.row_count), d.pages.size());
+    for (size_t i = 0; i < d.object_ids.size(); ++i)
+      std::printf("      object_ids[%zu] = %s\n", i, d.object_ids[i].c_str());
+    for (size_t i = 0; i < d.pages.size(); ++i) {
+      const auto& p = d.pages[i];
+      std::printf("      page[%zu]: prefix_rows=%u\n", i, p.prefix_rows);
+      std::printf("          prefix -> ObjectSlice{obj_idx=%llu, offset=%llu,"
+                  " length=%u, crc=%08x}\n",
+                  static_cast<unsigned long long>(p.prefix.object_id),
+                  static_cast<unsigned long long>(p.prefix.offset),
+                  static_cast<unsigned>(p.prefix.length),
+                  static_cast<unsigned>(p.prefix.crc32c));
+      if (p.prefix_rows < d.rows_per_page)
+        std::printf("          suffix -> ObjectSlice{obj_idx=%llu, offset=%llu,"
+                    " length=%u, crc=%08x}\n",
+                    static_cast<unsigned long long>(p.suffix.object_id),
+                    static_cast<unsigned long long>(p.suffix.offset),
+                    static_cast<unsigned>(p.suffix.length),
+                    static_cast<unsigned>(p.suffix.crc32c));
+      else
+        std::printf("          suffix -> (none: page is full prefix)\n");
+    }
+  };
+
+  CheckpointManager mgr;
+  mgr.Open(demo.string());
+
+  // ---- CP1: 300 rows in ONE page, entirely prefix (no suffix yet) ----
+  std::shared_ptr<Checkpoint> cp1;
+  {
+    auto staging = mgr.CreateStaging();
+    auto ckp = staging.checkpoint();
+    CheckpointManifest meta;
+    meta.SetSchema(Schema());
+    ChunkedColumn<int64_t> age;
+    age.Open(*ckp, ModuleDescriptor{}, MemoryLevel::kInMemory);
+    age.resize(300);
+    for (size_t i = 0; i < 300; ++i)
+      age.set_value(i, static_cast<int64_t>(i + 1));  // 1..300
+    age.Dump(*ckp, meta, "age");
+    ckp->SetManifest(std::move(meta));
+    cp1 = staging.Publish();
+  }
+  std::printf("\n===== DEMO3 CP1: 300 rows, one page (prefix only) =====\n");
+  list_objects("cp1");
+  dump_dir(cp1, "age");
+
+  // ---- APPEND rows 300..399 into the SAME page => prefix + suffix ----
+  std::shared_ptr<Checkpoint> cp2;
+  {
+    ChunkedColumn<int64_t> age;
+    age.Open(*cp1, *cp1->manifest().FindModule("age"), MemoryLevel::kInMemory);
+    age.resize(400);            // grow logical row count 300 -> 400
+    age.PrepareForInsert(300);  // split page0: prefix[0..300) frozen +
+                                //              suffix[300..512) writable
+    std::printf("\n== APPEND rows 300..399 (prefix reused, suffix new) ==\n");
+    std::printf("  cow_bytes_copied() after PrepareForInsert = %zu bytes"
+                " (only the 212-row suffix; the 300-row prefix is aliased)\n",
+                age.cow_bytes_copied());
+    for (size_t i = 300; i < 400; ++i)
+      age.set_any(i, Value::INT64(static_cast<int64_t>(i + 1)), false);
+    auto staging = mgr.CreateStaging();
+    auto ckp = staging.checkpoint();
+    CheckpointManifest meta;
+    meta.SetSchema(Schema());
+    age.Dump(*ckp, meta, "age");
+    ckp->SetManifest(std::move(meta));
+    cp2 = staging.Publish();
+  }
+  std::printf("\n===== DEMO3 CP2: after append (page0 = prefix + suffix) =====\n");
+  list_objects("cp2");
+  dump_dir(cp2, "age");
+
+  // ---- Round-trip: reopen cp2 and verify both segments read back correctly --
+  ChunkedColumn<int64_t> check;
+  check.Open(*cp2, *cp2->manifest().FindModule("age"), MemoryLevel::kInMemory);
+  std::printf("\n  round-trip: size=%zu age[0]=%lld age[299]=%lld "
+              "age[300]=%lld age[399]=%lld\n",
+              check.size(), static_cast<long long>(check.get_view(0)),
+              static_cast<long long>(check.get_view(299)),
+              static_cast<long long>(check.get_view(300)),
+              static_cast<long long>(check.get_view(399)));
+
+  mgr.Close();
+  std::printf("\n(demo3 files left under %s)\n", demo.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// DEMO 4: TWO vertex labels (person + software) in ONE real graph checkpoint.
+// Answers "if I create different vertex types, how are the data files and the
+// directory files organised?". On a genuine PropertyGraph dump it shows:
+//   (a) EVERY property column of EVERY label gets its OWN chunk-directory
+//       object, keyed vertex_<label>_prop_<i>  (directory == per column);
+//   (b) all labels' dirty property pages are packed into the SAME shared DATA
+//       object by the one checkpoint-wide object writer (data == cross-label
+//       shared), exactly like DEMO1's two columns;
+//   (c) the remaining objects/ files are the per-label indexer / keys /
+//       indices / vertex-timestamp modules.
+TEST(ChunkDiskDemo, PrintMultiLabelGraph) {
+  namespace fs = std::filesystem;
+  const fs::path demo = "/tmp/neug_chunk_demo4";
+  std::error_code ec;
+  fs::remove_all(demo, ec);
+  fs::create_directories(demo, ec);
+  const fs::path objects = demo / "checkpoint" / "objects";
+
+  CheckpointManager mgr;
+  mgr.Open(demo.string());
+
+  // ---- schema: person(id PK, age INT64) + software(id PK, since INT64) ----
+  Schema schema;
+  schema.AddVertexLabel("person", {DataType::INT64}, {"age"},
+                        {std::make_tuple(DataType::INT64, "id", 0)}, 4096, "",
+                        {Value::INT64(0)});
+  schema.AddVertexLabel("software", {DataType::INT64}, {"since"},
+                        {std::make_tuple(DataType::INT64, "id", 0)}, 4096, "",
+                        {Value::INT64(0)});
+
+  // seed checkpoint carrying ONLY the schema, so the graph opens empty.
+  std::shared_ptr<Checkpoint> seed;
+  {
+    auto staging = mgr.CreateStaging();
+    auto ckp = staging.checkpoint();
+    CheckpointManifest meta;
+    meta.SetSchema(schema);
+    ckp->SetManifest(std::move(meta));
+    seed = staging.Publish();
+  }
+
+  // ---- open the graph, insert into BOTH labels ----
+  PropertyGraph graph;
+  graph.Open(seed, MemoryLevel::kInMemory);
+  ASSERT_TRUE(graph.EnsureCapacity(0, 16).ok());  // person
+  ASSERT_TRUE(graph.EnsureCapacity(1, 16).ok());  // software
+  vid_t vid;
+  ASSERT_TRUE(
+      graph.AddVertex(0, Value::INT64(1), {Value::INT64(30)}, vid, 1).ok());
+  ASSERT_TRUE(
+      graph.AddVertex(0, Value::INT64(2), {Value::INT64(40)}, vid, 1).ok());
+  ASSERT_TRUE(
+      graph.AddVertex(1, Value::INT64(10), {Value::INT64(2010)}, vid, 1).ok());
+  ASSERT_TRUE(
+      graph.AddVertex(1, Value::INT64(11), {Value::INT64(2011)}, vid, 1).ok());
+  graph.MarkVertexTableDirty(0);
+  graph.MarkVertexTableDirty(1);
+
+  // ---- ONE real graph checkpoint (shared object writer across labels) ----
+  std::shared_ptr<Checkpoint> cp1;
+  {
+    auto staging = mgr.CreateStaging();
+    graph.Compact();
+    graph.DumpAndClear(staging.checkpoint());
+    cp1 = staging.Publish();
+  }
+
+  // ---- pass 1: find every chunked property column, decode its directory ----
+  std::set<std::string> dir_objs, data_objs;
+  std::map<std::string, ChunkDirectory> dirs;
+  for (const auto& kv : cp1->manifest().Modules()) {
+    auto p = kv.second.get_path(kChunkDirPath);
+    if (!p) continue;  // not a chunked column
+    dir_objs.insert(fs::path(*p).filename().string());
+    auto file = cp1->OpenFile(*p, MemoryLevel::kInMemory);
+    auto d = DecodeChunkDirectory(file->GetData(), file->GetDataSize());
+    for (const auto& oid : d.object_ids) data_objs.insert(oid);
+    dirs.emplace(kv.first, std::move(d));
+  }
+
+  // ---- pass 2: classify every objects/ file ----
+  std::printf("\n===== DEMO4: person + software in ONE graph checkpoint =====\n");
+  std::printf("\n[objects/] every file, classified\n");
+  std::vector<fs::path> files;
+  for (auto& e : fs::directory_iterator(objects, ec))
+    if (e.is_regular_file()) files.push_back(e.path());
+  std::sort(files.begin(), files.end());
+  for (auto& f : files) {
+    const auto name = f.filename().string();
+    const char* role =
+        dir_objs.count(name)   ? "DIRECTORY (one column's chunk_dir)"
+        : data_objs.count(name) ? "DATA (shared property pages)"
+                                : "OTHER (indexer/keys/indices/v_ts)";
+    std::printf("  %-38s %8llu bytes  %s\n", name.c_str(),
+                static_cast<unsigned long long>(fs::file_size(f, ec)), role);
+  }
+  std::printf("  -> %zu files total\n", files.size());
+
+  // ---- pass 3: per-column chunk directories (sorted for stable output) ----
+  std::printf("\n[chunk directories] ONE per property column, per label\n");
+  for (const auto& kv : dirs) {
+    const auto& d = kv.second;
+    std::printf("  column '%s': row_width=%u rows_per_page=%llu row_count=%llu"
+                " PAGES=%zu\n",
+                kv.first.c_str(), d.row_width,
+                static_cast<unsigned long long>(d.rows_per_page),
+                static_cast<unsigned long long>(d.row_count), d.pages.size());
+    for (size_t i = 0; i < d.object_ids.size(); ++i)
+      std::printf("      object_ids[%zu] = %s   (DATA object)\n", i,
+                  d.object_ids[i].c_str());
+    for (size_t i = 0; i < d.pages.size(); ++i) {
+      const auto& p = d.pages[i];
+      std::printf("      page[%zu]: prefix_rows=%u prefix->obj_idx=%llu"
+                  " off=%llu len=%u crc=%08x\n",
+                  i, p.prefix_rows,
+                  static_cast<unsigned long long>(p.prefix.object_id),
+                  static_cast<unsigned long long>(p.prefix.offset),
+                  static_cast<unsigned>(p.prefix.length),
+                  static_cast<unsigned>(p.prefix.crc32c));
+    }
+  }
+
+  // ---- verdict: do the two labels share ONE data object? ----
+  std::string person_oid, software_oid;
+  auto pit = dirs.find("vertex_person_prop_0");
+  if (pit != dirs.end() && !pit->second.object_ids.empty())
+    person_oid = pit->second.object_ids[0];
+  auto sit = dirs.find("vertex_software_prop_0");
+  if (sit != dirs.end() && !sit->second.object_ids.empty())
+    software_oid = sit->second.object_ids[0];
+  std::printf("\n[verdict] person.age    DATA object = %s\n",
+              person_oid.c_str());
+  std::printf("          software.since DATA object = %s\n",
+              software_oid.c_str());
+  std::printf("          => %s\n",
+              (!person_oid.empty() && person_oid == software_oid)
+                  ? "SHARED: both labels' property pages live in ONE object"
+                  : "separate data objects");
+
+  // ---- round-trip: reopen the real checkpoint and read BOTH labels back ----
+  PropertyGraph reopened;
+  reopened.Open(cp1, MemoryLevel::kInMemory);
+  auto person_age = reopened.GetVertexPropertyColumn(0, 0);
+  auto software_since = reopened.GetVertexPropertyColumn(1, 0);
+  std::printf("\n[round-trip] person.age[0]=%lld [1]=%lld ;"
+              " software.since[0]=%lld [1]=%lld\n",
+              static_cast<long long>(person_age->get_any(0).GetValue<int64_t>()),
+              static_cast<long long>(person_age->get_any(1).GetValue<int64_t>()),
+              static_cast<long long>(
+                  software_since->get_any(0).GetValue<int64_t>()),
+              static_cast<long long>(
+                  software_since->get_any(1).GetValue<int64_t>()));
+
+  mgr.Close();
+  std::printf("\n(demo4 files left under %s)\n", demo.c_str());
 }
 
 }  // namespace
