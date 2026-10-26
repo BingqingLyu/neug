@@ -806,6 +806,61 @@ TEST_F(ChunkedColumnTest, ConcurrentAppendAfterReopenUsesStableSuffix) {
     EXPECT_EQ(reopened.get_view(row), row * 10);
 }
 
+// Column-level manifestation of W18: a reader pins a Clone (an independent page
+// directory that shares the frozen, shared-mapped segments) while a writer
+// performs covering writes on the original. Every write to a shared segment
+// forks it via Copy() instead of mutating in place, so the pinned snapshot stays
+// stable. Under TSAN this exercises the concurrent surfaces the design admits:
+// the shared_ptr refcount, Segment::Verify()'s call_once/atomic on the shared
+// frozen source (hit by both the reader and the writer's pre-copy Verify), and
+// the fork-on-first-covering-write of a shared segment. Concurrent covering
+// writes to the *same* column object are deliberately not exercised: they are
+// single-writer by admission control (SnapshotCowWriteTransaction).
+TEST_F(ChunkedColumnTest, ConcurrentCowForkUnderPinnedSnapshotReader) {
+  ChunkedColumn<int64_t> original(4);
+  original.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  original.resize(1024);
+  for (size_t row = 0; row < 1024; ++row)
+    original.set_value(row, static_cast<int64_t>(row));
+  CheckpointManifest first;
+  original.Dump(*ckp_, first, "col");
+  ckp_->FinalizeObjectWriter(first);
+
+  // Reopen so segments are frozen and shared-mapped from immutable objects.
+  ChunkedColumn<int64_t> col(4);
+  col.Open(*ckp_, *first.FindModule("col"), MemoryLevel::kInMemory);
+
+  // Pinned snapshot: independent page directory sharing the frozen segments.
+  auto snapshot_module = col.Clone();
+  auto& snapshot = dynamic_cast<ChunkedColumn<int64_t>&>(*snapshot_module);
+
+  std::atomic<bool> done{false};
+  std::atomic<bool> reader_ok{true};
+  std::thread reader([&] {
+    while (!done.load(std::memory_order_relaxed)) {
+      for (size_t row = 0; row < 1024; ++row) {
+        if (snapshot.get_view(row) != static_cast<int64_t>(row)) {
+          reader_ok.store(false);
+          break;
+        }
+      }
+    }
+  });
+
+  // Writer forks each shared segment via a covering write on the original.
+  for (size_t row = 0; row < 1024; ++row)
+    col.set_value(row, static_cast<int64_t>(row * 10));
+
+  done.store(true);
+  reader.join();
+
+  EXPECT_TRUE(reader_ok.load());
+  for (size_t row = 0; row < 1024; ++row) {
+    EXPECT_EQ(col.get_view(row), static_cast<int64_t>(row * 10));
+    EXPECT_EQ(snapshot.get_view(row), static_cast<int64_t>(row));
+  }
+}
+
 TEST_F(ChunkedColumnTest, AppendFrontAdvancesAcrossCheckpointAndCow) {
   ChunkedColumn<int64_t> col(4);
   col.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);

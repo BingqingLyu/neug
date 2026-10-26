@@ -38,7 +38,9 @@
 #include <sys/resource.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -46,6 +48,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "neug/storages/chunk/chunk_types.h"
@@ -68,6 +71,16 @@ size_t EnvOr(const char* name, size_t fallback) {
   return fallback;
 }
 
+double EnvOrD(const char* name, double fallback) {
+  if (const char* v = std::getenv(name)) {
+    char* end = nullptr;
+    const double parsed = std::strtod(v, &end);
+    if (end != v)
+      return parsed;
+  }
+  return fallback;
+}
+
 struct Config {
   size_t rows = EnvOr("NEUG_BENCH_ROWS", 1ull << 22);
   size_t updates = EnvOr("NEUG_BENCH_UPDATES", 1000);
@@ -75,6 +88,13 @@ struct Config {
   size_t batch_rows = EnvOr("NEUG_BENCH_BATCH_ROWS", 100000);
   size_t reads = EnvOr("NEUG_BENCH_READS", 100000);
   size_t scan_rounds = EnvOr("NEUG_BENCH_SCAN_ROUNDS", 5);
+  // W4 hot-spot skew: theta in [0,1); 0 is uniform, ->1 concentrates on a few
+  // hot rows. W6 single-row incremental insert scale + checkpoint cadence.
+  // Dense high-fraction update touches dense_fraction % of the column.
+  double zipf_theta = EnvOrD("NEUG_BENCH_ZIPF_THETA", 0.99);
+  size_t inserts = EnvOr("NEUG_BENCH_INSERTS", 20000);
+  size_t insert_ckp_every = EnvOr("NEUG_BENCH_INSERT_CKP_EVERY", 1000);
+  size_t dense_fraction = EnvOr("NEUG_BENCH_DENSE_FRACTION", 50);
 };
 
 struct Result {
@@ -82,7 +102,9 @@ struct Result {
   std::string workload;
   uint64_t copied_bytes = 0;
   uint64_t write_bytes = 0;
+  uint64_t dir_bytes = 0;  // chunk-directory blob rewritten (metadata face)
   double wall_ms = 0.0;
+  double ckp_ms = 0.0;     // checkpoint (Dump+Finalize) stall
   double p99_us = 0.0;
   long rss_delta_mb = 0;
   size_t objects = 0;
@@ -254,13 +276,25 @@ Result RunCowUpdate(const std::string& layout, const Factory& factory,
       IsChunked(*cow) ? ChunkedCopiedBytes(*cow) : cfg.rows * sizeof(int64_t);
 
   const uint64_t bytes0 = DirBytes(box.dir());
+  const auto td0 = Clock::now();
   CheckpointManifest cow_meta;
   cow->Dump(ckp, cow_meta, "col");
   ckp.FinalizeObjectWriter(cow_meta);
+  r.ckp_ms =
+      std::chrono::duration<double, std::milli>(Clock::now() - td0).count();
   const uint64_t bytes1 = DirBytes(box.dir());
 
   r.write_bytes = bytes1 - bytes0;
   r.objects = DirFiles(box.dir()) - files0;
+  // Metadata face: the chunk-directory blob this checkpoint rewrote whole
+  // (O(pages), the P0 leftover scheme A attacks). Legacy has no separate
+  // directory, so it stays 0.
+  if (IsChunked(*cow)) {
+    if (auto path = cow_meta.FindModule("col")->get_path(kChunkDirPath)) {
+      auto file = ckp.OpenFile(*path, MemoryLevel::kInMemory);
+      r.dir_bytes = file->GetDataSize();
+    }
+  }
   r.wall_ms =
       std::chrono::duration<double, std::milli>(t1 - t0).count();
   r.p99_us = PercentileUs(latencies_us, 99.0);
@@ -497,21 +531,24 @@ std::vector<ReadResult> RunScanReadAmplification(const std::string& layout,
 
 void PrintRow(const Result& r) {
   std::printf(
-      "| %-9s | %-22s | %14llu | %14llu | %9.2f | %8.2f | %7ld | %6zu |\n",
+      "| %-9s | %-22s | %14llu | %14llu | %11llu | %9.2f | %8.2f | %8.2f | "
+      "%7ld | %6zu |\n",
       r.layout.c_str(), r.workload.c_str(),
       static_cast<unsigned long long>(r.copied_bytes),
-      static_cast<unsigned long long>(r.write_bytes), r.wall_ms, r.p99_us,
-      r.rss_delta_mb, r.objects);
+      static_cast<unsigned long long>(r.write_bytes),
+      static_cast<unsigned long long>(r.dir_bytes), r.wall_ms, r.ckp_ms,
+      r.p99_us, r.rss_delta_mb, r.objects);
 }
 
 void PrintHeader() {
   std::printf(
-      "| %-9s | %-22s | %14s | %14s | %9s | %8s | %7s | %6s |\n", "layout",
-      "workload", "copied_bytes", "write_bytes", "wall_ms", "p99_us",
-      "rss_dMB", "objs");
+      "| %-9s | %-22s | %14s | %14s | %11s | %9s | %8s | %8s | %7s | %6s |\n",
+      "layout", "workload", "copied_bytes", "write_bytes", "dir_bytes",
+      "wall_ms", "ckp_ms", "p99_us", "rss_dMB", "objs");
   std::printf(
       "|-----------|------------------------|----------------|"
-      "----------------|-----------|----------|---------|--------|\n");
+      "----------------|-------------|-----------|----------|----------|"
+      "---------|--------|\n");
 }
 
 std::vector<Result> g_results;
@@ -554,6 +591,78 @@ ApplyFn DenseUpdate(const Config& cfg) {
   return [cfg](ColumnBase& col, std::vector<double>& lat) {
     const size_t start = cfg.rows / 4;
     for (size_t k = 0; k < cfg.updates; ++k) {
+      const auto s = Clock::now();
+      col.set_any(start + k, Value::INT64(static_cast<int64_t>(k)), true);
+      lat.push_back(
+          std::chrono::duration<double, std::micro>(Clock::now() - s).count());
+    }
+  };
+}
+
+// YCSB-style Zipfian generator over [0, n). theta in [0,1): theta=0 is uniform,
+// theta->1 concentrates draws on a small hot set. Models W4's skewed hot-spot
+// update access, where a few chunks take most writes -- the case where the
+// chunked layout's "fork only touched pages" advantage over a whole-buffer
+// legacy dump is largest (the hot pages are re-forked, the cold tail is not).
+class Zipf {
+ public:
+  Zipf(size_t n, double theta, uint64_t seed) : rng_(seed), n_(n), theta_(theta) {
+    alpha_ = 1.0 / (1.0 - theta);
+    zeta2_ = Zeta(2, theta);
+    zetan_ = Zeta(n, theta);
+    eta_ = (1.0 - std::pow(2.0 / static_cast<double>(n), 1.0 - theta)) /
+           (1.0 - zeta2_ / zetan_);
+  }
+  size_t operator()() {
+    const double u = std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
+    const double uz = u * zetan_;
+    if (uz < 1.0)
+      return 0;
+    if (uz < 1.0 + std::pow(0.5, theta_))
+      return 1;
+    const size_t k = static_cast<size_t>(static_cast<double>(n_) *
+                                         std::pow(eta_ * u - eta_ + 1.0, alpha_));
+    return k < n_ ? k : n_ - 1;
+  }
+
+ private:
+  static double Zeta(size_t n, double theta) {
+    double sum = 0.0;
+    for (size_t i = 1; i <= n; ++i)
+      sum += std::pow(1.0 / static_cast<double>(i), theta);
+    return sum;
+  }
+  std::mt19937_64 rng_;
+  size_t n_;
+  double theta_, alpha_, zeta2_, zetan_, eta_;
+};
+
+// W4 hot-spot update: same op count as RandomUpdate but Zipf-skewed, so writes
+// concentrate on a few hot pages instead of spreading uniformly.
+ApplyFn ZipfUpdate(const Config& cfg) {
+  return [cfg](ColumnBase& col, std::vector<double>& lat) {
+    Zipf zipf(cfg.rows, cfg.zipf_theta, 1234);
+    for (size_t k = 0; k < cfg.updates; ++k) {
+      const size_t row = zipf();
+      const auto s = Clock::now();
+      col.set_any(row, Value::INT64(static_cast<int64_t>(k)), true);
+      lat.push_back(
+          std::chrono::duration<double, std::micro>(Clock::now() - s).count());
+    }
+  };
+}
+
+// Dense high-fraction update: touch dense_fraction % of the whole column as one
+// contiguous run (default 50%). This is the honest worst case for sub-page COW
+// -- when the updated fraction is high, nearly every page in the window forks
+// and the chunked layout converges toward a whole-buffer legacy rewrite, so its
+// copied/write bytes approach legacy's. Reports the crossover cost, not a win.
+ApplyFn DenseHighFractionUpdate(const Config& cfg) {
+  return [cfg](ColumnBase& col, std::vector<double>& lat) {
+    const size_t frac = std::min<size_t>(cfg.dense_fraction, 100);
+    const size_t span = std::max<size_t>(1, cfg.rows * frac / 100);
+    const size_t start = (cfg.rows - span) / 3;  // fixed offset, both layouts
+    for (size_t k = 0; k < span; ++k) {
       const auto s = Clock::now();
       col.set_any(start + k, Value::INT64(static_cast<int64_t>(k)), true);
       lat.push_back(
@@ -622,6 +731,172 @@ double UsSince(const Clock::time_point& t0) {
   return std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
 }
 
+// ---------------------------------------------------------------------------
+// Concurrency results (W17 concurrent append, W18 reader-on-clone). Both are
+// chunked-only: the legacy whole-buffer column has no prepared-append admission
+// contract, and its Clone() shares the *mutable* buffer with no copy-on-write,
+// so concurrent append into reserved rows / reader-on-clone-while-writer-fork
+// are unsafe there (a real data race, not a supported path). The no-race side is
+// pinned by the TSAN tests ConcurrentAppendAfterReopenUsesStableSuffix (W17) and
+// ConcurrentCowForkUnderPinnedSnapshotReader (W18); these benchmarks measure the
+// performance face -- throughput and copy-freedom.
+// ---------------------------------------------------------------------------
+struct ConcResult {
+  std::string workload;
+  size_t threads = 0;
+  size_t rows = 0;
+  double wall_ms = 0.0;
+  double mrows_per_s = 0.0;
+  uint64_t copied_bytes = 0;
+  bool ok = false;  // values verified / snapshot isolation held
+};
+
+void PrintConcHeader() {
+  std::printf("| %-24s | %7s | %10s | %9s | %9s | %14s | %4s |\n", "workload",
+              "threads", "rows", "wall_ms", "Mrows/s", "copied_bytes", "ok");
+  std::printf(
+      "|--------------------------|---------|------------|----------|------"
+      "----|----------------|------|\n");
+}
+
+void PrintConcRow(const ConcResult& r) {
+  std::printf("| %-24s | %7zu | %10zu | %9.2f | %9.3f | %14llu | %4s |\n",
+              r.workload.c_str(), r.threads, r.rows, r.wall_ms, r.mrows_per_s,
+              static_cast<unsigned long long>(r.copied_bytes),
+              r.ok ? "yes" : "NO");
+}
+
+// W17 concurrent append after checkpoint: build+checkpoint a frozen base of
+// base_rows, reopen, reserve an append tail (resize + PrepareForInsert) exactly
+// as the reload path does, then have `threads` writers concurrently fill
+// distinct reserved rows via set_any(..., false) (InsertValue). The frozen base
+// chunks are never copied -- appends land in the prepared, already mutable
+// suffix -- so copied_bytes stays at the one-time boundary-prepare cost no matter
+// how many rows the writers append. Reports append throughput.
+ConcResult RunConcurrentAppend(Checkpoint& ckp, size_t threads, size_t base_rows,
+                              size_t append_rows) {
+  ConcResult r{"w17_concurrent_append", threads, append_rows};
+  auto base = OpenColumn(ChunkedFactory(), ckp, nullptr);
+  base->resize(base_rows);
+  for (size_t i = 0; i < base_rows; ++i)
+    base->set_any(i, Value::INT64(static_cast<int64_t>(i)), true);
+  CheckpointManifest base_meta;
+  base->Dump(ckp, base_meta, "col");
+  ckp.FinalizeObjectWriter(base_meta);
+  base.reset();
+
+  auto col = OpenColumn(ChunkedFactory(), ckp, base_meta.FindModule("col"));
+  // Reserve + prepare the append tail (reload path: EnsureCapacity -> resize +
+  // PrepareForInsert(high-water mark)). This one-time prepare is the only copy.
+  col->resize(base_rows + append_rows);
+  col->PrepareForInsert(base_rows);
+  auto* chunked = dynamic_cast<ChunkedColumn<int64_t>*>(col.get());
+  const uint64_t copied_before = chunked->cow_bytes_copied();
+
+  std::atomic<size_t> ready{0};
+  std::vector<std::thread> writers;
+  writers.reserve(threads);
+  const auto t0 = Clock::now();
+  for (size_t t = 0; t < threads; ++t) {
+    writers.emplace_back([&, t] {
+      ready.fetch_add(1);
+      while (ready.load() != threads)
+        std::this_thread::yield();
+      // Strided so every writer touches a distinct set of reserved rows.
+      for (size_t i = t; i < append_rows; i += threads)
+        col->set_any(base_rows + i, Value::INT64(static_cast<int64_t>(i)),
+                     false);
+    });
+  }
+  for (auto& w : writers)
+    w.join();
+  const auto t1 = Clock::now();
+
+  r.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  r.mrows_per_s =
+      r.wall_ms > 0 ? (static_cast<double>(append_rows) / 1e6) /
+                          (r.wall_ms / 1e3)
+                    : 0.0;
+  r.copied_bytes = chunked->cow_bytes_copied() - copied_before;
+  bool ok = true;
+  for (size_t i = 0; i < append_rows; ++i)
+    if (chunked->get_view(base_rows + i) != static_cast<int64_t>(i)) {
+      ok = false;
+      break;
+    }
+  r.ok = ok;
+  return r;
+}
+
+// W18 reader-on-clone while a single writer forks: build+checkpoint a frozen
+// base, reopen, Clone() a pinned snapshot (an independent page directory sharing
+// the frozen segments -- zero data copy), then run `readers` threads scanning the
+// snapshot and verifying every value stays at its original while ONE writer
+// performs covering set_value on the original. Covering writes are single-writer
+// by admission control (set_value mutates the page directory), so W18 uses one
+// writer. Each write forks only the touched page (Copy), so the snapshot's shared
+// frozen segments are never mutated and readers keep seeing the old values.
+// Reports reader scan throughput, the writer's fork copied_bytes (touched pages
+// only) and whether isolation held; the Clone itself copies 0 data bytes.
+ConcResult RunReaderOnClone(Checkpoint& ckp, size_t readers, size_t rows,
+                           size_t writes) {
+  ConcResult r{"w18_reader_on_clone", readers + 1, rows};
+  auto base = OpenColumn(ChunkedFactory(), ckp, nullptr);
+  base->resize(rows);
+  for (size_t i = 0; i < rows; ++i)
+    base->set_any(i, Value::INT64(static_cast<int64_t>(i)), true);
+  CheckpointManifest base_meta;
+  base->Dump(ckp, base_meta, "col");
+  ckp.FinalizeObjectWriter(base_meta);
+  base.reset();
+
+  auto live = OpenColumn(ChunkedFactory(), ckp, base_meta.FindModule("col"));
+  auto* original = dynamic_cast<ChunkedColumn<int64_t>*>(live.get());
+  // Pinned snapshot: Clone copies the page directory only, no data copy.
+  auto snap_module = live->Clone();
+  auto* snapshot = dynamic_cast<ChunkedColumn<int64_t>*>(snap_module.get());
+
+  std::atomic<bool> stop{false};
+  std::atomic<bool> isolation_ok{true};
+  std::atomic<size_t> reads{0};
+  std::vector<std::thread> th;
+  th.reserve(readers + 1);
+  const auto t0 = Clock::now();
+  for (size_t i = 0; i < readers; ++i) {
+    th.emplace_back([&] {
+      while (!stop.load(std::memory_order_relaxed)) {
+        for (size_t row = 0; row < rows; ++row)
+          if (snapshot->get_view(row) != static_cast<int64_t>(row))
+            isolation_ok.store(false, std::memory_order_relaxed);
+        reads.fetch_add(rows, std::memory_order_relaxed);
+      }
+    });
+  }
+  th.emplace_back([&] {
+    for (size_t k = 0; k < writes; ++k) {
+      const size_t row = k % rows;
+      original->set_value(row, static_cast<int64_t>(row) + 1000000);
+    }
+  });
+  // Join the single writer (last thread), then stop the readers.
+  th.back().join();
+  stop.store(true);
+  for (size_t i = 0; i < readers; ++i)
+    th[i].join();
+  const auto t1 = Clock::now();
+
+  r.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  const size_t total_reads = reads.load();
+  r.mrows_per_s =
+      r.wall_ms > 0
+          ? (static_cast<double>(total_reads) / 1e6) / (r.wall_ms / 1e3)
+          : 0.0;
+  r.rows = total_reads;  // reader-side rows scanned during the window
+  r.copied_bytes = original->cow_bytes_copied();  // writer forked pages only
+  r.ok = isolation_ok.load();
+  return r;
+}
+
 }  // namespace
 
 TEST(ChunkBenchmark, CowUpdateWorkloads) {
@@ -637,7 +912,9 @@ TEST(ChunkBenchmark, CowUpdateWorkloads) {
   } workloads[] = {
       {"single_value_update", SingleValueUpdate(cfg)},
       {"random_update", RandomUpdate(cfg)},
+      {"zipf_update", ZipfUpdate(cfg)},
       {"dense_update", DenseUpdate(cfg)},
+      {"dense_high_fraction", DenseHighFractionUpdate(cfg)},
   };
 
   for (const auto& w : workloads) {
@@ -651,6 +928,125 @@ TEST(ChunkBenchmark, MultiBatchCopy) {
   PrintHeader();
   Record(RunMultiBatchAppend("legacy", LegacyFactory(), cfg));
   Record(RunMultiBatchAppend("chunked", ChunkedFactory(), cfg));
+}
+
+// ---------------------------------------------------------------------------
+// W6 single-row incremental insert: fill one reserved row at a time, growing
+// the column capacity geometrically exactly as VertexTable does, checkpointing
+// every insert_ckp_every rows. Scale is bounded by NEUG_BENCH_INSERTS (not
+// NEUG_BENCH_ROWS).
+//
+// Cadence (this models the real production path, not a pathological one): a
+// single-row TP insert does NOT resize per row. VertexTable::insert_vertices
+// grows capacity geometrically (cap<4096 ? 4096 : cap+cap/4) and calls
+// resize+PrepareForInsert only when the next row crosses the reserved capacity
+// (EnsureCapacity, vertex_table.cc:244-258); each insert then writes a reserved
+// row via InsertValue with no copy. A per-row resize+PrepareForInsert would
+// re-run the boundary merge+split on every row and grossly overstate chunked
+// cost, so we amortize prepare across geometric growth instead.
+//
+// At each checkpoint the column is dumped at its reserved size (size_ ==
+// capacity, matching DisassembleTo which persists the EnsureCapacity-resized
+// column, headroom included) and reopened; the reopened pages are frozen, so we
+// re-prepare the append area (PrepareForInsert(high_water)) exactly as the
+// property_graph reload path does. Under this cadence the legacy whole-buffer
+// column re-copies its prior buffer at every geometric growth (O(n) amortized
+// total, NOT the O(n^2) a per-row resize would imply), while the chunked append
+// reuses existing chunks and only forks the boundary page at each growth plus
+// the reserved headroom tail at each checkpoint reopen. copied/write bytes, the
+// summed checkpoint pause and the object count are reported.
+// ---------------------------------------------------------------------------
+Result RunSingleRowInsert(const std::string& layout, const Factory& factory,
+                          const Config& cfg) {
+  Result r{layout, "single_row_insert"};
+  Sandbox box(layout + "_singlerow");
+  auto& ckp = box.ckp();
+  auto col = OpenColumn(factory, ckp, nullptr);
+  col->resize(0);
+
+  const long rss0 = PeakRssMb();
+  const uint64_t files0 = DirFiles(box.dir());
+  size_t capacity = 0;    // reserved rows the column currently holds
+  size_t high_water = 0;  // logically filled rows (= VertexTable indexer size)
+  const auto t0 = Clock::now();
+  for (size_t k = 0; k < cfg.inserts; ++k) {
+    if (high_water >= capacity) {
+      // Geometric growth identical to VertexTable::insert_vertices.
+      const size_t new_cap = capacity < 4096 ? 4096 : capacity + capacity / 4;
+      col->resize(new_cap);
+      if (!IsChunked(*col))
+        r.copied_bytes += capacity * sizeof(int64_t);  // prior buffer re-copied
+      col->PrepareForInsert(high_water);
+      capacity = new_cap;
+    }
+    col->set_any(high_water, Value::INT64(static_cast<int64_t>(high_water)),
+                 false);
+    ++high_water;
+    if ((k + 1) % cfg.insert_ckp_every == 0) {
+      // Chunked copied bytes are cumulative per live column; read them right
+      // before Dump (end of this checkpoint interval), then reopen resets them.
+      if (IsChunked(*col))
+        r.copied_bytes += ChunkedCopiedBytes(*col);
+      const uint64_t bytes0 = DirBytes(box.dir());
+      const auto tc0 = Clock::now();
+      CheckpointManifest meta;
+      col->Dump(ckp, meta, "col");
+      ckp.FinalizeObjectWriter(meta);
+      r.ckp_ms +=
+          std::chrono::duration<double, std::milli>(Clock::now() - tc0).count();
+      r.write_bytes += DirBytes(box.dir()) - bytes0;
+      // Reopen reloads the reserved capacity as frozen pages (size_ == capacity,
+      // unchanged); production re-prepares the append area on load.
+      col = OpenColumn(factory, ckp, meta.FindModule("col"));
+      col->PrepareForInsert(high_water);
+    }
+  }
+  if (IsChunked(*col))
+    r.copied_bytes += ChunkedCopiedBytes(*col);  // tail interval
+  const auto t1 = Clock::now();
+  r.objects = DirFiles(box.dir()) - files0;
+  r.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  r.rss_delta_mb = PeakRssMb() - rss0;
+  return r;
+}
+
+TEST(ChunkBenchmark, SingleRowInsert) {
+  Config cfg;
+  std::printf("\n=== W6 single-row incremental insert (legacy vs chunked) ===\n");
+  std::printf("inserts=%zu checkpoint_every=%zu\n\n", cfg.inserts,
+              cfg.insert_ckp_every);
+  PrintHeader();
+  Record(RunSingleRowInsert("legacy", LegacyFactory(), cfg));
+  Record(RunSingleRowInsert("chunked", ChunkedFactory(), cfg));
+}
+
+// W17: concurrent append into a prepared reserved tail after a checkpoint
+// reopen. Chunked-only (see RunConcurrentAppend). Scale via NEUG_BENCH_W17_*.
+TEST(ChunkBenchmark, ConcurrentAppendW17) {
+  Sandbox box("w17");
+  const size_t threads = EnvOr("NEUG_BENCH_W17_THREADS", 8);
+  const size_t base_rows = EnvOr("NEUG_BENCH_W17_BASE", 1ull << 20);
+  const size_t append_rows = EnvOr("NEUG_BENCH_W17_APPEND", 1ull << 20);
+  std::printf(
+      "\n=== W17 concurrent append after checkpoint (chunked only) ===\n");
+  std::printf("base_rows=%zu append_rows=%zu threads=%zu\n\n", base_rows,
+              append_rows, threads);
+  PrintConcHeader();
+  PrintConcRow(RunConcurrentAppend(box.ckp(), threads, base_rows, append_rows));
+}
+
+// W18: readers pin a Clone snapshot while one writer forks the original.
+// Chunked-only (see RunReaderOnClone). Scale via NEUG_BENCH_W18_*.
+TEST(ChunkBenchmark, ReaderOnCloneW18) {
+  Sandbox box("w18");
+  const size_t readers = EnvOr("NEUG_BENCH_W18_READERS", 4);
+  const size_t rows = EnvOr("NEUG_BENCH_W18_ROWS", 1ull << 20);
+  const size_t writes = EnvOr("NEUG_BENCH_W18_WRITES", 200000);
+  std::printf("\n=== W18 reader-on-clone x single-writer fork (chunked only) ===\n");
+  std::printf("rows=%zu readers=%zu writer=1 writes=%zu\n\n", rows, readers,
+              writes);
+  PrintConcHeader();
+  PrintConcRow(RunReaderOnClone(box.ckp(), readers, rows, writes));
 }
 
 TEST(ChunkBenchmark, PointRead) {
