@@ -1,0 +1,85 @@
+name: Verify Released SDKs
+
+# One-off cross-platform availability check for the PUBLISHED neug SDKs
+# (PyPI `neug` wheel + npm `@neug-ai/neug` package). For each platform that has
+# a published artifact it verifies, from a clean runner:
+#   * base ops (create / insert / query) on an in-memory database
+#   * INSTALL + LOAD of all 6 official extensions (downloaded from the release
+#     OSS bucket, whose platform token is getOS()+"_"+getArch() => linux_x86_64,
+#     linux_arm64, osx_arm64, win_x86_64, win_arm64)
+#
+# Nothing here builds from source or needs secrets: it only installs public
+# packages and downloads public OSS extensions, so it runs on GitHub-hosted
+# runners. Triggered by pushing this branch; also dispatchable once on main.
+on:
+  push:
+    branches: [verify-released-sdks-0.3.0]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'neug version to verify (PyPI + npm)'
+        required: false
+        default: '0.3.0'
+        type: string
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  NEUG_VER: ${{ github.event.inputs.version || '0.3.0' }}
+
+jobs:
+  # Python wheels are published for linux x86_64/arm64, macos arm64,
+  # windows x86_64/arm64 => test all five.
+  python-sdk:
+    name: py3.12 on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest        # linux x86_64
+          - ubuntu-24.04-arm     # linux arm64
+          - macos-14             # macos arm64
+          - windows-2022         # windows x86_64
+          - windows-11-arm       # windows arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install released wheel + smoke test
+        shell: bash
+        env:
+          EXPECT_VERSION: ${{ env.NEUG_VER }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "neug==${NEUG_VER}"
+          python scripts/verify_released_python.py
+
+  # @neug-ai/neug publishes platform packages for osx-arm64, linux-x86_64 and
+  # windows-x86_64 only => test those three (no linux-arm64 / osx-x86_64 npm pkg).
+  node-sdk:
+    name: node${{ matrix.node-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest        # linux x86_64
+          - macos-14             # macos arm64
+          - windows-2022         # windows x86_64
+        node-version: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install released npm package + smoke test
+        shell: bash
+        env:
+          EXPECT_VERSION: ${{ env.NEUG_VER }}
+        run: |
+          npm install "@neug-ai/neug@${NEUG_VER}"
+          node scripts/verify_released_node.js
