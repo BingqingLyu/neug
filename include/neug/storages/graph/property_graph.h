@@ -140,6 +140,18 @@ class NEUG_API PropertyGraph {
 
   void Compact();
 
+  /// Logical compaction (spec 013): reorder the vertex groups of one label
+  /// whose hole rate meets the threshold, gathering valid rows to the front of
+  /// each group and remapping the four structures (property columns, indexer,
+  /// timestamp, CSR neighbors). Must run inside the exclusive maintenance
+  /// window after old snapshots are reclaimed. hole_rate_threshold selects
+  /// candidate groups; manual callers pass 0 to compact all groups with holes.
+  /// Candidates are ordered by neighbor blast radius (degree sum) ascending;
+  /// max_groups caps the batch budget (manual COMPACT passes SIZE_MAX).
+  void CompactVertexLabelGroups(label_t vertex_label,
+                                double hole_rate_threshold,
+                                size_t max_groups = SIZE_MAX);
+
   /// Dump this graph into @p ckp and clear all in-memory storage afterwards.
   /// Callers that need a usable graph after dumping must explicitly Open() a
   /// checkpoint and rebuild any GraphView that pointed into this graph.

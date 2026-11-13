@@ -159,6 +159,35 @@ Status executeCheckpoint(ExplainMode explain_mode,
   return Status::OK();
 }
 
+// Manual COMPACT (spec 013): logical row-group compaction rides the exclusive
+// checkpoint maintenance window and publishes through the same single atomic
+// checkpoint publisher. The optional label scopes the compaction; manual
+// compaction ignores the automatic hole-rate threshold and batch budget.
+Status executeCompact(const std::optional<std::string>& vertex_label,
+                      ExplainMode explain_mode,
+                      CheckpointCoordinator& checkpoint_coordinator,
+                      UpdateTimestampLease timestamp_lease,
+                      neug::QueryResponse& response) {
+  execution::OprTimer compact_timer;
+  execution::TimerUnit compact_timer_unit;
+  const bool profile = explain_mode == ExplainMode::kProfile;
+  if (profile) {
+    compact_timer.set_name("Compact");
+    compact_timer_unit.start();
+  }
+
+  RETURN_IF_NOT_OK(checkpoint_coordinator.PublishCompaction(
+      std::move(timestamp_lease), vertex_label));
+
+  response.set_row_count(0);
+  if (profile) {
+    compact_timer.record(compact_timer_unit);
+    *response.mutable_profile_result() =
+        execution::OprTimer::ToProfileResult(&compact_timer);
+  }
+  return Status::OK();
+}
+
 Status validateQueryAnalysis(const QueryAnalysis& analysis,
                              const execution::CacheValue& prepared_query) {
   if (analysis.checkpoint() != prepared_query.flags.checkpoint()) {
@@ -300,6 +329,13 @@ Status ExecutionSlot::validateAdminRequest(const AdminRequest& request,
                     "details");
     }
     break;
+  case AdminType::kCompact:
+    if (request.extension) {
+      return Status(StatusCode::ERR_INVALID_ARGUMENT,
+                    "COMPACT admin request must not include extension "
+                    "details");
+    }
+    break;
   case AdminType::kInstallExtension:
   case AdminType::kLoadExtension:
   case AdminType::kUninstallExtension:
@@ -332,6 +368,10 @@ Status ExecutionSlot::executeAdmin(const AdminRequest& request,
   if (request.type == AdminType::kCheckpoint) {
     return executeCheckpoint(explain_mode, checkpoint_coordinator_,
                              UpdateTimestampLease(version_manager_), response);
+  }
+  if (request.type == AdminType::kCompact) {
+    return executeCompact(request.label, explain_mode, checkpoint_coordinator_,
+                          UpdateTimestampLease(version_manager_), response);
   }
   if (request.type != AdminType::kInstallExtension &&
       request.type != AdminType::kLoadExtension &&

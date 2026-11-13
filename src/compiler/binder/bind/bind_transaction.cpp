@@ -33,7 +33,8 @@ std::unique_ptr<BoundStatement> Binder::bindTransaction(
     const Statement& statement) {
   auto& transactionStatement = statement.constCast<TransactionStatement>();
   return std::make_unique<BoundTransactionStatement>(
-      transactionStatement.getTransactionAction());
+      transactionStatement.getTransactionAction(),
+      transactionStatement.getVertexLabel());
 }
 
 }  // namespace binder

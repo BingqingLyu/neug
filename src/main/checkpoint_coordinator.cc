@@ -25,6 +25,7 @@
 
 #include "neug/storages/checkpoint.h"
 #include "neug/storages/checkpoint_manager.h"
+#include "neug/storages/graph/property_graph.h"
 #include "neug/storages/graph_snapshot_store.h"
 #include "neug/transaction/current_cow_write_transaction.h"
 #include "neug/transaction/timestamp_lease.h"
@@ -47,6 +48,38 @@ void cleanup_retired_checkpoints(
   } catch (const std::exception& e) {
     LOG(WARNING) << "Checkpoint GC failed: " << e.what();
   } catch (...) { LOG(WARNING) << "Checkpoint GC failed"; }
+}
+
+// Manual COMPACT scope resolution (spec 013, FR-003): threshold 0 selects
+// every group with holes regardless of the automatic threshold, and the
+// batch budget does not apply. Runs inside the exclusive maintenance window.
+Status compactVertexLabelGroups(PropertyGraph& graph,
+                                const std::optional<std::string>& scope) {
+  if (!scope.has_value() || scope->empty()) {
+    for (label_t label : graph.schema().get_vertex_label_ids()) {
+      graph.CompactVertexLabelGroups(label, 0.0);
+    }
+    return Status::OK();
+  }
+  if (!graph.schema().is_vertex_label_valid(*scope)) {
+    return Status(StatusCode::ERR_INVALID_ARGUMENT,
+                  "COMPACT TABLE: unknown vertex label '" + *scope + "'");
+  }
+  graph.CompactVertexLabelGroups(graph.schema().get_vertex_label_id(*scope),
+                                 0.0);
+  return Status::OK();
+}
+
+// Threshold-driven automatic compaction (spec 013 T602): selects candidate
+// groups per label by hole rate, ordered by neighbor blast radius and capped
+// by the per-window batch budget. Insert/update-only workloads stay at hole
+// rate 0 and never trigger a reorder.
+Status autoCompactVertexLabelGroups(PropertyGraph& graph, double threshold,
+                                    size_t max_groups) {
+  for (label_t label : graph.schema().get_vertex_label_ids()) {
+    graph.CompactVertexLabelGroups(label, threshold, max_groups);
+  }
+  return Status::OK();
 }
 
 }  // namespace
@@ -108,6 +141,37 @@ Status CheckpointCoordinator::PublishManualCheckpoint(
   // checkpoint while this lease still prevents new transactions from starting.
   timestamp_lease.FinishAndResetTimeline();
   return status;
+}
+
+Status CheckpointCoordinator::PublishCompaction(
+    UpdateTimestampLease timestamp_lease,
+    std::optional<std::string> vertex_label) {
+  try {
+    timestamp_lease.MakeUpdateExclusive();
+  } catch (const std::exception& e) {
+    return Status(StatusCode::ERR_INTERNAL_ERROR, e.what());
+  } catch (...) {
+    return Status(StatusCode::ERR_INTERNAL_ERROR,
+                  "Unknown compaction preparation failure");
+  }
+
+  // COMPACT rides the manual checkpoint window and publishes through the
+  // same single atomic publisher (FR-025); the compaction scope is applied
+  // inside the window before the live graph is consumed.
+  Status status = execute(Reason::kManual, nullptr, &vertex_label);
+  if (!status.ok()) {
+    return status;
+  }
+
+  timestamp_lease.FinishAndResetTimeline();
+  return status;
+}
+
+void CheckpointCoordinator::ConfigureAutoCompaction(double hole_rate_threshold,
+                                                    int max_groups) {
+  auto_compact_threshold_ = hole_rate_threshold;
+  auto_compact_max_groups_ =
+      max_groups > 0 ? static_cast<size_t>(max_groups) : SIZE_MAX;
 }
 
 Status CheckpointCoordinator::CommitCowWrite(
@@ -215,7 +279,8 @@ Status CheckpointCoordinator::PublishShutdownCheckpoint(
 }
 
 Status CheckpointCoordinator::execute(
-    Reason reason, bool* live_graph_consumption_started_out) {
+    Reason reason, bool* live_graph_consumption_started_out,
+    const std::optional<std::string>* compact_scope) {
   const bool reopen_after_checkpoint = reason != Reason::kShutdown;
 
   // Once live graph consumption begins, a running database cannot safely
@@ -232,6 +297,26 @@ Status CheckpointCoordinator::execute(
           auto preflight = live_graph.ValidateCheckpointPreconditions();
           if (!preflight.ok()) {
             return preflight;
+          }
+
+          // Logical row-group compaction (spec 013) rides this window: it
+          // runs after old snapshots are reclaimed and before the physical
+          // compact/dump, so the remapped state is what gets published. A
+          // failure here is pre-consumption and returns an ordinary error.
+          // Manual COMPACT (compact_scope) and threshold-driven automatic
+          // compaction are mutually exclusive triggers sharing the window.
+          if (compact_scope != nullptr) {
+            auto compact_status =
+                compactVertexLabelGroups(live_graph, *compact_scope);
+            if (!compact_status.ok()) {
+              return compact_status;
+            }
+          } else if (reason == Reason::kManual && auto_compact_threshold_ > 0) {
+            auto compact_status = autoCompactVertexLabelGroups(
+                live_graph, auto_compact_threshold_, auto_compact_max_groups_);
+            if (!compact_status.ok()) {
+              return compact_status;
+            }
           }
 
           LOG(INFO) << "Executing " << reasonName(reason) << " checkpoint"

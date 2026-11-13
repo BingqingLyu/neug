@@ -22,6 +22,9 @@
 
 #pragma once
 
+#include <string>
+#include <utility>
+
 #include "bound_statement.h"
 #include "neug/compiler/common/enums/transaction_action.h"
 
@@ -34,17 +37,23 @@ class BoundTransactionStatement final : public BoundStatement {
 
  public:
   explicit BoundTransactionStatement(
-      transaction::TransactionAction transactionAction)
+      transaction::TransactionAction transactionAction,
+      std::string vertexLabel = "")
       : BoundStatement{statementType_,
                        BoundStatementResult::createEmptyResult()},
-        transactionAction{transactionAction} {}
+        transactionAction{transactionAction},
+        vertexLabel{std::move(vertexLabel)} {}
 
   transaction::TransactionAction getTransactionAction() const {
     return transactionAction;
   }
 
+  /// COMPACT scope: empty means every vertex label (spec 013).
+  const std::string& getVertexLabel() const { return vertexLabel; }
+
  private:
   transaction::TransactionAction transactionAction;
+  std::string vertexLabel;
 };
 
 }  // namespace binder

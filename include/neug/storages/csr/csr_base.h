@@ -92,6 +92,38 @@ class CsrBase : public Module {
   /// (e.g. CowDetachState) is responsible for tracking which
   /// adjlists have been detached.
   virtual void DetachVertex(vid_t vid, Allocator& alloc) = 0;
+
+  /// Group-internal vid reorder hooks (spec 013). Default no-op for CSR
+  /// implementations without a mutable per-vertex adjacency layout;
+  /// MutableCsr overrides. All run inside the exclusive maintenance window.
+  virtual std::vector<vid_t> CollectGroupNeighbors(vid_t group_begin,
+                                                   size_t capacity) const {
+    (void) group_begin;
+    (void) capacity;
+    return {};
+  }
+  virtual void RemapVerticesNeighbors(const std::vector<vid_t>& vertices,
+                                      vid_t group_begin, size_t capacity,
+                                      const std::vector<vid_t>& mapping) {
+    (void) vertices;
+    (void) group_begin;
+    (void) capacity;
+    (void) mapping;
+  }
+  virtual void ReindexGroup(vid_t group_begin, size_t capacity,
+                            const std::vector<vid_t>& mapping) {
+    (void) group_begin;
+    (void) capacity;
+    (void) mapping;
+  }
+  /// Sum of adjacency degrees over the group's vertices (spec 013 candidate
+  /// ordering: lower degree = smaller neighbor-remap blast radius). Default
+  /// 0 for CSR implementations without a mutable per-vertex layout.
+  virtual size_t SumGroupDegrees(vid_t group_begin, size_t capacity) const {
+    (void) group_begin;
+    (void) capacity;
+    return 0;
+  }
 };
 
 template <typename EDATA_T>

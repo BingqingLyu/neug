@@ -222,7 +222,8 @@ nEUG_Transaction
         | BEGIN SP TRANSACTION SP READ SP ONLY
         | COMMIT
         | ROLLBACK
-        | CHECKPOINT;
+        | CHECKPOINT
+        | COMPACT (SP TABLE SP oC_SymbolicName)?;
 
 nEUG_Extension
     : nEUG_LoadExtension
@@ -736,6 +737,7 @@ nEUG_NonReservedKeywords
         | BY
         | CALL
         | CHECKPOINT
+        | COMPACT
         | COMMENT
         | COMMIT
         | CONTAINS

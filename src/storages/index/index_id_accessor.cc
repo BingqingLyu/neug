@@ -102,6 +102,29 @@ Status DefaultIndexIDAccessor::DeleteVID(vid_t vid) {
   return Status::OK();
 }
 
+void DefaultIndexIDAccessor::RemapGroup(vid_t group_begin, size_t capacity,
+                                        const std::vector<vid_t>& mapping) {
+  if (!vid_to_index_id_) {
+    return;
+  }
+  auto* index_ids = static_cast<index_id_t*>(vid_to_index_id_->GetData());
+  const vid_t invalid = std::numeric_limits<vid_t>::max();
+  std::vector<index_id_t> gathered;
+  gathered.reserve(capacity);
+  for (size_t offset = 0; offset < capacity; ++offset) {
+    if (mapping[offset] != invalid) {
+      gathered.push_back(index_ids[group_begin + offset]);
+    }
+  }
+  for (size_t i = 0; i < gathered.size(); ++i) {
+    index_ids[group_begin + i] = gathered[i];
+  }
+  for (size_t i = gathered.size(); i < capacity; ++i) {
+    index_ids[group_begin + i] = INVALID_INDEX_ID;
+  }
+  rebuildIndexIDToVID();
+}
+
 std::unique_ptr<Module> DefaultIndexIDAccessor::Clone() const {
   auto cloned = std::make_unique<DefaultIndexIDAccessor>();
   cloned->vid_to_index_id_ = vid_to_index_id_;

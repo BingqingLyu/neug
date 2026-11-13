@@ -50,6 +50,19 @@ class IndexIDAccessor : public Module {
   virtual index_id_t UpsertVID(vid_t vid) = 0;
   virtual Status DeleteVID(vid_t vid) = 0;
 
+  /// Reorder one group's vid->index_id mapping by the reorder mapping (spec
+  /// 013). mapping[offset] = new global vid for a valid row, or
+  /// numeric_limits<vid_t>::max() for a deleted/absent row. index_id values are
+  /// unchanged (the engine blob is addressed by index_id, not vid). Must run
+  /// inside the exclusive maintenance window. Default is a no-op for accessors
+  /// that do not own a vid-indexed mapping.
+  virtual void RemapGroup(vid_t group_begin, size_t capacity,
+                          const std::vector<vid_t>& mapping) {
+    (void) group_begin;
+    (void) capacity;
+    (void) mapping;
+  }
+
   void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level) override = 0;
   void Dump(Checkpoint& ckp, CheckpointManifest& meta,
@@ -84,6 +97,8 @@ class NEUG_API DefaultIndexIDAccessor final : public IndexIDAccessor {
   vid_t GetVIDByIndexID(index_id_t index_id) const override;
   index_id_t UpsertVID(vid_t vid) override;
   Status DeleteVID(vid_t vid) override;
+  void RemapGroup(vid_t group_begin, size_t capacity,
+                  const std::vector<vid_t>& mapping) override;
 
   void Open(Checkpoint& ckp, const ModuleDescriptor& descriptor,
             MemoryLevel level) override;

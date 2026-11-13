@@ -12,6 +12,7 @@ enum class TransactionAction : uint8_t {
   COMMIT = 10,
   ROLLBACK = 20,
   CHECKPOINT = 30,
+  COMPACT = 40,
 };
 
 class TransactionActionUtils {

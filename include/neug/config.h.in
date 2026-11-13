@@ -160,6 +160,16 @@ struct NeugDBConfig {
 
   /// Load installed extensions before opening indexes; failures are logged.
   bool auto_load_extension = false;
+
+  /// Logical row-group compaction (spec 013): groups whose hole rate reaches
+  /// this threshold are auto-selected as reorder candidates. Manual COMPACT
+  /// ignores the threshold. Insert/update-only workloads stay at hole rate 0
+  /// and never trigger automatic compaction.
+  double compaction_hole_rate_threshold = 0.3;
+
+  /// Maximum number of groups reordered per maintenance window (batch
+  /// budget). Manual COMPACT is not budget-limited.
+  int compaction_max_groups_per_window = 16;
 };
 
 }  // namespace neug

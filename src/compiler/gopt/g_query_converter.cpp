@@ -323,12 +323,17 @@ void GQueryConvertor::convertCheckpoint(
     const planner::LogicalTransaction& transaction,
     ::physical::PhysicalPlan* plan) {
   auto action = transaction.getTransactionAction();
-  if (action != transaction::TransactionAction::CHECKPOINT) {
+  if (action != transaction::TransactionAction::CHECKPOINT &&
+      action != transaction::TransactionAction::COMPACT) {
     THROW_EXCEPTION_WITH_FILE_LINE("Cannot convert transaction action " +
                                    std::to_string(static_cast<int>(action)) +
                                    " to admin operator");
   }
   auto checkpointPB = std::make_unique<::physical::Checkpoint>();
+  if (action == transaction::TransactionAction::COMPACT) {
+    checkpointPB->set_compact(true);
+    checkpointPB->set_vertex_label(transaction.getVertexLabel());
+  }
   auto physicalOpr = std::make_unique<::physical::PhysicalOpr>();
   auto opr = physicalOpr->mutable_opr();
   opr->set_allocated_checkpoint(checkpointPB.release());

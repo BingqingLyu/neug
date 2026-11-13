@@ -37,11 +37,13 @@ limitations under the License.
 #include "neug/common/types/value.h"
 #include "neug/storages/container/container_utils.h"
 #include "neug/storages/container/i_container.h"
+#include "neug/storages/graph/vertex_timestamp.h"
 #include "neug/storages/module/module.h"
 #include "neug/utils/bitset.h"
 #include "neug/utils/likely.h"
 #include "neug/utils/pb_utils.h"
 #include "neug/utils/property/column.h"
+#include "neug/utils/property/group_frontier.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/serialization/in_archive.h"
 #include "neug/utils/serialization/out_archive.h"
@@ -205,6 +207,12 @@ class LFIndexer {
 
   void SetNumElements(size_t n) { num_elements_.store(n); }
 
+  /// Enable per-group frontier vid allocation (spec 013). When set, new vids
+  /// are allocated from the active group's append frontier instead of the
+  /// global counter; when null (default) allocation is the baseline global
+  /// counter path, unchanged. The frontier is owned by the VertexTable.
+  void SetGroupFrontier(GroupFrontier* frontier) { frontier_ = frontier; }
+
   void SetNumSlotsMinusOne(size_t n) { num_slots_minus_one_ = n; }
 
   void SetHashPolicyIndex(size_t idx) {
@@ -339,6 +347,30 @@ class LFIndexer {
     return get_index(oid, ret) ? ret : sentinel;
   }
 
+  /// Reorder one group's keys by the reorder mapping and rebuild the global
+  /// indices hash (spec 013). mapping[offset] = new global vid for a valid row,
+  /// or numeric_limits<vid_t>::max() for a deleted/absent row. Keys are
+  /// gathered to the front of the group; the indices hash is rebuilt from all
+  /// valid vids (open addressing cannot be updated slot-by-slot without
+  /// breaking probe chains). Must run inside the exclusive maintenance window.
+  void RemapGroup(vid_t group_begin, size_t capacity,
+                  const std::vector<vid_t>& mapping,
+                  const VertexTimestamp& v_ts) {
+    switch (get_type()) {
+#define TYPE_DISPATCHER(enum_val, type) \
+  case DataTypeId::enum_val:            \
+    return remap_group_typed<type>(group_begin, capacity, mapping, v_ts);
+      TYPE_DISPATCHER(kInt64, int64_t)
+      TYPE_DISPATCHER(kInt32, int32_t)
+      TYPE_DISPATCHER(kUInt64, uint64_t)
+      TYPE_DISPATCHER(kUInt32, uint32_t)
+      TYPE_DISPATCHER(kVarchar, std::string_view)
+#undef TYPE_DISPATCHER
+    default:
+      throw_unsupported_primary_key_type(get_type());
+    }
+  }
+
   bool get_index(const Value& oid, INDEX_T& ret) const {
     if (oid.type().id() != get_type() || oid.IsNull()) {
       return false;
@@ -422,6 +454,7 @@ class LFIndexer {
  protected:
   std::unique_ptr<TypedColumn<INDEX_T>> indices_;
   std::atomic<size_t> num_elements_;
+  GroupFrontier* frontier_ = nullptr;
   size_t num_slots_minus_one_;
   std::unique_ptr<ColumnBase> keys_;
   /// PK type captured at construction.  Used by Init to size keys_;
@@ -555,8 +588,18 @@ class LFIndexer {
         reserve_string_data<KEY_T>(capacity(), oid.size());
       }
     }
-    INDEX_T ind = static_cast<INDEX_T>(
-        num_elements_.fetch_add(1, std::memory_order_acq_rel));
+    INDEX_T ind;
+    if (frontier_ != nullptr) {
+      // Per-group frontier allocation (spec 013). In the initial dense state
+      // the lowest non-full group's frontier equals the global counter, so
+      // the vid sequence matches the baseline; after compaction the frontier
+      // retreats to refill the group's contiguous tail holes.
+      ind = static_cast<INDEX_T>(frontier_->AllocateNext());
+      num_elements_.fetch_add(1, std::memory_order_acq_rel);
+    } else {
+      ind = static_cast<INDEX_T>(
+          num_elements_.fetch_add(1, std::memory_order_acq_rel));
+    }
     if (!insert_safe && NEUG_UNLIKELY(static_cast<size_t>(ind) >= capacity())) {
       THROW_INTERNAL_EXCEPTION(
           "Reserved size is not enough: " + std::to_string(capacity()) +
@@ -667,6 +710,43 @@ class LFIndexer {
     for (INDEX_T idx = 0; idx < num_elements; ++idx) {
       if (oid_set.get(idx)) {
         insert_index(idx, GHash<KEY_T>()(typed_keys->get_view(idx)));
+      }
+    }
+  }
+
+  template <typename KEY_T>
+  void remap_group_typed(vid_t group_begin, size_t capacity,
+                         const std::vector<vid_t>& mapping,
+                         const VertexTimestamp& v_ts) {
+    auto* typed_keys = static_cast<TypedColumn<KEY_T>*>(keys_.get());
+    const vid_t invalid = std::numeric_limits<vid_t>::max();
+    // Gather valid keys to the front of the group; clear the tail.
+    std::vector<KEY_T> gathered;
+    gathered.reserve(capacity);
+    for (size_t offset = 0; offset < capacity; ++offset) {
+      if (mapping[offset] != invalid) {
+        gathered.push_back(typed_keys->get_view(group_begin + offset));
+      }
+    }
+    for (size_t i = 0; i < gathered.size(); ++i) {
+      typed_keys->set_value(group_begin + i, gathered[i]);
+    }
+    for (size_t i = gathered.size(); i < capacity; ++i) {
+      typed_keys->set_value(group_begin + i, KEY_T{});
+    }
+    // Rebuild the global indices hash from all valid vids across the whole
+    // vid space (not just the reordered group): clearing the slots drops every
+    // group's entries, so each valid vid must be re-inserted. Requires the
+    // vertex timestamp to already reflect the new layout (the caller remaps
+    // it before this rebuild).
+    auto* indices_ptr = indices_->mutable_data();
+    for (size_t k = 0; k <= num_slots_minus_one_; ++k) {
+      indices_ptr[k] = sentinel;
+    }
+    const size_t total = keys_->size();
+    for (INDEX_T vid = 0; vid < static_cast<INDEX_T>(total); ++vid) {
+      if (v_ts.IsVertexValid(vid, MAX_TIMESTAMP)) {
+        insert_index(vid, GHash<KEY_T>()(typed_keys->get_view(vid)));
       }
     }
   }

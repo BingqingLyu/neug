@@ -50,6 +50,14 @@ std::unique_ptr<Statement> Transformer::transformTransaction(
     return std::make_unique<TransactionStatement>(
         TransactionAction::CHECKPOINT);
   }
+  if (ctx.COMPACT()) {
+    std::string vertexLabel;
+    if (ctx.oC_SymbolicName()) {
+      vertexLabel = ctx.oC_SymbolicName()->getText();
+    }
+    return std::make_unique<TransactionStatement>(TransactionAction::COMPACT,
+                                                  std::move(vertexLabel));
+  }
   NEUG_UNREACHABLE;
 }
 

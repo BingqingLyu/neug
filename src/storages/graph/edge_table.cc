@@ -1044,6 +1044,45 @@ void EdgeTable::Compact(const std::optional<std::string>& sort_key_for_nbr) {
   }
 }
 
+void EdgeTable::RemapVertexGroup(vid_t group_begin, size_t capacity,
+                                 const std::vector<vid_t>& mapping,
+                                 bool reorder_src) {
+  if (reorder_src) {
+    // src label reordered: reindex out_csr (indexed by src), remap in_csr
+    // neighbor fields pointing into the group. Targets located via out_csr.
+    auto targets = out_csr_->CollectGroupNeighbors(group_begin, capacity);
+    in_csr_->RemapVerticesNeighbors(targets, group_begin, capacity, mapping);
+    out_csr_->ReindexGroup(group_begin, capacity, mapping);
+  } else {
+    // dst label reordered: reindex in_csr (indexed by dst), remap out_csr
+    // neighbor fields pointing into the group. Targets located via in_csr.
+    auto targets = in_csr_->CollectGroupNeighbors(group_begin, capacity);
+    out_csr_->RemapVerticesNeighbors(targets, group_begin, capacity, mapping);
+    in_csr_->ReindexGroup(group_begin, capacity, mapping);
+  }
+}
+
+void EdgeTable::RemapSelfVertexGroup(vid_t group_begin, size_t capacity,
+                                     const std::vector<vid_t>& mapping) {
+  // Self-referential label: both directions reference the reordered group.
+  // Collect both target sets while both CSRs still have the old layout, then
+  // remap both directions' neighbor fields, and only then reindex. Ordering
+  // the two single-direction remaps sequentially would read already-remapped
+  // neighbor fields or half-reindexed adjacency lists.
+  auto out_targets = out_csr_->CollectGroupNeighbors(group_begin, capacity);
+  auto in_targets = in_csr_->CollectGroupNeighbors(group_begin, capacity);
+  in_csr_->RemapVerticesNeighbors(out_targets, group_begin, capacity, mapping);
+  out_csr_->RemapVerticesNeighbors(in_targets, group_begin, capacity, mapping);
+  out_csr_->ReindexGroup(group_begin, capacity, mapping);
+  in_csr_->ReindexGroup(group_begin, capacity, mapping);
+}
+
+size_t EdgeTable::SumGroupDegrees(vid_t group_begin, size_t capacity,
+                                  bool src_side) const {
+  return src_side ? out_csr_->SumGroupDegrees(group_begin, capacity)
+                  : in_csr_->SumGroupDegrees(group_begin, capacity);
+}
+
 size_t EdgeTable::PropTableSize() const {
   if (meta_->is_bundled()) {
     return 0;

@@ -2401,6 +2401,112 @@ TEST_F(ConnectionTest,
   }
 }
 
+// COMPACT admin command end-to-end (spec 013 FR-003/FR-025): manual COMPACT
+// reorders groups with holes regardless of the automatic threshold, keeps
+// PK lookups and both edge directions consistent, publishes through the
+// checkpoint single publisher, and survives a reopen round-trip.
+TEST_F(ConnectionTest, CompactCommandRemapsHolesAndSurvivesReopen) {
+  NeugDBConfig config;
+  config.data_dir = DB_DIR;
+  config.mode = DBMode::READ_WRITE;
+  config.checkpoint_on_close = false;
+
+  auto read_person_ids = [](std::shared_ptr<Connection>& conn) {
+    std::vector<int64_t> ids;
+    auto res = conn->Query("MATCH (n:person) RETURN n.id ORDER BY n.id;");
+    EXPECT_TRUE(res) << res.error().ToString();
+    auto col = res.value().response().arrays(0).int64_array();
+    for (int64_t i = 0; i < col.values_size(); ++i) {
+      ids.push_back(col.values(i));
+    }
+    return ids;
+  };
+  auto read_knows_edges = [](std::shared_ptr<Connection>& conn) {
+    std::vector<std::pair<int64_t, int64_t>> edges;
+    auto res =
+        conn->Query("MATCH (a:person)-[:knows]->(b:person) RETURN a.id, b.id;");
+    EXPECT_TRUE(res) << res.error().ToString();
+    auto src = res.value().response().arrays(0).int64_array();
+    auto dst = res.value().response().arrays(1).int64_array();
+    for (int64_t i = 0; i < src.values_size(); ++i) {
+      edges.emplace_back(src.values(i), dst.values(i));
+    }
+    std::sort(edges.begin(), edges.end());
+    return edges;
+  };
+
+  {
+    NeugDB db;
+    ASSERT_TRUE(db.Open(config));
+    auto conn = db.Connect();
+
+    const auto baseline_ids = read_person_ids(conn);
+    ASSERT_GE(baseline_ids.size(), 3u);
+    const auto baseline_edges = read_knows_edges(conn);
+
+    // Delete one person to punch a hole (cascades its edges).
+    const int64_t deleted_id = baseline_ids[1];
+    ASSERT_TRUE(conn->Query(
+        "MATCH (n:person {id: " + std::to_string(deleted_id) + "}) DELETE n;",
+        "update"));
+
+    // Expected survivors and edges after the delete, before compaction.
+    std::vector<int64_t> expected_ids;
+    for (int64_t id : baseline_ids) {
+      if (id != deleted_id) {
+        expected_ids.push_back(id);
+      }
+    }
+    std::vector<std::pair<int64_t, int64_t>> expected_edges;
+    for (const auto& [s, d] : baseline_edges) {
+      if (s != deleted_id && d != deleted_id) {
+        expected_edges.emplace_back(s, d);
+      }
+    }
+
+    // Manual COMPACT scoped to one label: ignores the automatic threshold.
+    auto compact = conn->Query("COMPACT TABLE person;", "update");
+    ASSERT_TRUE(compact) << compact.error().ToString();
+    EXPECT_EQ(read_person_ids(conn), expected_ids);
+    EXPECT_EQ(read_knows_edges(conn), expected_edges);
+
+    // Unscoped COMPACT covers every label (software/created included).
+    auto compact_all = conn->Query("COMPACT;", "update");
+    ASSERT_TRUE(compact_all) << compact_all.error().ToString();
+    EXPECT_EQ(read_person_ids(conn), expected_ids);
+    EXPECT_EQ(read_knows_edges(conn), expected_edges);
+
+    // Unknown label is rejected without touching the graph.
+    auto bad = conn->Query("COMPACT TABLE no_such_label;", "update");
+    ASSERT_FALSE(bad);
+    EXPECT_EQ(bad.error().error_code(), StatusCode::ERR_INVALID_ARGUMENT);
+
+    // Insert after compaction refills the reclaimed tail hole.
+    ASSERT_TRUE(
+        conn->Query("CREATE (:person {id: 99999, name: 'refill', age: 1});"));
+    db.Close();
+  }
+
+  // Reopen round-trip: the remapped state was published atomically through
+  // the checkpoint and must restore consistently.
+  {
+    NeugDB reopened;
+    ASSERT_TRUE(reopened.Open(config));
+    auto conn = reopened.Connect();
+    auto ids = read_person_ids(conn);
+    EXPECT_NE(std::find(ids.begin(), ids.end(), 99999), ids.end());
+    auto edges = read_knows_edges(conn);
+    for (const auto& [s, d] : edges) {
+      EXPECT_NE(s, 0);
+      EXPECT_NE(d, 0);
+    }
+    auto refill =
+        conn->Query("MATCH (n:person {id: 99999}) RETURN n.name;", "read");
+    ASSERT_TRUE(refill) << refill.error().ToString();
+    EXPECT_EQ(refill.value().response().row_count(), 1);
+  }
+}
+
 TEST_F(ConnectionTest, RepeatedCopyProjectionAndTopNAcrossChunkPages) {
   NeugDBConfig config(DB_DIR);
   config.checkpoint_on_close = false;

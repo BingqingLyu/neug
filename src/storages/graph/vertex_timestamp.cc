@@ -208,6 +208,36 @@ void VertexTimestamp::Compact() {
   }
 }
 
+void VertexTimestamp::RemapGroup(vid_t group_begin, size_t capacity,
+                                 const std::vector<vid_t>& mapping) {
+  assert(mapping.size() == capacity);
+  // Bulk-loaded rows live in the initial range [0, init_vertex_num_) whose
+  // validity is tracked by the sparse removal set, not the inserted-timestamp
+  // segment. Materialize that range into the segment first so the reorder
+  // operates on a single uniform representation (deleted rows become
+  // DELETED_TIMESTAMP entries and gather drops them like any other hole).
+  if (group_begin < init_vertex_num_) {
+    materialize_compacted_range_for_reuse(group_begin);
+  }
+  assert(group_begin >= init_vertex_num_);
+  const vid_t invalid = std::numeric_limits<vid_t>::max();
+  std::vector<timestamp_t> gathered;
+  gathered.reserve(capacity);
+  for (size_t offset = 0; offset < capacity; ++offset) {
+    if (mapping[offset] != invalid) {
+      gathered.push_back(
+          inserted_vertices_[group_begin + offset - init_vertex_num_].load());
+    }
+  }
+  for (size_t i = 0; i < gathered.size(); ++i) {
+    inserted_vertices_[group_begin + i - init_vertex_num_].store(gathered[i]);
+  }
+  for (size_t i = gathered.size(); i < capacity; ++i) {
+    inserted_vertices_[group_begin + i - init_vertex_num_].store(
+        DELETED_TIMESTAMP);
+  }
+}
+
 void VertexTimestamp::ResetTimestamps() {
   vid_t num = max_vertex_num_ - init_vertex_num_;
   for (vid_t v = 0; v < num; ++v) {

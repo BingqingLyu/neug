@@ -29,6 +29,7 @@
 #include "neug/storages/checkpoint_manager.h"
 #include "neug/storages/checkpoint_manifest.h"
 #include "neug/storages/graph/cow_detach_state.h"
+#include "neug/storages/graph/row_group_compaction.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/index/index_utils.h"
 #include "neug/storages/index/storage_index_manager.h"
@@ -999,6 +1000,82 @@ void PropertyGraph::compact_schema() {
   new_dirty.SetSchema(dirty_.IsSchemaDirty());  // schema bit survives compact
   dirty_ = std::move(new_dirty);
   v_mutex_.resize(new_schema.vertex_label_frontier());
+}
+
+void PropertyGraph::CompactVertexLabelGroups(label_t vertex_label,
+                                             double hole_rate_threshold,
+                                             size_t max_groups) {
+  VertexTable& vt = get_vertex_table(vertex_label);
+  const RowGroupLayout layout = vt.row_group_layout();
+  const auto stats = vt.all_group_hole_stats();
+  // Collect candidates: groups with holes at or above the threshold. A fully
+  // deleted group (hole_rate == 1) IS compacted: its frontier retreats to
+  // zero and the whole vid range becomes refillable.
+  std::vector<GroupHoleStats> candidates;
+  for (const auto& s : stats) {
+    if (s.hole_rate <= 0.0 || s.hole_rate < hole_rate_threshold) {
+      continue;
+    }
+    candidates.push_back(s);
+  }
+  if (candidates.empty() || max_groups == 0) {
+    return;
+  }
+  // Order by neighbor blast radius (degree sum over the group's vertices,
+  // both CSR directions of every involved edge table) ascending so low-impact
+  // groups reorder first, then cap by the per-window batch budget.
+  std::vector<std::pair<size_t, size_t>> degree_by_candidate;
+  degree_by_candidate.reserve(candidates.size());
+  for (const auto& s : candidates) {
+    const vid_t begin = static_cast<vid_t>(layout.GroupBegin(s.group_id));
+    const size_t capacity = layout.GroupEnd(s.group_id, vt.LidNum()) - begin;
+    size_t degree = 0;
+    for (const auto& [index, et] : edge_tables_) {
+      const auto meta = et.meta();
+      if (meta->src_label_id == vertex_label) {
+        degree += et.SumGroupDegrees(begin, capacity, /*src_side=*/true);
+      }
+      if (meta->dst_label_id == vertex_label) {
+        degree += et.SumGroupDegrees(begin, capacity, /*src_side=*/false);
+      }
+    }
+    degree_by_candidate.emplace_back(degree, degree_by_candidate.size());
+  }
+  std::sort(degree_by_candidate.begin(), degree_by_candidate.end());
+  if (degree_by_candidate.size() > max_groups) {
+    degree_by_candidate.resize(max_groups);
+  }
+  // Enable per-group frontier allocation before retreating any group; the
+  // dense-state initialization keeps allocation baseline-identical until the
+  // first retreat below.
+  GroupFrontier& frontier = vt.ensure_group_frontier();
+  for (const auto& [degree, candidate_idx] : degree_by_candidate) {
+    (void) degree;
+    const auto& s = candidates[candidate_idx];
+    const auto mapping = GenerateGroupReorderMap(vt, s.group_id);
+    const vid_t group_begin = static_cast<vid_t>(layout.GroupBegin(s.group_id));
+    const size_t capacity = mapping.size();
+    // Vertex-side remap: timestamp, indexer keys/indices, property columns.
+    vt.RemapGroup(s.group_id, mapping);
+    // CSR neighbor remap across edge tables involving this vertex label.
+    for (auto& [index, et] : edge_tables_) {
+      const auto meta = et.meta();
+      const bool src_match = meta->src_label_id == vertex_label;
+      const bool dst_match = meta->dst_label_id == vertex_label;
+      if (src_match && dst_match) {
+        et.RemapSelfVertexGroup(group_begin, capacity, mapping);
+      } else if (src_match) {
+        et.RemapVertexGroup(group_begin, capacity, mapping,
+                            /*reorder_src=*/true);
+      } else if (dst_match) {
+        et.RemapVertexGroup(group_begin, capacity, mapping,
+                            /*reorder_src=*/false);
+      }
+    }
+    // Retreat the group's append frontier so subsequent inserts refill the
+    // contiguous tail holes in order (FR-020).
+    frontier.Retreat(s.group_id, s.valid_count);
+  }
 }
 
 void PropertyGraph::Compact() {

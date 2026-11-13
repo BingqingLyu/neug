@@ -44,6 +44,9 @@ std::string TransactionActionUtils::toString(TransactionAction action) {
   case TransactionAction::CHECKPOINT: {
     return "CHECKPOINT";
   }
+  case TransactionAction::COMPACT: {
+    return "COMPACT";
+  }
   default:
     NEUG_UNREACHABLE;
   }

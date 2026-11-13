@@ -15,6 +15,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "neug/config.h"
@@ -78,6 +79,25 @@ class CheckpointCoordinator {
   /// phase and must not hold an ordinary snapshot pin.
   Status PublishManualCheckpoint(UpdateTimestampLease timestamp_lease);
 
+  /// Publish a manual COMPACT (spec 013): run logical row-group compaction
+  /// inside the exclusive maintenance window after old snapshots are
+  /// reclaimed, then publish a full checkpoint through the same single
+  /// atomic publisher and reopen. @p vertex_label scopes the compaction to
+  /// one vertex label; nullopt (or an empty name) covers all labels. Manual
+  /// compaction ignores the automatic hole-rate threshold and batch budget.
+  /// Lease contract is identical to PublishManualCheckpoint().
+  Status PublishCompaction(UpdateTimestampLease timestamp_lease,
+                           std::optional<std::string> vertex_label);
+
+  /// Enable threshold-driven automatic logical compaction (spec 013 T602).
+  /// When enabled, every manual checkpoint window first reorders candidate
+  /// groups whose hole rate reaches @p hole_rate_threshold, capped at @p
+  /// max_groups per label (batch budget). The window precondition already
+  /// requires every stale snapshot reclaimed, so a long transaction pinning
+  /// an old snapshot keeps the window closed and compaction is skipped, not
+  /// hard-waited. Disabled by default; the database owner injects the config.
+  void ConfigureAutoCompaction(double hole_rate_threshold, int max_groups);
+
   /// Commit a private COW transaction containing persistent bulk mutations
   /// through a checkpoint. Any ordinary DDL/DML in the same workspace is
   /// captured by that checkpoint instead of being appended as logical WAL.
@@ -109,7 +129,8 @@ class CheckpointCoordinator {
   };
 
   Status execute(Reason reason,
-                 bool* live_graph_consumption_started_out = nullptr);
+                 bool* live_graph_consumption_started_out = nullptr,
+                 const std::optional<std::string>* compact_scope = nullptr);
   void invokeWalEpochActivationHandler(const std::string& checkpoint_wal_dir);
   static const char* reasonName(Reason reason);
 
@@ -118,6 +139,9 @@ class CheckpointCoordinator {
   MemoryLevel memory_level_;
   PostReopenHandler post_reopen_handler_;
   WalEpochActivationHandler wal_epoch_activation_handler_;
+  // Automatic logical compaction (spec 013 T602); threshold <= 0 disables.
+  double auto_compact_threshold_ = 0.0;
+  size_t auto_compact_max_groups_ = 0;
 };
 
 }  // namespace neug

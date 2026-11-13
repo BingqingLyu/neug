@@ -60,7 +60,103 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   MutableCsr() : unsorted_since_(0) {}
   ~MutableCsr() = default;
 
+  /// Collect the neighbor vids of the group's vertices (spec 013). The
+  /// orchestrator uses this on the opposite-direction CSR to locate the remap
+  /// targets (neighbor-set approach, not a full-graph scan). Iterates the
+  /// group's adjacency lists indexed by their current (pre-reindex) vids.
+  std::vector<vid_t> CollectGroupNeighbors(vid_t group_begin,
+                                           size_t capacity) const override {
+    const auto* const* buffers =
+        reinterpret_cast<const nbr_t* const*>(adj_list_buffer_->GetData());
+    const auto* sizes =
+        reinterpret_cast<const std::atomic<int>*>(degree_list_->GetData());
+    std::vector<vid_t> neighbors;
+    for (size_t offset = 0; offset < capacity; ++offset) {
+      const vid_t v = group_begin + offset;
+      const int deg = sizes[v].load(std::memory_order_relaxed);
+      for (int j = 0; j < deg; ++j) {
+        neighbors.push_back(buffers[v][j].neighbor);
+      }
+    }
+    return neighbors;
+  }
+
+  /// Remap neighbor fields pointing into the reordered group for a given set
+  /// of vertices (spec 013). mapping[offset] = new vid, or invalid for a
+  /// deleted row. Only the given vertices' adjacency lists are touched
+  /// (neighbor-set approach). Runs inside the exclusive maintenance window.
+  void RemapVerticesNeighbors(const std::vector<vid_t>& vertices,
+                              vid_t group_begin, size_t capacity,
+                              const std::vector<vid_t>& mapping) override {
+    auto** buffers = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+    auto* sizes = reinterpret_cast<std::atomic<int>*>(degree_list_->GetData());
+    const vid_t invalid = std::numeric_limits<vid_t>::max();
+    const vid_t group_end = group_begin + static_cast<vid_t>(capacity);
+    // Dedup the target set: a vertex with several edges into the group
+    // appears once per edge, and visiting its list twice would remap the
+    // already-remapped neighbor fields a second time (corruption).
+    std::vector<vid_t> targets = vertices;
+    std::sort(targets.begin(), targets.end());
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+    for (vid_t v : targets) {
+      const int deg = sizes[v].load(std::memory_order_relaxed);
+      for (int j = 0; j < deg; ++j) {
+        const vid_t nbr = buffers[v][j].neighbor;
+        if (nbr >= group_begin && nbr < group_end) {
+          const vid_t new_nbr = mapping[nbr - group_begin];
+          if (new_nbr != invalid) {
+            buffers[v][j].neighbor = new_nbr;
+          }
+        }
+      }
+    }
+  }
+
+  /// Reindex the group's adjacency lists by the reorder mapping (spec 013):
+  /// gather valid adjacency lists to the front of the group, clear the tail.
+  /// Runs inside the exclusive maintenance window.
+  void ReindexGroup(vid_t group_begin, size_t capacity,
+                    const std::vector<vid_t>& mapping) override {
+    auto** buffers = reinterpret_cast<nbr_t**>(adj_list_buffer_->GetData());
+    auto* sizes = reinterpret_cast<std::atomic<int>*>(degree_list_->GetData());
+    auto* caps = reinterpret_cast<int*>(cap_list_->GetData());
+    const vid_t invalid = std::numeric_limits<vid_t>::max();
+    std::vector<nbr_t*> g_buffers;
+    std::vector<int> g_sizes, g_caps;
+    g_buffers.reserve(capacity);
+    for (size_t offset = 0; offset < capacity; ++offset) {
+      if (mapping[offset] != invalid) {
+        const vid_t v = group_begin + offset;
+        g_buffers.push_back(buffers[v]);
+        g_sizes.push_back(sizes[v].load(std::memory_order_relaxed));
+        g_caps.push_back(caps[v]);
+      }
+    }
+    for (size_t i = 0; i < g_buffers.size(); ++i) {
+      buffers[group_begin + i] = g_buffers[i];
+      sizes[group_begin + i].store(g_sizes[i], std::memory_order_relaxed);
+      caps[group_begin + i] = g_caps[i];
+    }
+    for (size_t i = g_buffers.size(); i < capacity; ++i) {
+      buffers[group_begin + i] = nullptr;
+      sizes[group_begin + i].store(0, std::memory_order_relaxed);
+      caps[group_begin + i] = 0;
+    }
+  }
+
   CsrType csr_type() const override { return CsrType::kMutable; }
+
+  size_t SumGroupDegrees(vid_t group_begin, size_t capacity) const override {
+    const auto* sizes =
+        reinterpret_cast<const std::atomic<int>*>(degree_list_->GetData());
+    size_t sum = 0;
+    for (size_t offset = 0; offset < capacity; ++offset) {
+      const int deg =
+          sizes[group_begin + offset].load(std::memory_order_relaxed);
+      sum += static_cast<size_t>(deg > 0 ? deg : 0);
+    }
+    return sum;
+  }
 
   CsrView get_generic_view(timestamp_t ts) const override {
     NbrIterConfig cfg;

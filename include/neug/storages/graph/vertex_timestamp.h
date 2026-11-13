@@ -167,6 +167,15 @@ class NEUG_API VertexTimestamp : public Module {
   // Compact the vertex timestamp storage
   void Compact();
 
+  // Reorder one group's inserted-timestamp segment by the reorder mapping
+  // (spec 013). mapping[offset] = new global vid for a valid row, or
+  // numeric_limits<vid_t>::max() for a deleted/absent row. Valid timestamps
+  // are gathered to the front of the group; tail slots become DELETED.
+  // Must run inside the exclusive maintenance window (no concurrent access).
+  // Operates on the inserted range [init_vertex_num_, max_vertex_num_).
+  void RemapGroup(vid_t group_begin, size_t capacity,
+                  const std::vector<vid_t>& mapping);
+
   // Reset timestamps of all valid vertices to zero
   void ResetTimestamps();
 

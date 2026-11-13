@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <utility>
+
 #include "neug/compiler/common/enums/transaction_action.h"
 #include "neug/compiler/planner/operator/logical_operator.h"
 
@@ -10,8 +13,11 @@ class LogicalTransaction : public LogicalOperator {
   static constexpr LogicalOperatorType type_ = LogicalOperatorType::TRANSACTION;
 
  public:
-  explicit LogicalTransaction(transaction::TransactionAction transactionAction)
-      : LogicalOperator{type_}, transactionAction{transactionAction} {}
+  explicit LogicalTransaction(transaction::TransactionAction transactionAction,
+                              std::string vertexLabel = "")
+      : LogicalOperator{type_},
+        transactionAction{transactionAction},
+        vertexLabel{std::move(vertexLabel)} {}
 
   std::string getExpressionsForPrinting() const final { return std::string(); }
 
@@ -22,12 +28,16 @@ class LogicalTransaction : public LogicalOperator {
     return transactionAction;
   }
 
+  /// COMPACT scope: empty means every vertex label (spec 013).
+  const std::string& getVertexLabel() const { return vertexLabel; }
+
   std::unique_ptr<LogicalOperator> copy() final {
-    return std::make_unique<LogicalTransaction>(transactionAction);
+    return std::make_unique<LogicalTransaction>(transactionAction, vertexLabel);
   }
 
  private:
   transaction::TransactionAction transactionAction;
+  std::string vertexLabel;
 };
 
 }  // namespace planner

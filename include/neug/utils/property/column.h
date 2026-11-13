@@ -79,6 +79,15 @@ class ColumnBase : public Module {
   /// derives a uniform row group layout from this without RTTI.
   virtual size_t rows_per_group() const { return 0; }
 
+  /// Gather valid rows of one group to the front by the reorder mapping (spec
+  /// 013). Default no-op for non-chunked columns; ChunkedColumn overrides.
+  virtual void GatherGroup(size_t group_begin, size_t capacity,
+                           const std::vector<vid_t>& mapping) {
+    (void) group_begin;
+    (void) capacity;
+    (void) mapping;
+  }
+
   // insert_safe is true when the column needs to be resized to accommodate the
   // new value, which can happen when the value is not fixed length. If the
   // value is fixed length, we should already have enough space allocated, so

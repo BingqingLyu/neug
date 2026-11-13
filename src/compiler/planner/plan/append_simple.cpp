@@ -147,7 +147,8 @@ void Planner::appendTransaction(const BoundStatement& statement,
                                 LogicalPlan& plan) {
   auto& transactionStatement = statement.constCast<BoundTransactionStatement>();
   auto op = std::make_shared<LogicalTransaction>(
-      transactionStatement.getTransactionAction());
+      transactionStatement.getTransactionAction(),
+      transactionStatement.getVertexLabel());
   plan.setLastOperator(std::move(op));
 }
 

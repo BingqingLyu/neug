@@ -225,6 +225,30 @@ class ChunkedColumn : public ColumnBase {
     }
     return result;
   }
+
+  /// Gather valid rows of one group to the front by the reorder mapping (spec
+  /// 013). mapping[offset] = new global vid for a valid row, or
+  /// numeric_limits<vid_t>::max() for a deleted/absent row. Valid values are
+  /// moved to [group_begin, group_begin + valid_count); tail slots are left
+  /// stale (their bytes are reclaimed when the old layout is GC'd after the
+  /// remap publishes). Runs inside the exclusive maintenance window; set_value
+  /// applies sub-page COW. The flat read path pages_[vid >> page_shift_] is
+  /// unchanged.
+  void GatherGroup(size_t group_begin, size_t capacity,
+                   const std::vector<vid_t>& mapping) override {
+    const vid_t invalid = std::numeric_limits<vid_t>::max();
+    std::vector<T> gathered;
+    gathered.reserve(capacity);
+    for (size_t offset = 0; offset < capacity; ++offset) {
+      if (mapping[offset] != invalid) {
+        gathered.push_back(get_view(group_begin + offset));
+      }
+    }
+    for (size_t i = 0; i < gathered.size(); ++i) {
+      set_value(group_begin + i, gathered[i]);
+    }
+  }
+
   DataTypeId type() const override { return ValueConverter<T>::type().id(); }
 
   void resize(size_t n) override {

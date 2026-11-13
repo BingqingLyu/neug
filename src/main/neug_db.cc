@@ -207,6 +207,12 @@ bool NeugDB::Open(const NeugDBConfig& config) {
             wal_writers_->RotateActive(wal_uri);
           }
         });
+    // Threshold-driven automatic logical compaction (spec 013 T602) rides the
+    // manual checkpoint maintenance window; insert/update-only workloads stay
+    // at hole rate 0 and never trigger it.
+    checkpoint_coordinator_->ConfigureAutoCompaction(
+        config_.compaction_hole_rate_threshold,
+        config_.compaction_max_groups_per_window);
     if (initial_visibility_ts > 0 && config.checkpoint_on_recovery &&
         config_.mode == DBMode::READ_WRITE) {
       LOG(INFO) << "Creating checkpoint after recovery at ts "

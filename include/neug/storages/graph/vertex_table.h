@@ -22,6 +22,7 @@
 #include "neug/storages/module/module.h"
 #include "neug/utils/api.h"
 #include "neug/utils/indexers.h"
+#include "neug/utils/property/group_frontier.h"
 #include "neug/utils/property/table.h"
 
 namespace neug {
@@ -88,6 +89,15 @@ class VertexSet {
 };
 
 class PropertyGraph;
+
+/// Per-group hole statistics for logical compaction candidate selection
+/// (spec 013). hole_rate = 1 - valid_count / group_capacity.
+struct GroupHoleStats {
+  size_t group_id;
+  size_t valid_count;
+  double hole_rate;
+};
+
 class NEUG_API VertexTable {
  public:
   VertexTable()
@@ -118,7 +128,12 @@ class NEUG_API VertexTable {
         pk_type_(other.pk_type_),
         vertex_schema_(other.vertex_schema_),
         v_ts_(std::move(other.v_ts_)),
-        memory_level_(other.memory_level_) {}
+        memory_level_(other.memory_level_),
+        frontier_(std::move(other.frontier_)) {
+    if (indexer_ && frontier_) {
+      indexer_->SetGroupFrontier(frontier_.get());
+    }
+  }
 
   VertexTable(const VertexTable&) = delete;
   VertexTable& operator=(const VertexTable&) = delete;
@@ -132,6 +147,10 @@ class NEUG_API VertexTable {
       vertex_schema_ = other.vertex_schema_;
       v_ts_ = std::move(other.v_ts_);
       memory_level_ = other.memory_level_;
+      frontier_ = std::move(other.frontier_);
+      if (indexer_ && frontier_) {
+        indexer_->SetGroupFrontier(frontier_.get());
+      }
     }
     return *this;
   }
@@ -144,6 +163,16 @@ class NEUG_API VertexTable {
     std::swap(vertex_schema_, other.vertex_schema_);
     v_ts_.swap(other.v_ts_);
     std::swap(memory_level_, other.memory_level_);
+    frontier_.swap(other.frontier_);
+    // Re-point each indexer at its own table's frontier after the swap.
+    // Guard against moved-from tables whose indexer_ is null (e.g. the empty
+    // slot CreateVertexType swaps a fresh table into).
+    if (indexer_) {
+      indexer_->SetGroupFrontier(frontier_.get());
+    }
+    if (other.indexer_) {
+      other.indexer_->SetGroupFrontier(other.frontier_.get());
+    }
   }
 
   void Init(std::shared_ptr<Checkpoint> ckp, MemoryLevel memory_level);
@@ -299,6 +328,29 @@ class NEUG_API VertexTable {
   RowGroup group_at(size_t group_id) const;
   RowGroup group_of(vid_t vid) const;
 
+  // --- Per-group hole statistics (logical compaction, spec 013) ---
+  GroupHoleStats group_hole_stats(size_t group_id,
+                                  timestamp_t ts = MAX_TIMESTAMP) const;
+  std::vector<GroupHoleStats> all_group_hole_stats(
+      timestamp_t ts = MAX_TIMESTAMP) const;
+
+  // --- Group-internal vid reorder (logical compaction, spec 013) ---
+  /// Reorder one group's vertex-side structures by the mapping: indexer keys
+  /// (gather) + indices (global rebuild), vertex timestamp segment, and every
+  /// fixed-length property column (gather). CSR neighbor remap is coordinated
+  /// separately by the graph-level orchestrator. Must run inside the exclusive
+  /// maintenance window after old snapshots are reclaimed.
+  void RemapGroup(size_t group_id, const std::vector<vid_t>& mapping);
+
+  // --- Per-group append frontier (logical compaction, spec 013) ---
+  /// Lazily enable per-group frontier vid allocation. The frontier starts in
+  /// the dense state (frontier_g = rows ever allocated in group g, derived
+  /// from the timestamp high-water mark), so allocation matches the baseline
+  /// global counter until a compaction retreats a group. Null until first
+  /// compaction keeps the pre-compaction insert path on the baseline.
+  GroupFrontier& ensure_group_frontier();
+  GroupFrontier* group_frontier() { return frontier_.get(); }
+
   void SetColumn(size_t col, std::unique_ptr<ColumnBase> column);
 
  private:
@@ -331,6 +383,9 @@ class NEUG_API VertexTable {
   std::shared_ptr<const VertexSchema> vertex_schema_;
   std::unique_ptr<VertexTimestamp> v_ts_;
   MemoryLevel memory_level_;
+  // Per-group append frontier (spec 013); owned here, referenced by the
+  // indexer. Null until the first compaction enables frontier allocation.
+  std::unique_ptr<GroupFrontier> frontier_;
 
   friend class PropertyGraph;
   friend class VertexTableView;

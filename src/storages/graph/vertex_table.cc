@@ -46,6 +46,82 @@ RowGroup VertexTable::group_of(vid_t vid) const {
   return table_->group_of(vid);
 }
 
+GroupHoleStats VertexTable::group_hole_stats(size_t group_id,
+                                             timestamp_t ts) const {
+  const RowGroupLayout layout = row_group_layout();
+  const size_t begin = layout.GroupBegin(group_id);
+  size_t end = layout.GroupEnd(group_id, LidNum());
+  // After compaction the group's allocated range shrinks to its frontier:
+  // reclaimed tail holes no longer count against the hole rate, so a
+  // compacted group reads as dense and is not re-selected.
+  if (frontier_ && group_id < frontier_->group_count()) {
+    end = std::min(end, begin + frontier_->Frontier(group_id));
+  }
+  size_t valid = 0;
+  for (size_t v = begin; v < end; ++v) {
+    if (v_ts_->IsVertexValid(static_cast<vid_t>(v), ts)) {
+      ++valid;
+    }
+  }
+  const size_t capacity = end - begin;
+  const double hole_rate =
+      capacity == 0 ? 0.0 : 1.0 - static_cast<double>(valid) / capacity;
+  return GroupHoleStats{group_id, valid, hole_rate};
+}
+
+std::vector<GroupHoleStats> VertexTable::all_group_hole_stats(
+    timestamp_t ts) const {
+  std::vector<GroupHoleStats> stats;
+  const size_t groups = group_count();
+  stats.reserve(groups);
+  for (size_t g = 0; g < groups; ++g) {
+    stats.push_back(group_hole_stats(g, ts));
+  }
+  return stats;
+}
+
+void VertexTable::RemapGroup(size_t group_id,
+                             const std::vector<vid_t>& mapping) {
+  const RowGroupLayout layout = row_group_layout();
+  const vid_t group_begin = static_cast<vid_t>(layout.GroupBegin(group_id));
+  const size_t capacity = mapping.size();
+  // Vertex timestamp segment reorder first: the indexer's global hash rebuild
+  // reads validity at the NEW positions, so it must see the remapped layout.
+  v_ts_->RemapGroup(group_begin, capacity, mapping);
+  // Indexer: keys gather (driven by the mapping) + indices global rebuild.
+  indexer_->RemapGroup(group_begin, capacity, mapping, *v_ts_);
+  // Property columns: gather fixed-length (chunked) columns.
+  for (size_t c = 0; c < table_->col_num(); ++c) {
+    ColumnBase* col = table_->get_column_by_id(c);
+    if (col->rows_per_group() != 0) {
+      // ChunkedColumn<T>::GatherGroup is typed; dispatch via the column's
+      // type-erased gather hook.
+      col->GatherGroup(group_begin, capacity, mapping);
+    }
+  }
+}
+
+GroupFrontier& VertexTable::ensure_group_frontier() {
+  if (!frontier_) {
+    frontier_ = std::make_unique<GroupFrontier>(row_group_layout());
+    // Dense-state initialization: frontier_g = rows ever allocated in group
+    // g, derived from the timestamp high-water mark (deletions do not lower
+    // it; only a compaction retreat does). This keeps allocation identical
+    // to the baseline global counter until the first retreat.
+    const size_t high_water = v_ts_->Capacity();
+    const RowGroupLayout layout = row_group_layout();
+    const size_t groups = layout.GroupCount(high_water);
+    frontier_->Init(groups);
+    for (size_t g = 0; g < groups; ++g) {
+      const size_t begin = layout.GroupBegin(g);
+      const size_t end = layout.GroupEnd(g, high_water);
+      frontier_->Retreat(g, end - begin);
+    }
+    indexer_->SetGroupFrontier(frontier_.get());
+  }
+  return *frontier_;
+}
+
 void VertexTable::Init(std::shared_ptr<Checkpoint> ckp, MemoryLevel level) {
   CHECK(vertex_schema_ != nullptr) << "VertexTable::Init requires schema";
   CHECK(indexer_ != nullptr) << "VertexTable::Init requires indexer slot";

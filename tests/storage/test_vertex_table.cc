@@ -24,6 +24,7 @@
 #include "neug/common/types/value.h"
 #include "neug/main/neug_db.h"
 #include "neug/storages/checkpoint_manager.h"
+#include "neug/storages/graph/row_group_compaction.h"
 #include "neug/storages/graph/schema.h"
 #include "neug/storages/graph/vertex_table.h"
 #include "neug/storages/module/module_broker.h"
@@ -905,4 +906,84 @@ TEST_F(VertexTableTest, VertexSetForeachVertex) {
   size_t count = 0;
   vset.foreach_vertex([&](neug::vid_t vid) { count++; });
   EXPECT_EQ(count, 5);  // Only odd lids are valid at ts=20
+}
+
+TEST_F(VertexTableTest, RemapGroupReclaimsHolesAndPreservesData) {
+  neug::VertexTable table(schema_.get_vertex_schema(v_label_id_));
+  auto ckp = make_checkpoint(Workspace());
+  OpenVertexTableLegacy(table, ckp, neug::CheckpointManifest(), memory_level_);
+  table.EnsureCapacity(64);
+
+  // Add 8 vertices with distinct age values (oid = vid = i).
+  std::vector<neug::vid_t> lids(8);
+  for (int64_t i = 0; i < 8; ++i) {
+    std::vector<neug::Value> props = {
+        neug::Value::STRING("n" + std::to_string(i)),
+        neug::Value::INT32(static_cast<int32_t>(100 + i)),
+        neug::Value::DOUBLE(static_cast<double>(i))};
+    ASSERT_TRUE(
+        table.AddVertex(neug::Value::INT64(i), props, lids[i], 1, false));
+    EXPECT_EQ(lids[i], static_cast<neug::vid_t>(i));
+  }
+
+  // Delete vids 1, 3, 5 -> three holes in group 0.
+  table.DeleteVertex(1, 2);
+  table.DeleteVertex(3, 2);
+  table.DeleteVertex(5, 2);
+  auto before = table.group_hole_stats(0, 3);
+  EXPECT_EQ(before.valid_count, 5u);
+  EXPECT_GT(before.hole_rate, 0.0);
+
+  // Reorder group 0: gather valid rows to the front, remap four structures.
+  // Follow the orchestrator flow: enable the frontier, remap, then retreat
+  // the frontier to the valid-row count so tail holes become refillable.
+  auto& frontier = table.ensure_group_frontier();
+  auto mapping = neug::GenerateGroupReorderMap(table, 0, 3);
+  table.RemapGroup(0, mapping);
+  frontier.Retreat(0, before.valid_count);
+
+  // Surviving oids {0,2,4,6,7} remain lookupable with correct properties.
+  const std::vector<int64_t> survivors = {0, 2, 4, 6, 7};
+  for (int64_t oid : survivors) {
+    neug::vid_t vid;
+    ASSERT_TRUE(table.get_index(neug::Value::INT64(oid), vid, 3))
+        << "oid " << oid << " not found after remap";
+    EXPECT_EQ(table.GetOid(vid, 3).GetValue<int64_t>(), oid);
+    auto age = table.GetPropertyColumn("age")->get_any(vid).GetValue<int32_t>();
+    EXPECT_EQ(age, static_cast<int32_t>(100 + oid));
+  }
+  // Deleted oids are no longer lookupable.
+  for (int64_t oid : {1, 3, 5}) {
+    neug::vid_t vid;
+    EXPECT_FALSE(table.get_index(neug::Value::INT64(oid), vid, 3))
+        << "deleted oid " << oid << " still found after remap";
+  }
+  // Holes reclaimed: group 0 is now dense (valid rows gathered to the front).
+  auto after = table.group_hole_stats(0, 3);
+  EXPECT_EQ(after.valid_count, 5u);
+  EXPECT_DOUBLE_EQ(after.hole_rate, 0.0);
+
+  // Tail-hole refill (FR-020): the next insert lands at base_0 + valid_count
+  // (vid 5), reusing the reclaimed tail slot with a fresh PK binding.
+  neug::vid_t refill_vid = std::numeric_limits<neug::vid_t>::max();
+  std::vector<neug::Value> refill_props = {neug::Value::STRING("refill"),
+                                           neug::Value::INT32(999),
+                                           neug::Value::DOUBLE(99.0)};
+  ASSERT_TRUE(table.AddVertex(neug::Value::INT64(100), refill_props, refill_vid,
+                              4, false));
+  EXPECT_EQ(refill_vid, 5u);
+  neug::vid_t looked_up = std::numeric_limits<neug::vid_t>::max();
+  ASSERT_TRUE(table.get_index(neug::Value::INT64(100), looked_up, 4));
+  EXPECT_EQ(looked_up, refill_vid);
+  EXPECT_EQ(table.GetOid(refill_vid, 4).GetValue<int64_t>(), 100);
+  EXPECT_EQ(
+      table.GetPropertyColumn("age")->get_any(refill_vid).GetValue<int32_t>(),
+      999);
+  // The refilled slot's old (deleted) PK binding stays unbound.
+  neug::vid_t stale = std::numeric_limits<neug::vid_t>::max();
+  EXPECT_FALSE(table.get_index(neug::Value::INT64(5), stale, 4));
+  // Group stays dense after refill: frontier advanced to 6, all 6 rows valid.
+  auto refilled = table.group_hole_stats(0, 4);
+  EXPECT_EQ(refilled.valid_count, 6u);
+  EXPECT_DOUBLE_EQ(refilled.hole_rate, 0.0);
 }

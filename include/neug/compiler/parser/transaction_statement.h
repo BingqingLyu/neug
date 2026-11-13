@@ -22,6 +22,9 @@
 
 #pragma once
 
+#include <string>
+#include <utility>
+
 #include "neug/compiler/common/enums/transaction_action.h"
 #include "statement.h"
 
@@ -34,15 +37,22 @@ class TransactionStatement : public Statement {
 
  public:
   explicit TransactionStatement(
-      transaction::TransactionAction transactionAction)
-      : Statement{statementType_}, transactionAction{transactionAction} {}
+      transaction::TransactionAction transactionAction,
+      std::string vertexLabel = "")
+      : Statement{statementType_},
+        transactionAction{transactionAction},
+        vertexLabel{std::move(vertexLabel)} {}
 
   transaction::TransactionAction getTransactionAction() const {
     return transactionAction;
   }
 
+  /// COMPACT scope: empty means every vertex label (spec 013).
+  const std::string& getVertexLabel() const { return vertexLabel; }
+
  private:
   transaction::TransactionAction transactionAction;
+  std::string vertexLabel;
 };
 
 }  // namespace parser

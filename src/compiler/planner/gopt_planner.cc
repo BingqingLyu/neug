@@ -242,6 +242,27 @@ void analyzeQueryPrefix(std::string_view query, QueryAnalysis& analysis) {
     analysis.admin = AdminRequest{AdminType::kCheckpoint, std::nullopt};
     return;
   }
+  if (isKeyword(statement, "COMPACT")) {
+    // COMPACT; or COMPACT TABLE <label>; (spec 013). The label keeps its
+    // written case; schema lookup validates it at execution time.
+    std::optional<std::string> label;
+    const auto scope = nextKeyword(query, offset);
+    if (isKeyword(scope, "TABLE")) {
+      std::string name;
+      if (!nextAdminValue(query, offset, name)) {
+        return;
+      }
+      label = std::move(name);
+    } else if (!scope.empty()) {
+      return;
+    }
+    if (isStatementEnd(query, offset)) {
+      analysis.kind = QueryKind::kAdmin;
+      analysis.admin =
+          AdminRequest{AdminType::kCompact, std::nullopt, std::move(label)};
+    }
+    return;
+  }
   if (analysis.explain_mode != ExplainMode::kNone) {
     return;
   }
