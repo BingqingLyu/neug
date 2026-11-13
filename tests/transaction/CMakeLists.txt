@@ -12,3 +12,16 @@ if (BUILD_HTTP_SERVER)
 		test_wal_replay.cc
 		test_acid.cc)
 endif()
+
+	# ---------------------------------------------------------------------
+	# concurrent_compaction_test: row-group compaction concurrency
+	# regression. Drives concurrent MvccInsertTransaction commits against a
+	# compacted group's retreated per-group frontier (GroupFrontier::
+	# AllocateNext) and asserts vid uniqueness / PK integrity. For the
+	# race-detecting run:
+	#   cmake -DENABLE_THREAD_SANITIZER=ON -DWITH_MIMALLOC=OFF -DBUILD_TEST=ON ..
+	#   TSAN_OPTIONS=suppressions=<repo>/tests/tsan_suppressions.txt \
+	#     tests/transaction/concurrent_compaction_test --gtest_repeat=5
+	# ---------------------------------------------------------------------
+	add_neug_test(concurrent_compaction_test test_concurrent_compaction.cc)
+endif()

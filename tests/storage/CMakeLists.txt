@@ -67,3 +67,19 @@ if(NOT WIN32)
         ${CMAKE_BINARY_DIR}/_deps/googletest-src/googletest/include
         ${CMAKE_BINARY_DIR}/_deps/googletest-src/googlemock/include)
 endif()
+
+# ---------------------------------------------------------------------------
+# bench_row_group_compaction: micro-benchmark for the per-group append frontier
+# vid-allocation overhead (baseline global counter vs GroupFrontier::
+# AllocateNext), VertexTable insert throughput before/after compaction, and the
+# group remap cost. Standalone executable, NOT registered with ctest. Run:
+#   build/tests/storage/bench_row_group_compaction
+# Scale via NEUG_RGBENCH_ALLOC_OPS / NEUG_RGBENCH_VT_ROWS / NEUG_RGBENCH_THREADS.
+# ---------------------------------------------------------------------------
+if(NOT WIN32)
+    add_executable(bench_row_group_compaction bench_row_group_compaction.cc)
+    target_link_libraries(bench_row_group_compaction PUBLIC neug
+        ${Protobuf_LIBRARIES} ${GLOG_LIBRARIES} ${ARROW_LIB}
+        ${YAML_CPP_LIBRARIES})
+    target_compile_features(bench_row_group_compaction PRIVATE cxx_std_20)
+endif()
