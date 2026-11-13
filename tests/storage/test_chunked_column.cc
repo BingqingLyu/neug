@@ -1823,6 +1823,55 @@ TEST_F(ChunkedColumnTest, OpenStrippedGroupFallsBackToDefault) {
     EXPECT_EQ(reopened.get_view(i), static_cast<int64_t>(i));
 }
 
+TEST_F(ChunkedColumnTest, OldFormatCheckpointUpgradesOnRecheckpoint) {
+  // Backward compatibility: a checkpoint written by the previous version (v1
+  // directory, flags=0, no rows_per_group) must open with the new code, read
+  // back identically, and upgrade to the new format (flags bit0 +
+  // rows_per_group) on the next checkpoint.
+  ChunkedColumn<int64_t> col(4, 8);
+  col.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  col.resize(20);
+  for (size_t i = 0; i < 20; ++i)
+    col.set_value(i, static_cast<int64_t>(i * 3));
+  CheckpointManifest meta;
+  col.Dump(*ckp_, meta, "up");
+  ckp_->FinalizeObjectWriter(meta);
+
+  // Rewrite the directory in the OLD format: drop rows_per_group (flags=0).
+  auto path = meta.FindModule("up")->get_path(kChunkDirPath);
+  auto file = ckp_->OpenFile(*path, MemoryLevel::kInMemory);
+  auto d = DecodeChunkDirectory(file->GetData(), file->GetDataSize());
+  d.rows_per_group = 0;
+  auto old_blob = EncodeChunkDirectory(d);
+  EXPECT_EQ(static_cast<unsigned char>(old_blob[12]), 0u);  // old flags == 0
+  auto old_dir =
+      ckp_->CreateRuntimeContainer(old_blob.size(), MemoryLevel::kInMemory);
+  std::memcpy(old_dir->GetData(), old_blob.data(), old_blob.size());
+  ModuleDescriptor old_desc;
+  old_desc.module_type = ChunkedColumn<int64_t>::type_name();
+  old_desc.set_path(kChunkDirPath, ckp_->Commit(*old_dir));
+
+  // New code opens the old-format checkpoint and reads every value back.
+  ChunkedColumn<int64_t> reopened(4);
+  reopened.Open(*ckp_, old_desc, MemoryLevel::kInMemory);
+  EXPECT_EQ(reopened.size(), 20u);
+  for (size_t i = 0; i < 20; ++i)
+    EXPECT_EQ(reopened.get_view(i), static_cast<int64_t>(i * 3));
+  // Legacy fallback yields a valid uniform layout.
+  EXPECT_EQ(reopened.rows_per_group(), kDefaultRowsPerGroup);
+
+  // Re-checkpoint upgrades the directory to the new format.
+  CheckpointManifest meta2;
+  reopened.Dump(*ckp_, meta2, "up");
+  ckp_->FinalizeObjectWriter(meta2);
+  auto file2 = ckp_->OpenFile(*meta2.FindModule("up")->get_path(kChunkDirPath),
+                              MemoryLevel::kInMemory);
+  auto d2 = DecodeChunkDirectory(file2->GetData(), file2->GetDataSize());
+  EXPECT_EQ(d2.rows_per_group, kDefaultRowsPerGroup);
+  auto new_blob = EncodeChunkDirectory(d2);
+  EXPECT_EQ(static_cast<unsigned char>(new_blob[12]) & 1u, 1u);  // flags bit0
+}
+
 TEST(ChunkDirTest, RowGroupRoundtripAndLegacyByteIdentical) {
   ChunkDirectory d;
   d.row_width = 8;

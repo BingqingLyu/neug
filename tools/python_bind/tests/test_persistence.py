@@ -667,6 +667,112 @@ def test_copy_from_edge_finalizes_sort_key_before_checkpoint(tmp_path):
     db.close()
 
 
+def test_row_group_directory_persistence_regression(tmp_path):
+    """Row group directory format (spec 012) survives checkpoint/reopen cycles.
+
+    Guards the user-visible surface of the row group change: every chunked
+    property column now persists rows_per_group in its v1 chunk directory
+    (flags bit0). Mixed-width fixed columns plus a multi-property (unbundled)
+    edge table must round-trip through explicit checkpoints, incremental
+    updates, and read-only reopen without loss or corruption.
+    """
+    db_dir = str(tmp_path / "row_group_persistence")
+
+    def open_db(mode="w"):
+        return Database(
+            db_path=db_dir,
+            mode=mode,
+            checkpoint_on_close=False,
+            max_thread_num=2,
+        )
+
+    def assert_graph(conn, updated=False):
+        people = sorted(
+            conn.execute(
+                "MATCH (p:Person) RETURN p.id, p.age, p.score, p.active, p.name;"
+            )
+        )
+        if updated:
+            assert people == [
+                [1, 30, 9.5, False, "Alice"],
+                [2, 25, 88.5, True, "Bob"],
+                [3, 40, 77.0, False, "Carol"],
+                [4, 50, 66.0, False, "Dave"],
+            ]
+        else:
+            assert people == [
+                [1, 30, 99.5, True, "Alice"],
+                [2, 25, 88.5, True, "Bob"],
+                [3, 40, 77.0, False, "Carol"],
+            ]
+        edges = sorted(
+            conn.execute(
+                "MATCH (a:Person)-[r:Knows]->(b:Person) "
+                "RETURN a.id, b.id, r.since, r.weight;"
+            )
+        )
+        if updated:
+            assert edges == [[1, 2, 2020, 0.5], [2, 3, 2021, 1.5], [3, 4, 2022, 2.5]]
+        else:
+            assert edges == [[1, 2, 2020, 0.5], [2, 3, 2021, 1.5]]
+
+    # Phase 1: create mixed-width columns + unbundled edge table, checkpoint.
+    with closing(open_db()) as db, closing(db.connect()) as conn:
+        conn.execute(
+            "CREATE NODE TABLE Person(id INT64, age INT32, score DOUBLE, "
+            "active BOOL, name STRING, PRIMARY KEY(id))"
+        )
+        conn.execute(
+            "CREATE REL TABLE Knows(FROM Person TO Person, since INT64, weight DOUBLE)"
+        )
+        conn.execute(
+            "CREATE (:Person {id: 1, age: 30, score: 99.5, active: true, name: 'Alice'});"
+        )
+        conn.execute(
+            "CREATE (:Person {id: 2, age: 25, score: 88.5, active: true, name: 'Bob'});"
+        )
+        conn.execute(
+            "CREATE (:Person {id: 3, age: 40, score: 77.0, active: false, name: 'Carol'});"
+        )
+        conn.execute(
+            "MATCH (a:Person {id: 1}), (b:Person {id: 2}) "
+            "CREATE (a)-[:Knows {since: 2020, weight: 0.5}]->(b);"
+        )
+        conn.execute(
+            "MATCH (a:Person {id: 2}), (b:Person {id: 3}) "
+            "CREATE (a)-[:Knows {since: 2021, weight: 1.5}]->(b);"
+        )
+        assert_graph(conn)
+        conn.execute("CHECKPOINT;")
+        assert_graph(conn)
+
+    # The published checkpoint must carry a parseable CURRENT -> manifest.
+    assert _published_checkpoint_ids(tmp_path / "row_group_persistence")
+
+    # Phase 2: reopen read-only, verify persisted data.
+    with closing(open_db("r")) as db, closing(db.connect()) as conn:
+        assert_graph(conn)
+
+    # Phase 3: incremental update + insert, checkpoint again.
+    with closing(open_db()) as db, closing(db.connect()) as conn:
+        assert_graph(conn)
+        conn.execute("MATCH (p:Person {id: 1}) SET p.score = 9.5, p.active = false;")
+        conn.execute(
+            "CREATE (:Person {id: 4, age: 50, score: 66.0, active: false, name: 'Dave'});"
+        )
+        conn.execute(
+            "MATCH (a:Person {id: 3}), (b:Person {id: 4}) "
+            "CREATE (a)-[:Knows {since: 2022, weight: 2.5}]->(b);"
+        )
+        assert_graph(conn, updated=True)
+        conn.execute("CHECKPOINT;")
+        assert_graph(conn, updated=True)
+
+    # Phase 4: reopen read-only, verify the incremental checkpoint.
+    with closing(open_db("r")) as db, closing(db.connect()) as conn:
+        assert_graph(conn, updated=True)
+
+
 @pytest.mark.skip(reason="TODO(zhanglei,lexiao): get view from invalid vid")
 def test_join_queries(modern_graph):
     conn = modern_graph
