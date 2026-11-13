@@ -29,6 +29,7 @@
 #include "neug/storages/graph/edge_table.h"
 #include "neug/storages/loader/loader_utils.h"
 #include "neug/storages/module_descriptor.h"
+#include "neug/utils/property/row_group.h"
 #include "unittest/utils.h"
 
 namespace neug {
@@ -255,6 +256,42 @@ class EdgeTableTest : public ::testing::Test {
     return std::string(test_info->name());
   }
 };
+
+TEST_F(EdgeTableTest, RowGroupBundledHasNoPropertyGroups) {
+  auto ckp = make_checkpoint(workspace());
+  InitIndexers(*ckp, 2, 2);
+  ConstructEdgeTable(src_label_, dst_label_, edge_label_empty_);
+  OpenEdgeTable(ckp, neug::CheckpointManifest(), MemoryLevel::kInMemory);
+  EXPECT_EQ(edge_table->group_count(), 0u);
+  EXPECT_THROW(edge_table->group_at(0),
+               neug::exception::InvalidArgumentException);
+  EXPECT_THROW(edge_table->group_of(0),
+               neug::exception::InvalidArgumentException);
+}
+
+TEST_F(EdgeTableTest, RowGroupUnbundledDelegatesToPropertyTable) {
+  auto ckp = make_checkpoint(workspace());
+  InitIndexers(*ckp, 4, 4);
+  ConstructEdgeTable(src_label_, dst_label_, edge_label_str_int_);
+  OpenEdgeTableInMemory(ckp, neug::CheckpointManifest(), 4, 4);
+  edge_table->EnsureCapacity(src_indexer.size(), dst_indexer.size(), 100);
+  std::vector<neug::vid_t> src_lids{0, 1, 2, 3};
+  std::vector<neug::vid_t> dst_lids{1, 2, 3, 0};
+  neug::Allocator allocator(neug::MemoryLevel::kInMemory, allocator_dir_);
+  for (size_t i = 0; i < src_lids.size(); ++i) {
+    edge_table->AddEdge(
+        src_lids[i], dst_lids[i],
+        {neug::Value::STRING("e"), neug::Value::INT32(static_cast<int>(i))}, 0,
+        allocator, false);
+  }
+  ASSERT_NE(edge_table->table(), nullptr);
+  EXPECT_EQ(edge_table->PropTableSize(), 4u);
+  EXPECT_EQ(edge_table->group_count(), edge_table->table()->group_count());
+  EXPECT_EQ(edge_table->row_group_layout().rows_per_group,
+            edge_table->table()->row_group_layout().rows_per_group);
+  EXPECT_EQ(edge_table->group_of(2).group_id,
+            edge_table->table()->group_of(2).group_id);
+}
 
 TEST_F(EdgeTableTest, EdgeNumUsesStoredDirection) {
   auto ckp = make_checkpoint(workspace());

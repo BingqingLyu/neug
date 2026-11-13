@@ -23,12 +23,27 @@
 #include "neug/utils/io/file/file_utils.h"
 #include "neug/utils/likely.h"
 #include "neug/utils/property/array_column.h"
+#include "neug/utils/property/row_group.h"
 #include "neug/utils/property/vec_column.h"
 
 namespace neug {
 
 void VertexTable::SetColumn(size_t col, std::unique_ptr<ColumnBase> column) {
   table_->SetColumn(static_cast<int>(col), std::move(column));
+}
+
+RowGroupLayout VertexTable::row_group_layout() const {
+  return table_->row_group_layout();
+}
+
+size_t VertexTable::group_count() const { return table_->group_count(); }
+
+RowGroup VertexTable::group_at(size_t group_id) const {
+  return table_->group_at(group_id);
+}
+
+RowGroup VertexTable::group_of(vid_t vid) const {
+  return table_->group_of(vid);
 }
 
 void VertexTable::Init(std::shared_ptr<Checkpoint> ckp, MemoryLevel level) {

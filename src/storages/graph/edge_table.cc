@@ -41,6 +41,7 @@
 #include "neug/storages/module_descriptor.h"
 #include "neug/utils/io/file/file_utils.h"
 #include "neug/utils/property/chunked_column.h"
+#include "neug/utils/property/row_group.h"
 #include "neug/utils/property/types.h"
 
 namespace neug {
@@ -55,6 +56,28 @@ size_t edge_capacity_with_headroom(size_t edge_count) {
 }
 
 }  // namespace
+
+RowGroupLayout EdgeTable::row_group_layout() const {
+  return table_ ? table_->row_group_layout() : RowGroupLayout{};
+}
+
+size_t EdgeTable::group_count() const {
+  return table_ ? table_->group_count() : 0;
+}
+
+RowGroup EdgeTable::group_at(size_t group_id) const {
+  if (!table_)
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "Bundled edge table has no property row groups");
+  return table_->group_at(group_id);
+}
+
+RowGroup EdgeTable::group_of(uint64_t eid) const {
+  if (!table_)
+    THROW_INVALID_ARGUMENT_EXCEPTION(
+        "Bundled edge table has no property row groups");
+  return table_->group_of(eid);
+}
 
 void filterInvalidEdges(std::vector<vid_t>& src_lid,
                         std::vector<vid_t>& dst_lid,

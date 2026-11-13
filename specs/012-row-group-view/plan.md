@@ -284,6 +284,17 @@ make format-check
 - 提交风格 `feat(storage): ...`；推送 origin（BingqingLyu fork）；不混进 #1083。
 - 审阅方式：默认 workspace 本地审阅（与 spec 一致），推 GitHub 需另行征得同意。
 
+## Module 6 补充：图层端到端集成
+
+在 M1–M5 之上把组结构接到图层（spec M6，FR-023~025）：
+- `include/neug/storages/graph/vertex_table.h` / `src/storages/graph/vertex_table.cc`：VertexTable 加
+  row_group_layout/group_count/group_at/group_of，委托属性表 table_。
+- `include/neug/storages/graph/edge_table.h` / `src/storages/graph/edge_table.cc`：EdgeTable 加同名访问器
+  作用于 unbundled 边属性表；bundled（table_ 空）group_count=0、group_at/group_of 抛。
+- PropertyGraph 经现有 get_vertex_table/get_edge_table 透传，无新增成员。
+- 测试：test_vertex_table.cc（委托一致 + G=8 多组）、test_edge_table.cc（bundled 保护 + unbundled 委托）。
+- 仍守红线：零寻址改造、零整理动作；组枚举只是 Table 级能力的图层委托。
+
 ## Assumptions & Boundaries
 
 - 默认 G=262144 对含 bool 列的 schema 是必要最小公倍数；无窄类型列的 schema 未来可配置更小值（本特性不做配置旋钮）。

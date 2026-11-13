@@ -110,6 +110,14 @@ class NEUG_API EdgeTable {
   Table* table() { return table_.get(); }
   const Table* table() const { return table_.get(); }
 
+  // --- Row group logical view over the unbundled edge property table ---
+  // Bundled edges keep properties in the CSR (no property table): group_count
+  // is 0 and group_at/group_of throw.
+  RowGroupLayout row_group_layout() const;
+  size_t group_count() const;
+  RowGroup group_at(size_t group_id) const;
+  RowGroup group_of(uint64_t eid) const;
+
   void Close();
 
   void SortByEdgeData(timestamp_t ts);

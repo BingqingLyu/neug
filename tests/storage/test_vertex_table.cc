@@ -29,6 +29,7 @@
 #include "neug/storages/module/module_broker.h"
 #include "neug/transaction/transaction_utils.h"
 #include "neug/utils/property/chunked_column.h"
+#include "neug/utils/property/row_group.h"
 #include "neug/utils/property/types.h"
 #include "neug/utils/property/vec_column.h"
 #include "unittest/utils.h"
@@ -152,6 +153,43 @@ TEST_F(VertexTableTest, VertexTableBasicOps) {
   EXPECT_TRUE(table.get_index(oid1, tmp_vid, 1));
 
   table.Close();
+}
+
+TEST_F(VertexTableTest, RowGroupDelegatesToPropertyTable) {
+  neug::VertexTable table(schema_.get_vertex_schema(v_label_id_));
+  auto ckp = make_checkpoint(Workspace());
+  OpenVertexTableLegacy(table, ckp, neug::CheckpointManifest(), memory_level_);
+  table.EnsureCapacity(8);
+  for (int64_t i = 0; i < 5; ++i) {
+    neug::vid_t lid;
+    ASSERT_TRUE(table.AddVertex(neug::Value::INT64(i), property_values_, lid,
+                                i + 1, false));
+  }
+  EXPECT_EQ(table.group_count(), table.get_table().group_count());
+  EXPECT_EQ(table.row_group_layout().rows_per_group,
+            table.get_table().row_group_layout().rows_per_group);
+  EXPECT_EQ(table.group_of(2).group_id, table.get_table().group_of(2).group_id);
+  EXPECT_THROW(table.group_at(table.group_count()),
+               neug::exception::InvalidArgumentException);
+}
+
+TEST_F(VertexTableTest, RowGroupEnumerationSmallGroup) {
+  neug::VertexTable table(schema_.get_vertex_schema(v_label_id_));
+  auto ckp = make_checkpoint(Workspace());
+  OpenVertexTableLegacy(table, ckp, neug::CheckpointManifest(), memory_level_);
+  table.get_table().resize(20);
+  auto age = std::make_unique<neug::ChunkedColumn<int32_t>>(4, 8);
+  age->Open(*ckp, neug::ModuleDescriptor{}, memory_level_);
+  age->resize(20);
+  auto score = std::make_unique<neug::ChunkedColumn<double>>(4, 8);
+  score->Open(*ckp, neug::ModuleDescriptor{}, memory_level_);
+  score->resize(20);
+  table.SetColumn(1, std::move(age));
+  table.SetColumn(2, std::move(score));
+  EXPECT_EQ(table.row_group_layout().rows_per_group, 8u);
+  EXPECT_EQ(table.group_count(), 3u);
+  EXPECT_EQ(table.group_of(11).group_id, 1u);
+  EXPECT_EQ(table.group_at(2).row_count(), 4u);
 }
 
 TEST_F(VertexTableTest, DisassembleMigratesLegacyFixedColumns) {

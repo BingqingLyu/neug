@@ -293,6 +293,12 @@ class NEUG_API VertexTable {
   const Table& get_table() const { return *table_; }
   Table& get_table() { return *table_; }
 
+  // --- Row group logical view (delegates to the property table) ---
+  RowGroupLayout row_group_layout() const;
+  size_t group_count() const;
+  RowGroup group_at(size_t group_id) const;
+  RowGroup group_of(vid_t vid) const;
+
   void SetColumn(size_t col, std::unique_ptr<ColumnBase> column);
 
  private:

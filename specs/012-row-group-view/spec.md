@@ -49,7 +49,7 @@ vid 地址空间可以保持**连续均匀**（base_g=g×G、group_id=vid/G 纯�
 
 **本特性范围内**：统一行组边界与组算术；RowGroup 逻辑视图与表级组枚举；vid 分解表示与跨结构映射正确性；
 非稠密有效行（空洞）的读取兼容；组尾空洞可复用的模型与结构兼容（每组前沿抽象）；组边界持久化与重开恢复；
-组级脏度统计（只统计、不整理）；上述能力的读取兼容与正确性。
+组级脏度统计（只统计、不整理）；图层端到端集成（VertexTable/EdgeTable 组枚举委托）；上述能力的读取兼容与正确性。
 
 **本特性范围外**（各有归属）：
 
@@ -291,6 +291,43 @@ base_g=g×G、group_id=vid/G、offset=vid%G、组起止行算术在组首/组尾
 
 ---
 
+### Module 6: 图层端到端集成 (Priority: P1)
+
+**Purpose**: 把 RowGroup 视图与组枚举接到图层：VertexTable/EdgeTable 暴露组访问器，经 PropertyGraph 现有
+get_vertex_table/get_edge_table 即可按 label 端到端访问组结构，无需新增图层存储。
+
+**Why this priority**: 让组结构在图层真实可用（不止于 Table 层），是"行级视角"落地到点/边表的最后一环。
+依赖 M1/M2，单独可验证。
+
+**Independent Test**: 构造含 chunked 属性的点 label 与 unbundled 边 label，经 VertexTable/EdgeTable 组访问器
+枚举组、按 vid/eid 定位组、组内按列读取与全局一致；bundled 边（无属性表）group_count=0。
+
+**Key Components**:
+
+1. **VertexTable 组委托**: row_group_layout/group_count/group_at/group_of 委托属性表 table_。
+2. **EdgeTable 组委托**: 同名访问器作用于 unbundled 边属性表；bundled（table_ 为空）group_count=0、
+   row_group_layout 返回默认、group_at/group_of 抛异常。
+3. **PropertyGraph 透传**: 经现有 get_vertex_table(label)/get_edge_table(src,dst,edge) 访问，无需新增成员。
+
+**Functional Requirements**:
+
+1. **FR-023**: VertexTable MUST 暴露 row_group_layout/group_count/group_at/group_of，委托其属性表，结果与直接访问该表一致。
+2. **FR-024**: EdgeTable MUST 暴露同名组访问器作用于 unbundled 边属性表；bundled（无属性表）时 group_count MUST 为 0、group_at/group_of MUST 抛异常。
+3. **FR-025**: 系统 MUST 支持经 PropertyGraph 现有 get_vertex_table/get_edge_table 按 label 访问组结构，不新增图层存储。
+
+**Acceptance Scenarios**:
+
+1. **Given** 含 chunked 属性的点 label，**When** 经 VertexTable 枚举组并按 vid 定位，**Then** 与直接访问属性表一致。
+2. **Given** unbundled 边 label，**When** 经 EdgeTable 枚举组并按 eid 定位，**Then** 组内按列读取与全局一致。
+3. **Given** bundled 边 label（无属性表），**When** 调 group_count，**Then** 为 0；group_at/group_of 抛异常。
+
+**Test Strategy**:
+
+- **Unit Tests**: VertexTable/EdgeTable 组委托与表级一致；bundled 空表保护。
+- **Integration Tests**: 经 PropertyGraph get_vertex_table/get_edge_table 按 label 端到端访问组。
+
+---
+
 ### Edge Cases
 
 - 尾组不足整组（行数非每组行数整数倍）：组枚举、按 vid 定位、组级统计是否正确。
@@ -322,3 +359,4 @@ base_g=g×G、group_id=vid/G、offset=vid%G、组起止行算术在组首/组尾
 - **SC-007**: 点表与 unbundled 边属性表均能划分组、按组访问与统计；边属性列目录持久化每组行数、重开一致。
 - **SC-008**: 任意 vid 经 base_g+offset 分解后跨结构映射一致（属性/时间戳/索引/CSR 对端），含跨组边、同 PK 重插与空洞场景。
 - **SC-009**: 有效行非全局稠密（含组尾空洞）时，地址空间与组基址不变、读取按可见性正确跳过空洞；每组前沿抽象与组尾空洞可复用模型兼容。
+- **SC-010**: 点 label 与 unbundled 边 label 经 VertexTable/EdgeTable（及 PropertyGraph getter）可枚举组、按 vid/eid 定位、组内读取与全局一致；bundled 边 group_count=0。
