@@ -25,6 +25,7 @@
 #include "neug/config.h"
 #include "neug/storages/checkpoint.h"
 #include "neug/storages/checkpoint_manager.h"
+#include "neug/storages/chunk/row_group.h"
 #include "neug/storages/module/module.h"
 #include "neug/utils/api.h"
 #include "neug/utils/property/column.h"
@@ -33,6 +34,7 @@
 namespace neug {
 
 class TableView;
+struct RowGroup;
 
 class NEUG_API Table {
  public:
@@ -116,6 +118,17 @@ class NEUG_API Table {
       return columns_[0]->size();
     }
   }
+
+  /// Row group layout derived from the chunked columns: all non-zero
+  /// rows_per_group() values must agree; falls back to kDefaultRowsPerGroup
+  /// when no chunked column is present. Stateless (no cached member).
+  RowGroupLayout row_group_layout() const;
+  /// Number of row groups covering size() rows.
+  size_t group_count() const;
+  /// The group_id-th row group view; throws when out of range.
+  RowGroup group_at(size_t group_id) const;
+  /// The row group owning a global vid; throws when vid is out of range.
+  RowGroup group_of(size_t vid) const;
 
   void insert(size_t index, const std::vector<Value>& values, bool insert_safe);
 

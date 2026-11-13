@@ -36,6 +36,7 @@
 #include "neug/storages/module/module_broker.h"
 #include "neug/storages/module/module_factory.h"
 #include "neug/transaction/cow_graph_workspace.h"
+#include "neug/utils/property/row_group.h"
 #include "neug/utils/property/table.h"
 
 namespace neug {
@@ -1728,6 +1729,294 @@ TEST(ChunkDiskDemo, PrintMultiLabelGraph) {
 
   mgr.Close();
   std::printf("\n(demo4 files left under %s)\n", demo.c_str());
+}
+
+// ===== Row group logical view (spec 012-row-group-view) =====
+
+TEST(RowGroupLayoutTest, ArithmeticBoundaries) {
+  RowGroupLayout layout(8);
+  EXPECT_EQ(layout.GroupOf(0), 0u);
+  EXPECT_EQ(layout.GroupOf(7), 0u);
+  EXPECT_EQ(layout.GroupOf(8), 1u);
+  EXPECT_EQ(layout.GroupOf(11), 1u);
+  EXPECT_EQ(layout.OffsetOf(11), 3u);
+  EXPECT_EQ(layout.GroupBegin(1), 8u);
+  EXPECT_EQ(layout.GroupEnd(1, 20), 16u);
+  EXPECT_EQ(layout.GroupEnd(2, 20), 20u);  // tail group clamped
+  EXPECT_EQ(layout.GroupCount(0), 0u);
+  EXPECT_EQ(layout.GroupCount(1), 1u);
+  EXPECT_EQ(layout.GroupCount(20), 3u);
+}
+
+TEST(RowGroupLayoutTest, ValidateEnforcesWholeChunks) {
+  EXPECT_NO_THROW(RowGroupLayout::Validate(8, 4));
+  EXPECT_THROW(RowGroupLayout::Validate(0, 4),
+               exception::InvalidArgumentException);
+  EXPECT_THROW(RowGroupLayout::Validate(12, 4),
+               exception::InvalidArgumentException);  // not a power of two
+  EXPECT_THROW(RowGroupLayout::Validate(2, 4),
+               exception::InvalidArgumentException);  // < rows_per_chunk
+  EXPECT_THROW(RowGroupLayout::Validate(8, 3),
+               exception::InvalidArgumentException);  // not divisible
+}
+
+TEST_F(ChunkedColumnTest, CarriesRowGroupLayout) {
+  ChunkedColumn<int64_t> col(4, 8);
+  col.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  col.resize(20);
+  EXPECT_EQ(col.rows_per_chunk(), 4u);
+  EXPECT_EQ(col.rows_per_group(), 8u);
+  EXPECT_EQ(col.group_count(), 3u);
+}
+
+TEST_F(ChunkedColumnTest, ConstructorRejectsInvalidRowGroup) {
+  EXPECT_THROW((ChunkedColumn<int64_t>(4, 12)),
+               exception::InvalidArgumentException);
+  EXPECT_THROW((ChunkedColumn<int64_t>(4, 2)),
+               exception::InvalidArgumentException);
+}
+
+TEST_F(ChunkedColumnTest, DumpOpenPreservesRowGroup) {
+  ChunkedColumn<int64_t> col(4, 8);
+  col.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  col.resize(20);
+  for (size_t i = 0; i < 20; ++i)
+    col.set_value(i, static_cast<int64_t>(i * 7));
+  CheckpointManifest meta;
+  col.Dump(*ckp_, meta, "rg");
+  ckp_->FinalizeObjectWriter(meta);
+  // Reopen with a different ctor default; the persisted group must win.
+  ChunkedColumn<int64_t> reopened(4);
+  reopened.Open(*ckp_, *meta.FindModule("rg"), MemoryLevel::kInMemory);
+  EXPECT_EQ(reopened.rows_per_group(), 8u);
+  EXPECT_EQ(reopened.group_count(), 3u);
+  for (size_t i = 0; i < 20; ++i)
+    EXPECT_EQ(reopened.get_view(i), static_cast<int64_t>(i * 7));
+}
+
+TEST_F(ChunkedColumnTest, OpenStrippedGroupFallsBackToDefault) {
+  ChunkedColumn<int64_t> col(4, 8);
+  col.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  col.resize(20);
+  for (size_t i = 0; i < 20; ++i)
+    col.set_value(i, static_cast<int64_t>(i));
+  CheckpointManifest meta;
+  col.Dump(*ckp_, meta, "rg");
+  ckp_->FinalizeObjectWriter(meta);
+  // Strip rows_per_group to simulate a pre-row-group (legacy) directory.
+  auto path = meta.FindModule("rg")->get_path(kChunkDirPath);
+  auto file = ckp_->OpenFile(*path, MemoryLevel::kInMemory);
+  auto d = DecodeChunkDirectory(file->GetData(), file->GetDataSize());
+  d.rows_per_group = 0;
+  auto blob = EncodeChunkDirectory(d);
+  auto stripped =
+      ckp_->CreateRuntimeContainer(blob.size(), MemoryLevel::kInMemory);
+  std::memcpy(stripped->GetData(), blob.data(), blob.size());
+  ModuleDescriptor desc;
+  desc.module_type = ChunkedColumn<int64_t>::type_name();
+  desc.set_path(kChunkDirPath, ckp_->Commit(*stripped));
+  ChunkedColumn<int64_t> reopened(4);
+  reopened.Open(*ckp_, desc, MemoryLevel::kInMemory);
+  EXPECT_EQ(reopened.rows_per_group(), kDefaultRowsPerGroup);
+  EXPECT_EQ(reopened.group_count(), 1u);
+  for (size_t i = 0; i < 20; ++i)
+    EXPECT_EQ(reopened.get_view(i), static_cast<int64_t>(i));
+}
+
+TEST(ChunkDirTest, RowGroupRoundtripAndLegacyByteIdentical) {
+  ChunkDirectory d;
+  d.row_width = 8;
+  d.rows_per_chunk = 4;
+  d.rows_per_page = 4;
+  d.row_count = 4;
+  d.object_ids = {"object"};
+  ChunkDirectoryPage page;
+  page.prefix_rows = 4;
+  page.prefix.length = 32;
+  d.pages = {page};
+  auto legacy = EncodeChunkDirectory(d);  // rows_per_group == 0
+  auto legacy_decoded = DecodeChunkDirectory(legacy.data(), legacy.size());
+  EXPECT_EQ(legacy_decoded.rows_per_group, 0u);
+  EXPECT_EQ(static_cast<unsigned char>(legacy[12]), 0u);  // flags == 0
+  d.rows_per_group = 8;
+  auto blob = EncodeChunkDirectory(d);
+  auto decoded = DecodeChunkDirectory(blob.data(), blob.size());
+  EXPECT_EQ(decoded.rows_per_group, 8u);
+  EXPECT_EQ(blob.size(), legacy.size() + 8u);  // one extra u64 field
+  EXPECT_EQ(static_cast<unsigned char>(blob[12]) & 1u, 1u);  // flags bit0
+}
+
+TEST(ChunkDirTest, RejectsUnknownFlagsAndInvalidRowGroup) {
+  ChunkDirectory d;
+  d.row_width = 8;
+  d.rows_per_chunk = 4;
+  d.rows_per_page = 4;
+  d.row_count = 4;
+  d.rows_per_group = 8;
+  d.object_ids = {"object"};
+  ChunkDirectoryPage page;
+  page.prefix_rows = 4;
+  page.prefix.length = 32;
+  d.pages = {page};
+  // Recompute the CRC trailer after editing a header field so the blob passes
+  // the checksum gate and reaches the flags / rows_per_group validation.
+  auto reseal = [&](std::vector<char>& b) {
+    uint32_t crc = Crc32c(b.data(), b.size() - 4);
+    for (int i = 0; i < 4; ++i)
+      b[b.size() - 4 + i] = static_cast<char>((crc >> (8 * i)) & 0xFF);
+  };
+  auto put_u64 = [&](std::vector<char>& b, size_t at, uint64_t v) {
+    for (int i = 0; i < 8; ++i)
+      b[at + i] = static_cast<char>((v >> (8 * i)) & 0xFF);
+  };
+  {  // unknown flags bit (bit1)
+    auto b = EncodeChunkDirectory(d);
+    b[12] |= 2;
+    reseal(b);
+    EXPECT_THROW(DecodeChunkDirectory(b.data(), b.size()),
+                 exception::CheckpointException);
+  }
+  {  // rows_per_group not a power of two (offset 48)
+    auto b = EncodeChunkDirectory(d);
+    put_u64(b, 48, 12);
+    reseal(b);
+    EXPECT_THROW(DecodeChunkDirectory(b.data(), b.size()),
+                 exception::CheckpointException);
+  }
+  {  // rows_per_group < rows_per_chunk
+    auto b = EncodeChunkDirectory(d);
+    put_u64(b, 48, 2);
+    reseal(b);
+    EXPECT_THROW(DecodeChunkDirectory(b.data(), b.size()),
+                 exception::CheckpointException);
+  }
+}
+
+TEST_F(ChunkedColumnTest, GroupDirtyStatsIsolatesGroup) {
+  ChunkedColumn<int64_t> col(4, 8);
+  col.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  col.resize(20);
+  for (size_t i = 0; i < 20; ++i)
+    col.set_value(i, static_cast<int64_t>(i));
+  CheckpointManifest meta;
+  col.Dump(*ckp_, meta, "gd");
+  ckp_->FinalizeObjectWriter(meta);
+  ChunkedColumn<int64_t> col2(4, 8);
+  col2.Open(*ckp_, *meta.FindModule("gd"), MemoryLevel::kInMemory);
+  auto clean = col2.group_dirty_stats();
+  ASSERT_EQ(clean.size(), 3u);
+  for (const auto& s : clean)
+    EXPECT_EQ(s.dirty_pages, 0u);
+  col2.set_value(11, 999);  // page 2 -> group 1
+  auto stats = col2.group_dirty_stats();
+  EXPECT_EQ(stats[0].dirty_pages, 0u);
+  EXPECT_EQ(stats[1].dirty_pages, 1u);
+  EXPECT_EQ(stats[1].dirty_bytes, 4u * sizeof(int64_t));
+  EXPECT_EQ(stats[2].dirty_pages, 0u);
+}
+
+TEST_F(ChunkedColumnTest, ClonePreservesRowGroup) {
+  ChunkedColumn<int64_t> col(4, 8);
+  col.Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  col.resize(20);
+  auto module = col.Clone();
+  auto& clone = dynamic_cast<ChunkedColumn<int64_t>&>(*module);
+  EXPECT_EQ(clone.rows_per_group(), 8u);
+  EXPECT_EQ(clone.group_count(), 3u);
+}
+
+TEST_F(ChunkedColumnTest, TableGroupEnumerationAndView) {
+  Table table({"a", "b"},
+              {DataType(DataTypeId::kInt64), DataType(DataTypeId::kInt64)});
+  table.Init(*ckp_, MemoryLevel::kInMemory);
+  auto c0 = std::make_unique<ChunkedColumn<int64_t>>(4, 8);
+  c0->Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  c0->resize(20);
+  auto c1 = std::make_unique<ChunkedColumn<int64_t>>(4, 8);
+  c1->Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  c1->resize(20);
+  for (size_t i = 0; i < 20; ++i) {
+    c0->set_value(i, static_cast<int64_t>(i));
+    c1->set_value(i, static_cast<int64_t>(i * 10));
+  }
+  table.SetColumn(0, std::move(c0));
+  table.SetColumn(1, std::move(c1));
+  EXPECT_EQ(table.row_group_layout().rows_per_group, 8u);
+  EXPECT_EQ(table.group_count(), 3u);
+  auto g1 = table.group_at(1);
+  EXPECT_EQ(g1.begin(), 8u);
+  EXPECT_EQ(g1.end(), 16u);
+  EXPECT_EQ(g1.row_count(), 8u);
+  EXPECT_EQ(g1.frontier(), 16u);
+  auto g2 = table.group_at(2);
+  EXPECT_EQ(g2.begin(), 16u);
+  EXPECT_EQ(g2.end(), 20u);  // tail group
+  EXPECT_EQ(g2.row_count(), 4u);
+  EXPECT_EQ(table.group_of(11).group_id, 1u);
+  for (size_t g = 0; g < 3; ++g) {
+    auto grp = table.group_at(g);
+    for (uint64_t off = 0; off < grp.row_count(); ++off) {
+      EXPECT_EQ(grp.get(0, off).GetValue<int64_t>(),
+                static_cast<int64_t>(grp.begin() + off));
+      EXPECT_EQ(grp.get(1, off).GetValue<int64_t>(),
+                static_cast<int64_t>((grp.begin() + off) * 10));
+    }
+  }
+  EXPECT_THROW(table.group_at(3), exception::InvalidArgumentException);
+  EXPECT_THROW(table.group_of(20), exception::InvalidArgumentException);
+}
+
+TEST_F(ChunkedColumnTest, TableRejectsInconsistentRowGroup) {
+  Table table({"a", "b"},
+              {DataType(DataTypeId::kInt64), DataType(DataTypeId::kInt64)});
+  table.Init(*ckp_, MemoryLevel::kInMemory);
+  auto c0 = std::make_unique<ChunkedColumn<int64_t>>(4, 8);
+  c0->Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  auto c1 = std::make_unique<ChunkedColumn<int64_t>>(4, 16);
+  c1->Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  table.SetColumn(0, std::move(c0));
+  table.SetColumn(1, std::move(c1));
+  EXPECT_THROW(table.row_group_layout(), exception::CheckpointException);
+}
+
+TEST_F(ChunkedColumnTest, TableEmptyAndSingleRowGroups) {
+  Table table({"a"}, {DataType(DataTypeId::kInt64)});
+  table.Init(*ckp_, MemoryLevel::kInMemory);
+  EXPECT_EQ(table.group_count(), 0u);
+  table.resize(1);
+  EXPECT_EQ(table.group_count(), 1u);
+  EXPECT_EQ(table.group_at(0).row_count(), 1u);
+}
+
+TEST_F(ChunkedColumnTest, VidDecompositionConsistentAcrossColumnWidths) {
+  // M3: vid = base_g + offset decomposition is uniform across columns of
+  // different widths (bool chunk=4 vs int64 chunk=2, same group=8). CSR /
+  // indexer / timestamp mapping preservation is covered by the existing graph
+  // regression suite, since layout B leaves vid addressing unchanged.
+  Table table({"flag", "val"},
+              {DataType(DataTypeId::kBoolean), DataType(DataTypeId::kInt64)});
+  table.Init(*ckp_, MemoryLevel::kInMemory);
+  auto cb = std::make_unique<ChunkedColumn<bool>>(4, 8);
+  cb->Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  cb->resize(20);
+  auto ci = std::make_unique<ChunkedColumn<int64_t>>(2, 8);
+  ci->Open(*ckp_, ModuleDescriptor{}, MemoryLevel::kInMemory);
+  ci->resize(20);
+  for (size_t i = 0; i < 20; ++i) {
+    cb->set_value(i, (i % 2) == 0);
+    ci->set_value(i, static_cast<int64_t>(i));
+  }
+  table.SetColumn(0, std::move(cb));
+  table.SetColumn(1, std::move(ci));
+  auto layout = table.row_group_layout();
+  EXPECT_EQ(layout.rows_per_group, 8u);
+  for (size_t vid = 0; vid < 20; ++vid) {
+    auto grp = table.group_of(vid);
+    EXPECT_EQ(grp.group_id, vid / 8);
+    EXPECT_EQ(grp.begin() + layout.OffsetOf(vid), vid);
+    EXPECT_EQ(grp.get(1, layout.OffsetOf(vid)).GetValue<int64_t>(),
+              static_cast<int64_t>(vid));
+  }
 }
 
 }  // namespace

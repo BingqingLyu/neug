@@ -23,6 +23,8 @@ namespace neug {
 namespace {
 constexpr uint32_t kMagic = 0x4443474e;  // NGCD, little endian
 constexpr uint32_t kVersion = 1;
+// v1 header flags bit: rows_per_group is present after page_count.
+constexpr uint32_t kFlagRowsPerGroup = 1;
 void Put(std::vector<char>& out, uint64_t value, size_t bytes) {
   for (size_t i = 0; i < bytes; ++i)
     out.push_back(static_cast<char>(value >> (8 * i)));
@@ -100,12 +102,20 @@ ChunkDirectory DecodeChunkDirectory(const void* data, size_t size) {
     if (reader.Read(4) != kVersion)
       THROW_CHECKPOINT_EXCEPTION("Unsupported chunk directory version");
     d.row_width = reader.Read(4);
-    if (reader.Read(4) != 0 || d.row_width == 0)
+    const uint32_t flags = reader.Read(4);
+    if ((flags & ~kFlagRowsPerGroup) != 0 || d.row_width == 0)
       THROW_CHECKPOINT_EXCEPTION("Invalid chunk directory flags or row width");
     d.rows_per_chunk = reader.Read(8);
     d.rows_per_page = reader.Read(8);
     d.row_count = reader.Read(8);
     page_count = reader.Read(8);
+    if (flags & kFlagRowsPerGroup) {
+      d.rows_per_group = reader.Read(8);
+      if (!PowerOfTwo(d.rows_per_group) ||
+          d.rows_per_group < d.rows_per_chunk ||
+          d.rows_per_group % d.rows_per_chunk != 0)
+        THROW_CHECKPOINT_EXCEPTION("Invalid chunk directory rows_per_group");
+    }
   } else {
     d.rows_per_chunk = reader.Read(8);
     d.rows_per_page = d.rows_per_chunk;
@@ -156,11 +166,13 @@ std::vector<char> EncodeChunkDirectory(const ChunkDirectory& d) {
   Put(out, kMagic, 4);
   Put(out, kVersion, 4);
   Put(out, d.row_width, 4);
-  Put(out, 0, 4);
+  Put(out, d.rows_per_group != 0 ? kFlagRowsPerGroup : 0, 4);
   Put(out, d.rows_per_chunk, 8);
   Put(out, d.rows_per_page, 8);
   Put(out, d.row_count, 8);
   Put(out, d.pages.size(), 8);
+  if (d.rows_per_group != 0)
+    Put(out, d.rows_per_group, 8);
   Put(out, d.object_ids.size(), 8);
   for (const auto& id : d.object_ids) {
     if (id.size() > std::numeric_limits<uint32_t>::max())

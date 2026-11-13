@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "neug/storages/checkpoint.h"
+#include "neug/storages/chunk/row_group.h"
 #include "neug/storages/module/type_name.h"
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/property/column.h"
@@ -36,6 +37,13 @@ namespace neug {
 /// writes fork one page; concurrent inserts write a prepared, stable suffix.
 /// Clone/resize/PrepareForInsert/Dump require COW or maintenance admission.
 /// Concurrent set_any(..., false) is permitted only for distinct reserved rows.
+
+/// Per-group dirty page/byte tally, computed on demand by group_dirty_stats().
+struct GroupDirtyStats {
+  size_t dirty_pages = 0;
+  size_t dirty_bytes = 0;
+};
+
 template <typename T>
 class ChunkedColumn : public ColumnBase {
  public:
@@ -43,11 +51,13 @@ class ChunkedColumn : public ColumnBase {
   static constexpr size_t kCowPageBytes = 4096;
 
   ChunkedColumn() : ChunkedColumn(ComputeRowsPerChunk(sizeof(T))) {}
-  explicit ChunkedColumn(size_t rows_per_chunk)
+  explicit ChunkedColumn(size_t rows_per_chunk,
+                         size_t rows_per_group = kDefaultRowsPerGroup)
       : rows_per_chunk_(ValidateRows(rows_per_chunk)),
         rows_per_page_(std::min(rows_per_chunk, ComputePageRows())),
         page_shift_(Shift(rows_per_page_)),
-        page_mask_(rows_per_page_ - 1) {}
+        page_mask_(rows_per_page_ - 1),
+        group_layout_(MakeLayout(rows_per_group, rows_per_chunk_)) {}
 
   static size_t ComputeRowsPerChunk(size_t width) {
     if (width == 0 || width > kMinChunkPayloadBytes)
@@ -89,6 +99,11 @@ class ChunkedColumn : public ColumnBase {
     size_ = d.row_count;
     page_shift_ = Shift(rows_per_page_);
     page_mask_ = rows_per_page_ - 1;
+    group_layout_ = MakeLayout(
+        d.rows_per_group
+            ? d.rows_per_group
+            : std::max<uint64_t>(kDefaultRowsPerGroup, rows_per_chunk_),
+        rows_per_chunk_);
     std::vector<std::shared_ptr<IDataContainer>> objects;
     for (const auto& id : d.object_ids)
       objects.push_back(ckp.OpenObject(id, level));
@@ -165,6 +180,7 @@ class ChunkedColumn : public ColumnBase {
     builder->rows_per_chunk = rows_per_chunk_;
     builder->rows_per_page = rows_per_page_;
     builder->row_count = size_;
+    builder->rows_per_group = group_layout_.rows_per_group;
     builder->pages = pages_;
     builder->key = key;
     for (const auto& page : builder->pages) {
@@ -184,7 +200,31 @@ class ChunkedColumn : public ColumnBase {
   size_t size() const override { return size_; }
   size_t rows_per_chunk() const { return rows_per_chunk_; }
   size_t rows_per_page() const { return rows_per_page_; }
+  size_t rows_per_group() const override {
+    return group_layout_.rows_per_group;
+  }
+  size_t group_count() const { return group_layout_.GroupCount(size_); }
   size_t cow_bytes_copied() const { return cow_bytes_copied_; }
+
+  /// On-demand per-group dirty tally. Single pass over pages_; no write-path
+  /// counter is maintained. Each page belongs to exactly one group because
+  /// rows_per_group is a multiple of rows_per_page.
+  std::vector<GroupDirtyStats> group_dirty_stats() const {
+    std::vector<GroupDirtyStats> result(group_count());
+    for (size_t i = 0; i < pages_.size(); ++i) {
+      const size_t g = group_layout_.GroupOf(i * rows_per_page_);
+      const auto& page = pages_[i];
+      if (page.prefix && page.prefix->dirty.load(std::memory_order_relaxed)) {
+        ++result[g].dirty_pages;
+        result[g].dirty_bytes += page.prefix->bytes;
+      }
+      if (page.suffix && page.suffix->dirty.load(std::memory_order_relaxed)) {
+        ++result[g].dirty_pages;
+        result[g].dirty_bytes += page.suffix->bytes;
+      }
+    }
+    return result;
+  }
   DataTypeId type() const override { return ValueConverter<T>::type().id(); }
 
   void resize(size_t n) override {
@@ -313,7 +353,8 @@ class ChunkedColumn : public ColumnBase {
   }
 
   std::unique_ptr<Module> Clone() const override {
-    auto clone = std::make_unique<ChunkedColumn<T>>(rows_per_chunk_);
+    auto clone = std::make_unique<ChunkedColumn<T>>(
+        rows_per_chunk_, group_layout_.rows_per_group);
     clone->pages_ = pages_;
     clone->size_ = size_;
     clone->ckp_ = ckp_;
@@ -362,7 +403,7 @@ class ChunkedColumn : public ColumnBase {
     uint32_t prefix_rows;
   };
   struct Builder {
-    size_t rows_per_chunk, rows_per_page, row_count;
+    size_t rows_per_chunk, rows_per_page, row_count, rows_per_group;
     std::string key;
     std::vector<Page> pages;
     std::vector<std::pair<std::shared_ptr<Segment>, size_t>> pending;
@@ -402,6 +443,7 @@ class ChunkedColumn : public ColumnBase {
       d.rows_per_chunk = rows_per_chunk;
       d.rows_per_page = rows_per_page;
       d.row_count = row_count;
+      d.rows_per_group = rows_per_group;
       std::unordered_map<std::string, uint32_t> indices;
       auto slice_for = [&](const std::shared_ptr<Segment>& s) {
         auto [it, added] = indices.emplace(s->object_id, d.object_ids.size());
@@ -435,6 +477,11 @@ class ChunkedColumn : public ColumnBase {
         rows > std::numeric_limits<uint32_t>::max() / sizeof(T))
       THROW_CHECKPOINT_EXCEPTION("Invalid logical chunk row count");
     return rows;
+  }
+  static RowGroupLayout MakeLayout(size_t rows_per_group,
+                                   size_t rows_per_chunk) {
+    RowGroupLayout::Validate(rows_per_group, rows_per_chunk);
+    return RowGroupLayout(rows_per_group);
   }
   static size_t ComputePageRows() {
     size_t rows = 1;
@@ -511,6 +558,7 @@ class ChunkedColumn : public ColumnBase {
   size_t rows_per_chunk_, rows_per_page_;
   int page_shift_;
   size_t page_mask_;
+  RowGroupLayout group_layout_;
   size_t size_ = 0, append_begin_ = 0, cow_bytes_copied_ = 0;
   bool append_prepared_ = false;
   std::vector<Page> pages_;

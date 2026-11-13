@@ -75,6 +75,10 @@ class ColumnBase : public Module {
 
   virtual DataTypeId type() const = 0;
 
+  /// Rows per row group for chunked columns; 0 for non-chunked layouts. Table
+  /// derives a uniform row group layout from this without RTTI.
+  virtual size_t rows_per_group() const { return 0; }
+
   // insert_safe is true when the column needs to be resized to accommodate the
   // new value, which can happen when the value is not fixed length. If the
   // value is fixed length, we should already have enough space allocated, so

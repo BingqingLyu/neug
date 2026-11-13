@@ -28,6 +28,14 @@ namespace neug {
 /// the directory to retain the chunk objects it references.
 inline constexpr const char* kChunkDirPath = "chunk_dir";
 
+/// Default number of rows per row group (2^18). A row group is a cross-column
+/// logical overlay: every column aligns to the same group boundary so that
+/// group_id = vid / rows_per_group is pure arithmetic. The value is the
+/// smallest common multiple of every fixed-width column's rows_per_chunk (a
+/// 1-byte column reaches the 262144 maximum), so one group always spans a whole
+/// number of logical chunks. See specs/012-row-group-view.
+inline constexpr uint64_t kDefaultRowsPerGroup = 262144;
+
 /// CRC32C (Castagnoli) checksum of a payload, used to verify object-slice
 /// integrity on read. Software table-driven implementation; may be replaced by
 /// a hardware CRC32C intrinsic later without changing callers.
@@ -70,6 +78,9 @@ struct ChunkDirectory {
   uint64_t rows_per_chunk = 0;
   uint64_t rows_per_page = 0;
   uint64_t row_count = 0;
+  // Rows per row group; zero means the directory predates row groups (legacy).
+  // Persisted via the v1 header flags bit kFlagRowsPerGroup, not a new version.
+  uint64_t rows_per_group = 0;
   std::vector<std::string> object_ids;
   std::vector<ChunkDirectoryPage> pages;
 };

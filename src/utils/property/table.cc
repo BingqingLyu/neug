@@ -24,6 +24,7 @@
 #include "neug/utils/exception/exception.h"
 #include "neug/utils/property/chunked_column.h"
 #include "neug/utils/property/column.h"
+#include "neug/utils/property/row_group.h"
 #include "neug/utils/serialization/out_archive.h"
 
 namespace neug {
@@ -105,6 +106,39 @@ void Table::SetColumn(int idx, std::unique_ptr<ColumnBase> col) {
         " out of range (col_num=" + std::to_string(columns_.size()) + ")");
   }
   columns_[idx] = std::move(col);
+}
+
+RowGroupLayout Table::row_group_layout() const {
+  uint64_t rows_per_group = 0;
+  for (const auto& col : columns_) {
+    const size_t g = col->rows_per_group();
+    if (g == 0)
+      continue;
+    if (rows_per_group == 0) {
+      rows_per_group = g;
+    } else if (rows_per_group != g) {
+      THROW_CHECKPOINT_EXCEPTION("Inconsistent rows_per_group across columns");
+    }
+  }
+  return RowGroupLayout(rows_per_group ? rows_per_group : kDefaultRowsPerGroup);
+}
+
+size_t Table::group_count() const {
+  return row_group_layout().GroupCount(size());
+}
+
+RowGroup Table::group_at(size_t group_id) const {
+  const RowGroupLayout layout = row_group_layout();
+  if (group_id >= layout.GroupCount(size()))
+    THROW_INVALID_ARGUMENT_EXCEPTION("Row group index out of range");
+  return RowGroup{this, layout, group_id};
+}
+
+RowGroup Table::group_of(size_t vid) const {
+  const RowGroupLayout layout = row_group_layout();
+  if (vid >= size())
+    THROW_INVALID_ARGUMENT_EXCEPTION("Row id out of range");
+  return RowGroup{this, layout, layout.GroupOf(vid)};
 }
 
 bool Table::HasLegacyPropertyColumns() const {
