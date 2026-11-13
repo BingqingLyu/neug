@@ -987,3 +987,63 @@ TEST_F(VertexTableTest, RemapGroupReclaimsHolesAndPreservesData) {
   EXPECT_EQ(refilled.valid_count, 6u);
   EXPECT_DOUBLE_EQ(refilled.hole_rate, 0.0);
 }
+
+// The per-group append frontier must survive checkpoint/reopen so tail-hole
+// refill continues after a restart (it is a runtime structure; without
+// persistence a reopen would fall back to append-only allocation and skip the
+// reclaimed holes). Also guards that refill does not over-count num_elements_.
+TEST_F(VertexTableTest, FrontierSurvivesCheckpointReopen) {
+  auto ckp = make_checkpoint(Workspace());
+  neug::VertexTable table(schema_.get_vertex_schema(v_label_id_));
+  OpenVertexTableLegacy(table, ckp, neug::CheckpointManifest(), memory_level_);
+  table.EnsureCapacity(64);
+
+  for (int64_t i = 0; i < 8; ++i) {
+    neug::vid_t lid;
+    ASSERT_TRUE(table.AddVertex(neug::Value::INT64(i), property_values_, lid, 1,
+                                false));
+    ASSERT_EQ(lid, static_cast<neug::vid_t>(i));
+  }
+  for (neug::vid_t v : {1, 3, 5}) {
+    table.DeleteVertex(v, neug::MAX_TIMESTAMP);
+  }
+
+  // Compact group 0: enable + retreat the frontier, gather survivors forward.
+  auto& frontier = table.ensure_group_frontier();
+  auto mapping = neug::GenerateGroupReorderMap(table, 0, neug::MAX_TIMESTAMP);
+  const auto stats = table.group_hole_stats(0, neug::MAX_TIMESTAMP);
+  table.RemapGroup(0, mapping);
+  frontier.Retreat(0, stats.valid_count);
+  ASSERT_NE(table.group_frontier(), nullptr);
+
+  // Checkpoint, then reopen through a fresh broker.
+  neug::ModuleBroker modules;
+  neug::CheckpointManifest manifest;
+  table.DisassembleTo(modules, manifest, *ckp);
+  modules.Dump(*ckp, manifest);
+  ckp->FinalizeObjectWriter(manifest);
+
+  neug::ModuleBroker reopened_modules;
+  reopened_modules.Open(*ckp, manifest, memory_level_);
+  auto reopened =
+      neug::VertexTable::OpenFrom(ckp, schema_.get_vertex_schema(v_label_id_),
+                                  reopened_modules, manifest, memory_level_);
+
+  ASSERT_NE(reopened.group_frontier(), nullptr)
+      << "frontier lost across checkpoint/reopen";
+
+  // Refill must reuse the reclaimed tail hole (vid = valid_count = 5), not
+  // append at the old high-water (8).
+  neug::vid_t refill_vid = std::numeric_limits<neug::vid_t>::max();
+  ASSERT_TRUE(reopened.AddVertex(neug::Value::INT64(100), property_values_,
+                                 refill_vid, 2, false));
+  EXPECT_EQ(refill_vid, 5u)
+      << "refill should reuse the reclaimed tail hole after reopen";
+  // Refill reuses a vid below the high-water: num_elements_/LidNum must not
+  // over-count (stays at the vid high-water 8).
+  EXPECT_EQ(reopened.LidNum(), 8u);
+  neug::vid_t looked_up = std::numeric_limits<neug::vid_t>::max();
+  EXPECT_TRUE(reopened.get_index(neug::Value::INT64(100), looked_up, 2));
+  EXPECT_EQ(looked_up, refill_vid);
+  reopened.Close();
+}

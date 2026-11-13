@@ -350,6 +350,10 @@ class NEUG_API VertexTable {
   /// compaction keeps the pre-compaction insert path on the baseline.
   GroupFrontier& ensure_group_frontier();
   GroupFrontier* group_frontier() { return frontier_.get(); }
+  /// Restore a persisted per-group frontier on checkpoint reopen. Recreates the
+  /// frontier from the stored per-group offsets and re-points the indexer, so
+  /// tail-hole refill continues across checkpoint/reopen.
+  void RestoreGroupFrontier(const std::vector<uint32_t>& values);
 
   void SetColumn(size_t col, std::unique_ptr<ColumnBase> column);
 

@@ -109,6 +109,23 @@ class GroupFrontier {
     return frontiers_[g].load(std::memory_order_relaxed);
   }
 
+  /// Global vid where the next AllocateNext() would write: the lowest non-full
+  /// group's base + frontier. Used on checkpoint reopen to prepare the column
+  /// append area at the refill front (which a compaction may have retreated
+  /// below the vid high-water), not at the high-water itself.
+  size_t AppendBegin() const {
+    const uint32_t cap = static_cast<uint32_t>(layout_.rows_per_group);
+    const size_t count = group_count_.load(std::memory_order_relaxed);
+    for (size_t g = 0; g < count; ++g) {
+      const uint32_t f = frontiers_[g].load(std::memory_order_relaxed);
+      if (f < cap) {
+        return static_cast<size_t>(layout_.GroupBegin(g)) + f;
+      }
+    }
+    // Every group is full: the next append opens a fresh group.
+    return static_cast<size_t>(layout_.GroupBegin(count));
+  }
+
   size_t group_count() const {
     return group_count_.load(std::memory_order_relaxed);
   }

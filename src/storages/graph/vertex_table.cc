@@ -122,6 +122,12 @@ GroupFrontier& VertexTable::ensure_group_frontier() {
   return *frontier_;
 }
 
+void VertexTable::RestoreGroupFrontier(const std::vector<uint32_t>& values) {
+  frontier_ = std::make_unique<GroupFrontier>(row_group_layout());
+  frontier_->Load(values);
+  indexer_->SetGroupFrontier(frontier_.get());
+}
+
 void VertexTable::Init(std::shared_ptr<Checkpoint> ckp, MemoryLevel level) {
   CHECK(vertex_schema_ != nullptr) << "VertexTable::Init requires schema";
   CHECK(indexer_ != nullptr) << "VertexTable::Init requires indexer slot";
@@ -479,8 +485,32 @@ VertexTable VertexTable::OpenFrom(std::shared_ptr<Checkpoint> ckp,
   vt.SetTable(std::move(table));
   vt.SetVertexTimestamp(
       store.TakeModule<VertexTimestamp>(KeyVertexTimestamp(lbl)));
+  // Restore the per-group append frontier if the checkpoint recorded one (a
+  // prior compaction enabled it). Absent for never-compacted tables, which
+  // keeps the baseline global-counter allocation.
+  const auto frontier_encoded = indexer_desc->get("group_frontier");
+  if (frontier_encoded.has_value() && !frontier_encoded->empty()) {
+    std::vector<uint32_t> values;
+    const std::string& encoded = *frontier_encoded;
+    size_t pos = 0;
+    while (pos < encoded.size()) {
+      const size_t comma = encoded.find(',', pos);
+      const size_t end = (comma == std::string::npos) ? encoded.size() : comma;
+      values.push_back(
+          static_cast<uint32_t>(std::stoul(encoded.substr(pos, end - pos))));
+      pos = end + 1;
+    }
+    vt.RestoreGroupFrontier(values);
+  }
+  // Prepare the append area at the refill front when a frontier was restored
+  // (a compaction may have retreated it below the vid high-water); otherwise
+  // at the high-water. Preparing at the high-water while the frontier sits
+  // lower would reject refill inserts into the reclaimed tail holes.
+  const size_t append_begin = vt.group_frontier() != nullptr
+                                  ? vt.group_frontier()->AppendBegin()
+                                  : vt.LidNum();
   for (size_t i = 0; i < vt.get_table().col_num(); ++i)
-    vt.get_table().get_column_by_id(i)->PrepareForInsert(vt.LidNum());
+    vt.get_table().get_column_by_id(i)->PrepareForInsert(append_begin);
   return vt;
 }
 

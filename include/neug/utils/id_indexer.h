@@ -253,6 +253,20 @@ class LFIndexer {
     descriptor.set("num_slots_minus_one",
                    std::to_string(GetNumSlotsMinusOne()));
     descriptor.set("hash_policy", std::to_string(GetHashPolicyIndex()));
+    // Persist the per-group append frontier (when enabled by a compaction) so
+    // tail-hole refill survives checkpoint/reopen. Absent for a never-compacted
+    // table, which keeps older checkpoints readable (frontier stays disabled).
+    if (frontier_ != nullptr) {
+      const auto values = frontier_->Save();
+      std::string encoded;
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+          encoded += ",";
+        }
+        encoded += std::to_string(values[i]);
+      }
+      descriptor.set("group_frontier", encoded);
+    }
 
     keys_out = TakeKeys();
     indices_out = TakeIndices();
@@ -595,7 +609,15 @@ class LFIndexer {
       // the vid sequence matches the baseline; after compaction the frontier
       // retreats to refill the group's contiguous tail holes.
       ind = static_cast<INDEX_T>(frontier_->AllocateNext());
-      num_elements_.fetch_add(1, std::memory_order_acq_rel);
+      // Keep num_elements_ equal to the vid high-water mark (the baseline
+      // invariant). A refill reuses a vid below the current high-water, so it
+      // must NOT bump the counter; only an append beyond it advances it.
+      // Atomic max via CAS loop (fetch_max is not portable across stdlibs).
+      const size_t desired = static_cast<size_t>(ind) + 1;
+      size_t prev = num_elements_.load(std::memory_order_relaxed);
+      while (prev < desired && !num_elements_.compare_exchange_weak(
+                                   prev, desired, std::memory_order_acq_rel,
+                                   std::memory_order_relaxed)) {}
     } else {
       ind = static_cast<INDEX_T>(
           num_elements_.fetch_add(1, std::memory_order_acq_rel));
