@@ -1073,7 +1073,7 @@ void PropertyGraph::CompactVertexLabelGroups(label_t vertex_label,
       }
     }
     // Retreat the group's append frontier so subsequent inserts refill the
-    // contiguous tail holes in order (FR-020).
+    // contiguous tail holes in order.
     frontier.Retreat(s.group_id, s.valid_count);
   }
 }

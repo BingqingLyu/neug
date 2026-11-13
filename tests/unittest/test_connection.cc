@@ -2401,7 +2401,7 @@ TEST_F(ConnectionTest,
   }
 }
 
-// COMPACT admin command end-to-end (spec 013 FR-003/FR-025): manual COMPACT
+// COMPACT admin command end-to-end: manual COMPACT
 // reorders groups with holes regardless of the automatic threshold, keeps
 // PK lookups and both edge directions consistent, publishes through the
 // checkpoint single publisher, and survives a reopen round-trip.

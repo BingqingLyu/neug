@@ -32,8 +32,7 @@ namespace neug {
 ///
 /// The vid address space stays contiguous and uniform (base_g = g*G), while
 /// valid rows need not be globally dense: group-internal compaction gathers
-/// valid rows to the front and leaves holes at the group tail. See
-/// specs/012-row-group-view.
+/// valid rows to the front and leaves holes at the group tail.
 struct RowGroupLayout {
   uint64_t rows_per_group;
 

@@ -50,8 +50,8 @@ class IndexIDAccessor : public Module {
   virtual index_id_t UpsertVID(vid_t vid) = 0;
   virtual Status DeleteVID(vid_t vid) = 0;
 
-  /// Reorder one group's vid->index_id mapping by the reorder mapping (spec
-  /// 013). mapping[offset] = new global vid for a valid row, or
+  /// Reorder one group's vid->index_id mapping by the reorder mapping.
+  /// mapping[offset] = new global vid for a valid row, or
   /// numeric_limits<vid_t>::max() for a deleted/absent row. index_id values are
   /// unchanged (the engine blob is addressed by index_id, not vid). Must run
   /// inside the exclusive maintenance window. Default is a no-op for accessors

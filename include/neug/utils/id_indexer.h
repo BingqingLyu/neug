@@ -207,7 +207,7 @@ class LFIndexer {
 
   void SetNumElements(size_t n) { num_elements_.store(n); }
 
-  /// Enable per-group frontier vid allocation (spec 013). When set, new vids
+  /// Enable per-group frontier vid allocation. When set, new vids
   /// are allocated from the active group's append frontier instead of the
   /// global counter; when null (default) allocation is the baseline global
   /// counter path, unchanged. The frontier is owned by the VertexTable.
@@ -348,7 +348,7 @@ class LFIndexer {
   }
 
   /// Reorder one group's keys by the reorder mapping and rebuild the global
-  /// indices hash (spec 013). mapping[offset] = new global vid for a valid row,
+  /// indices hash. mapping[offset] = new global vid for a valid row,
   /// or numeric_limits<vid_t>::max() for a deleted/absent row. Keys are
   /// gathered to the front of the group; the indices hash is rebuilt from all
   /// valid vids (open addressing cannot be updated slot-by-slot without
@@ -590,7 +590,7 @@ class LFIndexer {
     }
     INDEX_T ind;
     if (frontier_ != nullptr) {
-      // Per-group frontier allocation (spec 013). In the initial dense state
+      // Per-group frontier allocation. In the initial dense state
       // the lowest non-full group's frontier equals the global counter, so
       // the vid sequence matches the baseline; after compaction the frontier
       // retreats to refill the group's contiguous tail holes.

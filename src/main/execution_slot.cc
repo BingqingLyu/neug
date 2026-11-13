@@ -159,7 +159,7 @@ Status executeCheckpoint(ExplainMode explain_mode,
   return Status::OK();
 }
 
-// Manual COMPACT (spec 013): logical row-group compaction rides the exclusive
+// Manual COMPACT: logical row-group compaction rides the exclusive
 // checkpoint maintenance window and publishes through the same single atomic
 // checkpoint publisher. The optional label scopes the compaction; manual
 // compaction ignores the automatic hole-rate threshold and batch budget.

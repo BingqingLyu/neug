@@ -47,7 +47,7 @@ class TransactionStatement : public Statement {
     return transactionAction;
   }
 
-  /// COMPACT scope: empty means every vertex label (spec 013).
+  /// COMPACT scope: empty means every vertex label.
   const std::string& getVertexLabel() const { return vertexLabel; }
 
  private:

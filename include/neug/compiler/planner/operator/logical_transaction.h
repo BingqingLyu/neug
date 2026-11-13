@@ -28,7 +28,7 @@ class LogicalTransaction : public LogicalOperator {
     return transactionAction;
   }
 
-  /// COMPACT scope: empty means every vertex label (spec 013).
+  /// COMPACT scope: empty means every vertex label.
   const std::string& getVertexLabel() const { return vertexLabel; }
 
   std::unique_ptr<LogicalOperator> copy() final {

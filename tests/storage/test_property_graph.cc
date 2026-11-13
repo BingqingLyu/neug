@@ -188,7 +188,7 @@ TEST_F(PropertyGraphTest, DeleteMissingVerticesIsNoOp) {
   EXPECT_EQ(graph_->VertexNum(person_label), 0);
 }
 
-// Orchestrator-level consistency (spec 013 M3/M4/M5): compacting a label with
+// Orchestrator-level consistency: compacting a label with
 // a self-referential edge table must keep the four structures consistent —
 // PK lookups, properties, and both CSR directions — and reclaim tail holes
 // for refill.
@@ -311,7 +311,7 @@ TEST_F(PropertyGraphTest, CompactVertexLabelGroupsRemapsSelfEdgesAndRefills) {
   EXPECT_EQ(looked_up, refill_vid);
 }
 
-// Automatic candidate selection (spec 013 FR-002/FR-005, T602): the hole-rate
+// Automatic candidate selection: the hole-rate
 // threshold gates which groups reorder; insert-only workloads (hole rate 0)
 // never trigger, and a group below the threshold keeps its original vids.
 TEST_F(PropertyGraphTest, CompactThresholdGatesCandidateSelection) {
@@ -366,7 +366,7 @@ TEST_F(PropertyGraphTest, CompactThresholdGatesCandidateSelection) {
   EXPECT_DOUBLE_EQ(after.hole_rate, 0.0);
 }
 
-// COMPACT atomic publish / crash recovery (spec 013 FR-025/FR-027, T603).
+// COMPACT atomic publish / crash recovery.
 // Logical compaction rides the checkpoint single publisher: the durable
 // decision point is staging.Publish() (the CURRENT switch). A crash after the
 // remap is dumped to staging but before Publish leaves CURRENT on the prior

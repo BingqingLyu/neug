@@ -963,7 +963,7 @@ TEST_F(VertexTableTest, RemapGroupReclaimsHolesAndPreservesData) {
   EXPECT_EQ(after.valid_count, 5u);
   EXPECT_DOUBLE_EQ(after.hole_rate, 0.0);
 
-  // Tail-hole refill (FR-020): the next insert lands at base_0 + valid_count
+  // Tail-hole refill: the next insert lands at base_0 + valid_count
   // (vid 5), reusing the reclaimed tail slot with a fresh PK binding.
   neug::vid_t refill_vid = std::numeric_limits<neug::vid_t>::max();
   std::vector<neug::Value> refill_props = {neug::Value::STRING("refill"),

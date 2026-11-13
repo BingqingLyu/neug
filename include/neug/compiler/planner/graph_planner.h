@@ -56,7 +56,7 @@ struct ExtensionAdminInfo {
 struct AdminRequest {
   AdminType type;
   std::optional<ExtensionAdminInfo> extension;
-  /// COMPACT scope (spec 013): a vertex label name, or nullopt for all
+  /// COMPACT scope: a vertex label name, or nullopt for all
   /// labels. Unused by other admin types.
   std::optional<std::string> label;
 };

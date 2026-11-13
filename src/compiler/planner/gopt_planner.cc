@@ -243,7 +243,7 @@ void analyzeQueryPrefix(std::string_view query, QueryAnalysis& analysis) {
     return;
   }
   if (isKeyword(statement, "COMPACT")) {
-    // COMPACT; or COMPACT TABLE <label>; (spec 013). The label keeps its
+    // COMPACT; or COMPACT TABLE <label>;. The label keeps its
     // written case; schema lookup validates it at execution time.
     std::optional<std::string> label;
     const auto scope = nextKeyword(query, offset);

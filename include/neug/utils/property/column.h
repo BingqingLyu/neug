@@ -79,8 +79,8 @@ class ColumnBase : public Module {
   /// derives a uniform row group layout from this without RTTI.
   virtual size_t rows_per_group() const { return 0; }
 
-  /// Gather valid rows of one group to the front by the reorder mapping (spec
-  /// 013). Default no-op for non-chunked columns; ChunkedColumn overrides.
+  /// Gather valid rows of one group to the front by the reorder mapping.
+  /// Default no-op for non-chunked columns; ChunkedColumn overrides.
   virtual void GatherGroup(size_t group_begin, size_t capacity,
                            const std::vector<vid_t>& mapping) {
     (void) group_begin;

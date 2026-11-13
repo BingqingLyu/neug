@@ -79,7 +79,7 @@ class CheckpointCoordinator {
   /// phase and must not hold an ordinary snapshot pin.
   Status PublishManualCheckpoint(UpdateTimestampLease timestamp_lease);
 
-  /// Publish a manual COMPACT (spec 013): run logical row-group compaction
+  /// Publish a manual COMPACT: run logical row-group compaction
   /// inside the exclusive maintenance window after old snapshots are
   /// reclaimed, then publish a full checkpoint through the same single
   /// atomic publisher and reopen. @p vertex_label scopes the compaction to
@@ -89,7 +89,7 @@ class CheckpointCoordinator {
   Status PublishCompaction(UpdateTimestampLease timestamp_lease,
                            std::optional<std::string> vertex_label);
 
-  /// Enable threshold-driven automatic logical compaction (spec 013 T602).
+  /// Enable threshold-driven automatic logical compaction.
   /// When enabled, every manual checkpoint window first reorders candidate
   /// groups whose hole rate reaches @p hole_rate_threshold, capped at @p
   /// max_groups per label (batch budget). The window precondition already
@@ -139,7 +139,7 @@ class CheckpointCoordinator {
   MemoryLevel memory_level_;
   PostReopenHandler post_reopen_handler_;
   WalEpochActivationHandler wal_epoch_activation_handler_;
-  // Automatic logical compaction (spec 013 T602); threshold <= 0 disables.
+  // Automatic logical compaction; threshold <= 0 disables.
   double auto_compact_threshold_ = 0.0;
   size_t auto_compact_max_groups_ = 0;
 };

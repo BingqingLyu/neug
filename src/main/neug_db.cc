@@ -207,7 +207,7 @@ bool NeugDB::Open(const NeugDBConfig& config) {
             wal_writers_->RotateActive(wal_uri);
           }
         });
-    // Threshold-driven automatic logical compaction (spec 013 T602) rides the
+    // Threshold-driven automatic logical compaction rides the
     // manual checkpoint maintenance window; insert/update-only workloads stay
     // at hole rate 0 and never trigger it.
     checkpoint_coordinator_->ConfigureAutoCompaction(

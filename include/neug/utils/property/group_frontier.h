@@ -25,7 +25,7 @@
 
 namespace neug {
 
-/// Per-group append frontier for vid allocation (spec 013, layout B).
+/// Per-group append frontier for vid allocation (layout B).
 ///
 /// vid = base_g + frontier_g. In the initial dense state frontier_g equals the
 /// group's row count, so allocation appends to the active group's tail exactly

@@ -140,7 +140,7 @@ class NEUG_API PropertyGraph {
 
   void Compact();
 
-  /// Logical compaction (spec 013): reorder the vertex groups of one label
+  /// Logical compaction: reorder the vertex groups of one label
   /// whose hole rate meets the threshold, gathering valid rows to the front of
   /// each group and remapping the four structures (property columns, indexer,
   /// timestamp, CSR neighbors). Must run inside the exclusive maintenance

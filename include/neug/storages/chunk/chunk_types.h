@@ -33,7 +33,7 @@ inline constexpr const char* kChunkDirPath = "chunk_dir";
 /// group_id = vid / rows_per_group is pure arithmetic. The value is the
 /// smallest common multiple of every fixed-width column's rows_per_chunk (a
 /// 1-byte column reaches the 262144 maximum), so one group always spans a whole
-/// number of logical chunks. See specs/012-row-group-view.
+/// number of logical chunks.
 inline constexpr uint64_t kDefaultRowsPerGroup = 262144;
 
 /// CRC32C (Castagnoli) checksum of a payload, used to verify object-slice

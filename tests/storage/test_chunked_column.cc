@@ -1731,7 +1731,7 @@ TEST(ChunkDiskDemo, PrintMultiLabelGraph) {
   std::printf("\n(demo4 files left under %s)\n", demo.c_str());
 }
 
-// ===== Row group logical view (spec 012-row-group-view) =====
+// ===== Row group logical view =====
 
 TEST(RowGroupLayoutTest, ArithmeticBoundaries) {
   RowGroupLayout layout(8);

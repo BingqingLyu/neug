@@ -90,8 +90,8 @@ class VertexSet {
 
 class PropertyGraph;
 
-/// Per-group hole statistics for logical compaction candidate selection
-/// (spec 013). hole_rate = 1 - valid_count / group_capacity.
+/// Per-group hole statistics for logical compaction candidate selection.
+/// hole_rate = 1 - valid_count / group_capacity.
 struct GroupHoleStats {
   size_t group_id;
   size_t valid_count;
@@ -328,13 +328,13 @@ class NEUG_API VertexTable {
   RowGroup group_at(size_t group_id) const;
   RowGroup group_of(vid_t vid) const;
 
-  // --- Per-group hole statistics (logical compaction, spec 013) ---
+  // --- Per-group hole statistics (logical compaction) ---
   GroupHoleStats group_hole_stats(size_t group_id,
                                   timestamp_t ts = MAX_TIMESTAMP) const;
   std::vector<GroupHoleStats> all_group_hole_stats(
       timestamp_t ts = MAX_TIMESTAMP) const;
 
-  // --- Group-internal vid reorder (logical compaction, spec 013) ---
+  // --- Group-internal vid reorder (logical compaction) ---
   /// Reorder one group's vertex-side structures by the mapping: indexer keys
   /// (gather) + indices (global rebuild), vertex timestamp segment, and every
   /// fixed-length property column (gather). CSR neighbor remap is coordinated
@@ -342,7 +342,7 @@ class NEUG_API VertexTable {
   /// maintenance window after old snapshots are reclaimed.
   void RemapGroup(size_t group_id, const std::vector<vid_t>& mapping);
 
-  // --- Per-group append frontier (logical compaction, spec 013) ---
+  // --- Per-group append frontier (logical compaction) ---
   /// Lazily enable per-group frontier vid allocation. The frontier starts in
   /// the dense state (frontier_g = rows ever allocated in group g, derived
   /// from the timestamp high-water mark), so allocation matches the baseline
@@ -383,7 +383,7 @@ class NEUG_API VertexTable {
   std::shared_ptr<const VertexSchema> vertex_schema_;
   std::unique_ptr<VertexTimestamp> v_ts_;
   MemoryLevel memory_level_;
-  // Per-group append frontier (spec 013); owned here, referenced by the
+  // Per-group append frontier; owned here, referenced by the
   // indexer. Null until the first compaction enables frontier allocation.
   std::unique_ptr<GroupFrontier> frontier_;
 

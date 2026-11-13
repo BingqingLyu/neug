@@ -60,7 +60,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   MutableCsr() : unsorted_since_(0) {}
   ~MutableCsr() = default;
 
-  /// Collect the neighbor vids of the group's vertices (spec 013). The
+  /// Collect the neighbor vids of the group's vertices. The
   /// orchestrator uses this on the opposite-direction CSR to locate the remap
   /// targets (neighbor-set approach, not a full-graph scan). Iterates the
   /// group's adjacency lists indexed by their current (pre-reindex) vids.
@@ -82,7 +82,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
   }
 
   /// Remap neighbor fields pointing into the reordered group for a given set
-  /// of vertices (spec 013). mapping[offset] = new vid, or invalid for a
+  /// of vertices. mapping[offset] = new vid, or invalid for a
   /// deleted row. Only the given vertices' adjacency lists are touched
   /// (neighbor-set approach). Runs inside the exclusive maintenance window.
   void RemapVerticesNeighbors(const std::vector<vid_t>& vertices,
@@ -112,7 +112,7 @@ class MutableCsr : public TypedCsrBase<EDATA_T> {
     }
   }
 
-  /// Reindex the group's adjacency lists by the reorder mapping (spec 013):
+  /// Reindex the group's adjacency lists by the reorder mapping:
   /// gather valid adjacency lists to the front of the group, clear the tail.
   /// Runs inside the exclusive maintenance window.
   void ReindexGroup(vid_t group_begin, size_t capacity,

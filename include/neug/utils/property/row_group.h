@@ -27,7 +27,7 @@ namespace neug {
 /// every column over that range. It owns no data: the columns stay flat in the
 /// Table and are read by global vid = begin() + offset. This is the row-level
 /// counterpart of ChunkedColumn (which splits one column); a RowGroup splits
-/// the whole row set. See specs/012-row-group-view.
+/// the whole row set.
 ///
 /// The view is read-only; writes still go through the existing column paths.
 /// The frontier()/row_count() abstraction reserves the semantics for

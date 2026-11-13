@@ -348,7 +348,7 @@ message ExtensionUninstall {
 }
 
 message Checkpoint {
-  // Logical row-group compaction (spec 013): when true the admin operation is
+  // Logical row-group compaction: when true the admin operation is
   // COMPACT rather than CHECKPOINT; vertex_label scopes it to one vertex
   // label (empty = all labels).
   bool compact = 1;

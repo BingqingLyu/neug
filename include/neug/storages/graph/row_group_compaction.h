@@ -24,7 +24,7 @@ namespace neug {
 
 class VertexTable;
 
-/// Logical compaction (spec 013): group-internal vid reorder.
+/// Logical compaction: group-internal vid reorder.
 ///
 /// Generates the old_vid -> new_vid compact mapping for one row group: valid
 /// rows are gathered to the front of the group (new_vid = base_g + compact

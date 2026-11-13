@@ -93,7 +93,7 @@ class CsrBase : public Module {
   /// adjlists have been detached.
   virtual void DetachVertex(vid_t vid, Allocator& alloc) = 0;
 
-  /// Group-internal vid reorder hooks (spec 013). Default no-op for CSR
+  /// Group-internal vid reorder hooks. Default no-op for CSR
   /// implementations without a mutable per-vertex adjacency layout;
   /// MutableCsr overrides. All run inside the exclusive maintenance window.
   virtual std::vector<vid_t> CollectGroupNeighbors(vid_t group_begin,
@@ -116,7 +116,7 @@ class CsrBase : public Module {
     (void) capacity;
     (void) mapping;
   }
-  /// Sum of adjacency degrees over the group's vertices (spec 013 candidate
+  /// Sum of adjacency degrees over the group's vertices (candidate
   /// ordering: lower degree = smaller neighbor-remap blast radius). Default
   /// 0 for CSR implementations without a mutable per-vertex layout.
   virtual size_t SumGroupDegrees(vid_t group_begin, size_t capacity) const {

@@ -226,8 +226,8 @@ class ChunkedColumn : public ColumnBase {
     return result;
   }
 
-  /// Gather valid rows of one group to the front by the reorder mapping (spec
-  /// 013). mapping[offset] = new global vid for a valid row, or
+  /// Gather valid rows of one group to the front by the reorder mapping.
+  /// mapping[offset] = new global vid for a valid row, or
   /// numeric_limits<vid_t>::max() for a deleted/absent row. Valid values are
   /// moved to [group_begin, group_begin + valid_count); tail slots are left
   /// stale (their bytes are reclaimed when the old layout is GC'd after the

@@ -190,7 +190,7 @@ class NEUG_API EdgeTable {
 
   void Compact(const std::optional<std::string>& sort_key_for_nbr);
 
-  /// Remap this edge table's CSRs for a reordered vertex group (spec 013).
+  /// Remap this edge table's CSRs for a reordered vertex group.
   /// reorder_src=true when the src label's vids are reordered (reindex out_csr,
   /// remap in_csr neighbor fields pointing into the group); false when the dst
   /// label is reordered. Uses the neighbor-set approach (locate targets via the
@@ -200,14 +200,14 @@ class NEUG_API EdgeTable {
                         const std::vector<vid_t>& mapping, bool reorder_src);
 
   /// Remap both CSR directions of a self-referential edge table (src label ==
-  /// dst label == the reordered label, spec 013). Both neighbor sets are
+  /// dst label == the reordered label). Both neighbor sets are
   /// collected and both neighbor-field remaps applied BEFORE either CSR is
   /// reindexed, so no field is remapped twice and no lookup hits a
   /// half-reindexed layout.
   void RemapSelfVertexGroup(vid_t group_begin, size_t capacity,
                             const std::vector<vid_t>& mapping);
 
-  /// Sum of the group's vertex degrees on one CSR side (spec 013 candidate
+  /// Sum of the group's vertex degrees on one CSR side (candidate
   /// ordering). src_side selects out_csr (indexed by src), else in_csr.
   size_t SumGroupDegrees(vid_t group_begin, size_t capacity,
                          bool src_side) const;

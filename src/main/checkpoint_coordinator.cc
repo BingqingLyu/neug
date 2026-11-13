@@ -50,7 +50,7 @@ void cleanup_retired_checkpoints(
   } catch (...) { LOG(WARNING) << "Checkpoint GC failed"; }
 }
 
-// Manual COMPACT scope resolution (spec 013, FR-003): threshold 0 selects
+// Manual COMPACT scope resolution: threshold 0 selects
 // every group with holes regardless of the automatic threshold, and the
 // batch budget does not apply. Runs inside the exclusive maintenance window.
 Status compactVertexLabelGroups(PropertyGraph& graph,
@@ -70,7 +70,7 @@ Status compactVertexLabelGroups(PropertyGraph& graph,
   return Status::OK();
 }
 
-// Threshold-driven automatic compaction (spec 013 T602): selects candidate
+// Threshold-driven automatic compaction: selects candidate
 // groups per label by hole rate, ordered by neighbor blast radius and capped
 // by the per-window batch budget. Insert/update-only workloads stay at hole
 // rate 0 and never trigger a reorder.
@@ -156,7 +156,7 @@ Status CheckpointCoordinator::PublishCompaction(
   }
 
   // COMPACT rides the manual checkpoint window and publishes through the
-  // same single atomic publisher (FR-025); the compaction scope is applied
+  // same single atomic publisher; the compaction scope is applied
   // inside the window before the live graph is consumed.
   Status status = execute(Reason::kManual, nullptr, &vertex_label);
   if (!status.ok()) {
@@ -299,7 +299,7 @@ Status CheckpointCoordinator::execute(
             return preflight;
           }
 
-          // Logical row-group compaction (spec 013) rides this window: it
+          // Logical row-group compaction rides this window: it
           // runs after old snapshots are reclaimed and before the physical
           // compact/dump, so the remapped state is what gets published. A
           // failure here is pre-consumption and returns an ordinary error.
